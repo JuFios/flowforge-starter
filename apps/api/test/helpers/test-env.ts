@@ -1,3 +1,5 @@
+import { DatabaseEnvironment, validateDatabaseEnv } from '../../src/config/env.validation';
+
 /** Адреса тестової БД. Окрема база, яку глобальний setup очищає й мігрує з нуля. */
 export const DEFAULT_TEST_DATABASE_URL = 'postgres://flowforge:flowforge@localhost:5432/flowforge_test';
 
@@ -9,6 +11,11 @@ export function testDatabaseUrl(): string {
     throw new Error(`TEST_DATABASE_URL має вказувати на базу з суфіксом _test, отримано "${dbName}"`);
   }
   return url;
+}
+
+/** Змінні підключення до тестової БД з тими самими значеннями за замовчуванням, що й у застосунку. */
+export function testDatabaseEnv(): DatabaseEnvironment {
+  return validateDatabaseEnv({ DATABASE_URL: testDatabaseUrl() });
 }
 
 export const TEST_ADMIN_TOKEN = 'test-admin-token-0123456789';

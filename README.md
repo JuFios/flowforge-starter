@@ -149,6 +149,8 @@ OpenAPI-документація — буде заповнено.
 | `PORT` | `3000` | порт HTTP API |
 | `METRICS_PORT` | `3200` | службовий порт API лише для `GET /metrics`; compose його не публікує; `0` — випадковий вільний порт (тести) |
 | `DATABASE_URL` | — (обов'язкова) | `postgres://user:pass@host:5432/db` |
+| `DB_CONNECT_TIMEOUT_MS` | `5000` | таймаут встановлення з'єднання з Postgres, 100..60000 мс (і для CLI міграцій) |
+| `DB_STATEMENT_TIMEOUT_MS` | `30000` | межа одного SQL-запиту (`statement_timeout`) і простою відкритої транзакції (`idle_in_transaction_session_timeout`), 100..600000 мс; на CLI міграцій не діє |
 | `ADMIN_TOKEN` | — (обов'язкова, ≥ 12 символів) | токен `POST /tenants` |
 | `LOG_LEVEL` | `info` | рівень логування pino |
 | `WORKER_CONCURRENCY` | `4` | паралельні цикли обробки в одному воркері |
@@ -191,7 +193,9 @@ npm run build && npm run migration:generate -- src/database/migrations/<Name>
   `executions (tenantId, createdAt)` під `ACCESS EXCLUSIVE` — на великих таблицях потрібне вікно
   обслуговування. `down` виконує зворотне перетворення в тому самому поясі.
 
-Команди беруть `DATABASE_URL` з оточення або з `apps/api/.env`.
+Команди беруть `DATABASE_URL` і `DB_CONNECT_TIMEOUT_MS` з оточення або з `apps/api/.env` (решта
+конфігурації застосунку CLI не потрібна). `statement_timeout` на міграції не діє: зміна схеми
+великої таблиці легітимно триває довше за запит застосунку.
 
 Для БД, створеної стартовим кодом через `synchronize`, базову міграцію не виконують повторно
 (таблиці вже є), а позначають як застосовану, після чого застосовують решту:
@@ -345,6 +349,40 @@ CI (`.github/workflows/ci.yml`):
   UTC) — глобальний побічний ефект, і він не виправляє запис у сесії з іншим поясом. У міграції —
   `AT TIME ZONE 'UTC'` (простіше, але неправильно для сервера не в UTC) або без `USING` (те саме
   перетворення в поясі сесії міграції, але неявно).
+
+### 3. Запити й підключення до Postgres не мали таймаутів
+
+- **Що.** `src/database/database.options.ts` не задавав ні таймауту з'єднання, ні
+  `statement_timeout`: `pg` за замовчуванням чекає необмежено.
+- **Чому небезпечно.** ТЗ (розд. 4) вимагає таймаутів на всі зовнішні виклики. Завислий запит
+  (блокування, важкий план) чи сервер, що прийняв TCP і не відповідає, назавжди займає з'єднання
+  пулу, HTTP-запит і слот воркера; кілька таких — і пул вичерпано, а `/ready` теж висить.
+  Транзакція, покинута посередині, тримає блокування рядків черги.
+- **Як відтворити.** `test/integration/db-timeouts.int-spec.ts`: застосунок із
+  `DB_STATEMENT_TIMEOUT_MS=300` виконує `SELECT pg_sleep(3)`; CLI міграцій з
+  `DB_CONNECT_TIMEOUT_MS=300` підключається до TCP-сервера, що мовчить. Тест сам обмежує
+  очікування 5 с, тож не зависає. До виправлення:
+
+  ```text
+  ✕ cancels a query that runs longer than DB_STATEMENT_TIMEOUT_MS (3011 ms)
+      Received has value: undefined        (запит виконався повністю, помилки немає)
+  ✕ gives up connecting to a server that never answers after DB_CONNECT_TIMEOUT_MS (5020 ms)
+      Expected: not Symbol(still pending)  (через 5 с підключення ще чекає)
+  Tests:       2 failed, 2 total
+  ```
+
+- **Як виправлено.** Валідовані змінні `DB_CONNECT_TIMEOUT_MS` (5 с) і `DB_STATEMENT_TIMEOUT_MS`
+  (30 с) у спільній схемі `DatabaseEnvironment`, яку валідують і застосунок, і CLI міграцій.
+  `buildDataSourceOptions` задає `connectTimeoutMS`, `statement_timeout`,
+  `idle_in_transaction_session_timeout` і клієнтський `query_timeout` (statement + 5 с: сервер
+  скасовує запит першим із кодом `57014`, клієнт здається сам лише без відповіді взагалі).
+  Для CLI міграцій діє тільки таймаут з'єднання. Тепер запит скасовується за ~0,3 с, а
+  підключення — за ~0,3 с.
+- **Альтернативи.** `SET statement_timeout` окремим запитом після підключення — додатковий
+  round-trip і легко забути для нового пулу; параметри старту сесії задають його атомарно.
+  `ALTER ROLE ... SET statement_timeout` на боці БД — не видно в коді й не діє на інші ролі.
+  Лише клієнтський `query_timeout` — сервер продовжував би виконувати запит і тримати блокування.
+  Окремі таймаути для захоплення задач — наступний етап (надійна черга).
 
 ### Аудит решти наявних тестів
 

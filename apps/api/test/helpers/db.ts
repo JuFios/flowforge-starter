@@ -3,11 +3,11 @@ import { DataSource } from 'typeorm';
 import { hashApiKey } from '../../src/auth/api-key.guard';
 import { buildDataSourceOptions } from '../../src/database/database.options';
 import { Tenant, Workflow } from '../../src/entities';
-import { testDatabaseUrl } from './test-env';
+import { testDatabaseEnv } from './test-env';
 
 /** Окреме підключення до тестової БД (для підготовки даних і перевірок прямим SQL). */
 export async function openTestDataSource(): Promise<DataSource> {
-  return new DataSource(buildDataSourceOptions(testDatabaseUrl())).initialize();
+  return new DataSource(buildDataSourceOptions(testDatabaseEnv())).initialize();
 }
 
 /** Очищає всі таблиці застосунку (таблиця міграцій лишається). */

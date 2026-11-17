@@ -1,4 +1,4 @@
-import { validateEnv } from '../../src/config/env.validation';
+import { validateDatabaseEnv, validateEnv } from '../../src/config/env.validation';
 
 describe('validateEnv', () => {
   const base = { DATABASE_URL: 'postgres://u:p@localhost:5432/db', ADMIN_TOKEN: 'a-long-admin-token' };
@@ -8,6 +8,8 @@ describe('validateEnv', () => {
     expect(env).toMatchObject({
       PORT: 8080,
       METRICS_PORT: 3200,
+      DB_CONNECT_TIMEOUT_MS: 5_000,
+      DB_STATEMENT_TIMEOUT_MS: 30_000,
       WORKER_CONCURRENCY: 4,
       WORKER_HTTP_PORT: 3100,
       SCHEDULER_TICK_MS: 30_000,
@@ -58,5 +60,25 @@ describe('validateEnv', () => {
     expect(validateEnv({ ...base, METRICS_PORT: '0' }).METRICS_PORT).toBe(0);
     expect(() => validateEnv({ ...base, METRICS_PORT: '-1' })).toThrow(/METRICS_PORT/);
     expect(() => validateEnv({ ...base, METRICS_PORT: '65536' })).toThrow(/METRICS_PORT/);
+  });
+
+  it('rejects database timeouts that are missing a bound or out of range', () => {
+    expect(() => validateEnv({ ...base, DB_CONNECT_TIMEOUT_MS: '0' })).toThrow(/DB_CONNECT_TIMEOUT_MS/);
+    expect(() => validateEnv({ ...base, DB_CONNECT_TIMEOUT_MS: '60001' })).toThrow(/DB_CONNECT_TIMEOUT_MS/);
+    expect(() => validateEnv({ ...base, DB_STATEMENT_TIMEOUT_MS: '0' })).toThrow(/DB_STATEMENT_TIMEOUT_MS/);
+    expect(() => validateEnv({ ...base, DB_STATEMENT_TIMEOUT_MS: '600001' })).toThrow(/DB_STATEMENT_TIMEOUT_MS/);
+  });
+});
+
+describe('validateDatabaseEnv (migration CLI)', () => {
+  it('needs only the database variables and applies the same defaults', () => {
+    expect(validateDatabaseEnv({ DATABASE_URL: 'postgres://u:p@localhost:5432/db' })).toMatchObject({
+      DB_CONNECT_TIMEOUT_MS: 5_000,
+      DB_STATEMENT_TIMEOUT_MS: 30_000,
+    });
+  });
+
+  it('rejects an invalid DATABASE_URL', () => {
+    expect(() => validateDatabaseEnv({ DATABASE_URL: 'mysql://x' })).toThrow(/DATABASE_URL/);
   });
 });

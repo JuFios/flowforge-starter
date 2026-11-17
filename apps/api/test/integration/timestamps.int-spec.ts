@@ -3,11 +3,11 @@ import { DataSource } from 'typeorm';
 import { buildDataSourceOptions } from '../../src/database/database.options';
 import { Execution, Job, StepRun, Tenant, Workflow } from '../../src/entities';
 import { openTestDataSource, truncateAll } from '../helpers/db';
-import { testDatabaseUrl } from '../helpers/test-env';
+import { testDatabaseEnv, testDatabaseUrl } from '../helpers/test-env';
 
 /** Підключення, сесія якого працює в заданому часовому поясі (як процес/сервер з іншим TimeZone). */
 async function openSessionIn(timeZone: string): Promise<DataSource> {
-  const options = buildDataSourceOptions(testDatabaseUrl());
+  const options = buildDataSourceOptions(testDatabaseEnv());
   return new DataSource({ ...options, extra: { ...(options.extra ?? {}), options: `-c TimeZone=${timeZone}` } }).initialize();
 }
 

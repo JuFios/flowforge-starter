@@ -1,7 +1,7 @@
 import 'reflect-metadata';
 import { DataSource } from 'typeorm';
 import { buildDataSourceOptions } from '../../src/database/database.options';
-import { testDatabaseUrl } from './test-env';
+import { testDatabaseEnv, testDatabaseUrl } from './test-env';
 
 async function ensureDatabaseExists(url: string): Promise<void> {
   const target = new URL(url);
@@ -24,7 +24,8 @@ async function ensureDatabaseExists(url: string): Promise<void> {
 export default async function globalSetup(): Promise<void> {
   const url = testDatabaseUrl();
   await ensureDatabaseExists(url);
-  const ds = new DataSource(buildDataSourceOptions(url));
+  // Як CLI міграцій: без statement_timeout.
+  const ds = new DataSource(buildDataSourceOptions(testDatabaseEnv(), { statementTimeout: false }));
   await ds.initialize();
   try {
     await ds.query('DROP SCHEMA IF EXISTS public CASCADE');

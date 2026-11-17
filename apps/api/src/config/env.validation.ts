@@ -9,10 +9,37 @@ export type LogLevel = (typeof LOG_LEVELS)[number];
 export const MAX_TIMER_MS = 2_147_483_647;
 
 /**
+ * Підключення до Postgres. Окремий клас, бо його валідує й CLI міграцій, якому решта
+ * конфігурації застосунку (ADMIN_TOKEN тощо) не потрібна.
+ */
+export class DatabaseEnvironment {
+  @IsString()
+  @Matches(/^postgres(ql)?:\/\/\S+$/, { message: 'DATABASE_URL має бути URL виду postgres://user:pass@host:5432/db' })
+  DATABASE_URL: string;
+
+  /** Скільки чекати встановлення з'єднання з Postgres (TCP + автентифікація). */
+  @Type(() => Number)
+  @IsInt()
+  @Min(100)
+  @Max(60_000)
+  DB_CONNECT_TIMEOUT_MS = 5_000;
+
+  /**
+   * Межа часу одного SQL-запиту (statement_timeout сесії) і простою відкритої транзакції
+   * (idle_in_transaction_session_timeout). CLI міграцій statement_timeout не застосовує.
+   */
+  @Type(() => Number)
+  @IsInt()
+  @Min(100)
+  @Max(600_000)
+  DB_STATEMENT_TIMEOUT_MS = 30_000;
+}
+
+/**
  * Схема змінних оточення. Процес не стартує, якщо конфігурація невалідна:
  * краще впасти одразу з зрозумілим повідомленням, ніж працювати з undefined.
  */
-export class EnvironmentVariables {
+export class EnvironmentVariables extends DatabaseEnvironment {
   @IsIn(['development', 'test', 'production'])
   NODE_ENV: 'development' | 'test' | 'production' = 'development';
 
@@ -31,10 +58,6 @@ export class EnvironmentVariables {
   @Min(0)
   @Max(65535)
   METRICS_PORT = 3200;
-
-  @IsString()
-  @Matches(/^postgres(ql)?:\/\/\S+$/, { message: 'DATABASE_URL має бути URL виду postgres://user:pass@host:5432/db' })
-  DATABASE_URL: string;
 
   @IsString()
   @MinLength(12)
@@ -70,7 +93,16 @@ export class EnvironmentVariables {
 }
 
 export function validateEnv(raw: Record<string, unknown>): EnvironmentVariables {
-  const env = plainToInstance(EnvironmentVariables, raw, { exposeDefaultValues: true });
+  return validateAs(EnvironmentVariables, raw);
+}
+
+/** Лише змінні підключення до БД — для CLI міграцій. */
+export function validateDatabaseEnv(raw: Record<string, unknown>): DatabaseEnvironment {
+  return validateAs(DatabaseEnvironment, raw);
+}
+
+function validateAs<T extends object>(schema: new () => T, raw: Record<string, unknown>): T {
+  const env = plainToInstance(schema, raw, { exposeDefaultValues: true });
   const errors = validateSync(env, { skipMissingProperties: false });
   if (errors.length > 0) {
     // Значення не друкуємо: у них можуть бути секрети (пароль у DATABASE_URL, ADMIN_TOKEN).
