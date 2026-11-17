@@ -117,5 +117,17 @@ describe('API observability and error handling', () => {
       expect(body).toMatchObject({ statusCode: 400, correlationId: 'bad-json-1' });
       expect(JSON.stringify(body)).not.toMatch(/at \w+ \(|node_modules/);
     });
+
+    it('return x-request-id even when the body fails to parse before the correlation middleware runs', async () => {
+      const res = await fetch(`${running.baseUrl}/workflows`, {
+        method: 'POST',
+        headers: { 'x-api-key': tenant.apiKey, 'content-type': 'application/json' },
+        body: '{bad',
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { correlationId?: string };
+      expect(body.correlationId).toMatch(/^[0-9a-f-]{36}$/);
+      expect(res.headers.get('x-request-id')).toBe(body.correlationId);
+    });
   });
 });
