@@ -1,5 +1,5 @@
 import { QueryFailedError } from 'typeorm';
-import { toSafeError } from '../../src/observability/safe-error';
+import { MAX_DB_MESSAGE_LENGTH, toSafeError } from '../../src/observability/safe-error';
 
 const SECRET = 'ff_live_9f2c1d7e-secret';
 
@@ -29,5 +29,25 @@ describe('toSafeError with database errors', () => {
   it('keeps identifiers (relation, column, constraint) that carry no input', () => {
     const message = 'null value in column "apiKeyHash" of relation "tenants" violates not-null constraint';
     expect(toSafeError(queryFailed(message, '23502')).message).toBe(message);
+  });
+
+  it('masks the value in the first line of the stack too', () => {
+    const safe = toSafeError(queryFailed(`invalid input syntax for type uuid: "${SECRET}"`, '22P02'));
+    expect(safe.stack).toMatch(/^QueryFailedError: invalid input syntax for type uuid: "\[redacted\]"\n\s+at /);
+  });
+
+  it('masks byte sequences and caps very long driver messages', () => {
+    expect(toSafeError(queryFailed('invalid byte sequence for encoding "UTF8": 0xd0 0x3c', '22021')).message).toBe(
+      'invalid byte sequence for encoding "UTF8": [redacted]',
+    );
+    const long = toSafeError(queryFailed(`could not do something with ${'x'.repeat(1000)}`, 'XX000')).message;
+    expect(long.length).toBeLessThanOrEqual(MAX_DB_MESSAGE_LENGTH + 1);
+  });
+
+  it('recognises raw driver errors by their SQLSTATE and leaves other errors as they are', () => {
+    const raw = Object.assign(new Error(`invalid input syntax for type uuid: "${SECRET}"`), { code: '22P02' });
+    expect(toSafeError(raw).message).not.toContain(SECRET);
+    const node = Object.assign(new Error('write EPIPE: "pipe"'), { code: 'EPIPE' });
+    expect(toSafeError(node).message).toBe('write EPIPE: "pipe"');
   });
 });

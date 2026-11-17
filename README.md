@@ -291,6 +291,11 @@ CI (`.github/workflows/ci.yml`):
   `{"statusCode":500,"message":"Internal server error"}`. Кожна відповідь з помилкою містить
   `correlationId` і заголовок `x-request-id`. У лог іде лише тип, повідомлення, код і стек помилки
   (без тексту SQL, параметрів запиту, деталей драйвера) разом із тим самим `correlationId`.
+  У повідомленнях помилок БД (`QueryFailedError`, помилки з кодом SQLSTATE) вхідні значення, які
+  Postgres повторює в тексті (`invalid input syntax for type uuid: "…"`, `value "…" is out of
+  range`, `at or near "…"`, байтові послідовності), замінюються на `[redacted]` — і в `message`, і
+  в першому рядку стеку; ідентифікатори (таблиця, колонка, обмеження) і SQLSTATE лишаються, а
+  повідомлення довші за 300 символів обрізаються (`src/observability/safe-error.ts`).
   `/ready` при недоступній БД віддає лише `database: down`, причина — у лог.
 
 ## Знайдені проблеми
