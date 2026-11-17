@@ -38,13 +38,15 @@ describe('ADMIN_TOKEN in production', () => {
   });
 
   it('does not echo the refused value', () => {
-    expect(() =>
-      validateEnv({ ...production, ADMIN_TOKEN: 'change-me-admin' }),
-    ).toThrow(
-      expect.objectContaining({
-        message: expect.not.stringContaining('change-me-admin'),
-      }),
-    );
+    let error: unknown;
+    try {
+      validateEnv({ ...production, ADMIN_TOKEN: 'change-me-admin' });
+    } catch (err) {
+      error = err;
+    }
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(/ADMIN_TOKEN/);
+    expect((error as Error).message).not.toContain('change-me-admin');
   });
 
   it('accepts a random token', () => {

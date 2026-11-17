@@ -1,9 +1,9 @@
 import { createServer, Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { Writable } from 'node:stream';
 import pino from 'pino';
 import pinoHttp from 'pino-http';
 import { buildPinoHttpOptions } from '../../src/observability/logger.options';
+import { jsonLineSink } from '../helpers/json-log-sink';
 
 /** Пропускає справжній HTTP-запит через pino-http з конфігурацією застосунку і читає, що потрапило в лог. */
 describe('request logging', () => {
@@ -13,13 +13,7 @@ describe('request logging', () => {
 
   beforeAll(async () => {
     lines = [];
-    const sink = new Writable({
-      write(chunk, _enc, cb) {
-        for (const line of chunk.toString().split('\n').filter(Boolean))
-          lines.push(JSON.parse(line));
-        cb();
-      },
-    });
+    const sink = jsonLineSink(lines);
     const options = buildPinoHttpOptions('info');
     const middleware = pinoHttp({ ...options, logger: pino(options, sink) });
     server = createServer((req, res) => {

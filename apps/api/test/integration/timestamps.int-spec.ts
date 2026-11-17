@@ -10,7 +10,10 @@ async function openSessionIn(timeZone: string): Promise<DataSource> {
   const options = buildDataSourceOptions(testDatabaseEnv());
   return new DataSource({
     ...options,
-    extra: { ...(options.extra ?? {}), options: `-c TimeZone=${timeZone}` },
+    extra: {
+      ...((options.extra as Record<string, unknown> | undefined) ?? {}),
+      options: `-c TimeZone=${timeZone}`,
+    },
   }).initialize();
 }
 
@@ -125,19 +128,18 @@ describe('TimestampsWithTimeZone migration', () => {
       await truncateAll(session);
 
       // Рядок у старій схемі (timestamp without time zone), записаний як у стартовому коді.
-      const [{ id, moment }] = await session.query(
-        `INSERT INTO "tenants" ("name", "apiKeyHash", "webhookSecret") VALUES ('old', 'h', 's') RETURNING "id", now() AS "moment"`,
-      );
+      const [{ id, moment }]: Array<{ id: string; moment: Date }> =
+        await session.query(
+          `INSERT INTO "tenants" ("name", "apiKeyHash", "webhookSecret") VALUES ('old', 'h', 's') RETURNING "id", now() AS "moment"`,
+        );
 
       await session.runMigrations({ transaction: 'each' });
 
-      const [{ createdAt }] = await session.query(
+      const [{ createdAt }]: Array<{ createdAt: Date }> = await session.query(
         `SELECT "createdAt" FROM "tenants" WHERE "id" = $1`,
         [id],
       );
-      expect((createdAt as Date).toISOString()).toBe(
-        (moment as Date).toISOString(),
-      );
+      expect(createdAt.toISOString()).toBe(moment.toISOString());
     } finally {
       await admin.query(`ALTER DATABASE "${dbName}" RESET timezone`);
       await truncateAll(admin);

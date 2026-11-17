@@ -64,7 +64,7 @@ describe('error responses and their log records', () => {
     expect(body).toEqual({
       statusCode: status,
       message,
-      correlationId: expect.any(String),
+      correlationId: expect.any(String) as unknown,
     });
     expect(res.headers.get('x-request-id')).toBe(body.correlationId);
     return body.correlationId;
@@ -130,7 +130,7 @@ describe('error responses and their log records', () => {
     });
     expect(record?.error).toMatchObject({
       type: 'BadRequestException',
-      message: expect.stringContaining('is not valid JSON'),
+      message: expect.stringContaining('is not valid JSON') as unknown,
     });
     expect(JSON.stringify(running.logs)).not.toContain(secret.slice(0, 6));
   });

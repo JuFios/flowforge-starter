@@ -1,11 +1,12 @@
 import { INestApplication, ModuleMetadata, Type } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { PARAMS_PROVIDER_TOKEN } from 'nestjs-pino';
+import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { Writable } from 'node:stream';
 import { AppModule } from '../../src/app.module';
 import { configureApp } from '../../src/bootstrap';
 import { buildPinoHttpOptions } from '../../src/observability/logger.options';
+import { jsonLineSink } from './json-log-sink';
 
 export interface RunningApp {
   app: INestApplication;
@@ -35,13 +36,7 @@ export async function startApp(
     imports: [rootModule, ...(extra.imports ?? [])],
   });
   if (captureLogs) {
-    const sink = new Writable({
-      write(chunk, _enc, cb) {
-        for (const line of chunk.toString().split('\n').filter(Boolean))
-          logs.push(JSON.parse(line));
-        cb();
-      },
-    });
+    const sink = jsonLineSink(logs);
     builder = builder
       .overrideProvider(PARAMS_PROVIDER_TOKEN)
       .useValue({ pinoHttp: [buildPinoHttpOptions('info'), sink] });
@@ -51,7 +46,7 @@ export async function startApp(
     moduleRef.createNestApplication({ bufferLogs: true }),
   );
   await app.listen(0, '127.0.0.1');
-  const { port } = app.getHttpServer().address() as AddressInfo;
+  const { port } = (app.getHttpServer() as Server).address() as AddressInfo;
   return {
     app,
     baseUrl: `http://127.0.0.1:${port}`,

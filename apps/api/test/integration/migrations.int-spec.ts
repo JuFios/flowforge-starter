@@ -26,7 +26,7 @@ describe('database migrations', () => {
     for (let i = 0; i < total; i++)
       await ds.undoLastMigration({ transaction: 'each' });
 
-    const [{ count }] = await ds.query(
+    const [{ count }]: Array<{ count: number }> = await ds.query(
       `SELECT count(*)::int AS count FROM information_schema.tables
         WHERE table_schema = 'public' AND table_name <> 'migrations'`,
     );

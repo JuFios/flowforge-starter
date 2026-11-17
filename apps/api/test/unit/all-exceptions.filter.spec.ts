@@ -11,10 +11,13 @@ const SECRET = 'Bearer tenant-secret-token';
 
 /** Розгортає й Error-об'єкти з усіма власними полями, щоб побачити все, що отримав логер. */
 function dump(value: unknown): string {
-  return JSON.stringify(value, (_key, v) =>
+  return JSON.stringify(value, (_key, v: unknown): unknown =>
     v instanceof Error
       ? Object.fromEntries(
-          Object.getOwnPropertyNames(v).map((k) => [k, (v as never)[k]]),
+          Object.getOwnPropertyNames(v).map((k) => [
+            k,
+            (v as unknown as Record<string, unknown>)[k],
+          ]),
         )
       : v,
   );
@@ -23,7 +26,10 @@ function dump(value: unknown): string {
 function setup(headers: Record<string, string> = {}) {
   const request = { headers };
   const response = {};
-  const adapter = { reply: jest.fn(), setHeader: jest.fn() };
+  const adapter = {
+    reply: jest.fn<void, [unknown, Record<string, unknown>, number]>(),
+    setHeader: jest.fn<void, [unknown, string, string]>(),
+  };
   const filter = new AllExceptionsFilter({
     httpAdapter: adapter,
   } as unknown as HttpAdapterHost);
@@ -57,12 +63,15 @@ function queryFailed(): QueryFailedError {
 
 describe('AllExceptionsFilter', () => {
   let logged: jest.SpyInstance;
+  let warned: jest.SpyInstance;
 
   beforeEach(() => {
     logged = jest
       .spyOn(Logger.prototype, 'error')
       .mockImplementation(() => undefined);
-    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    warned = jest
+      .spyOn(Logger.prototype, 'warn')
+      .mockImplementation(() => undefined);
   });
 
   afterEach(() => jest.restoreAllMocks());
@@ -102,7 +111,7 @@ describe('AllExceptionsFilter', () => {
     expect(body).toEqual({
       statusCode: 500,
       message: 'Internal server error',
-      correlationId: expect.any(String),
+      correlationId: expect.any(String) as unknown,
     });
     expect(adapter.setHeader).toHaveBeenCalledWith(
       response,
@@ -140,7 +149,7 @@ describe('AllExceptionsFilter', () => {
     expect(body).toEqual({
       statusCode: 413,
       message: 'Payload Too Large',
-      correlationId: expect.any(String),
+      correlationId: expect.any(String) as unknown,
     });
   });
 
@@ -158,7 +167,7 @@ describe('AllExceptionsFilter', () => {
     expect(body).toEqual({
       statusCode: 500,
       message: 'Internal server error',
-      correlationId: expect.any(String),
+      correlationId: expect.any(String) as unknown,
     });
   });
 
@@ -172,8 +181,7 @@ describe('AllExceptionsFilter', () => {
     expect(adapter.reply.mock.calls[0][1]).toMatchObject({
       correlationId: 'early-1',
     });
-    const warned = jest.mocked(Logger.prototype.warn).mock.calls[0][0];
-    expect(warned).toMatchObject({
+    expect((warned.mock.calls as unknown[][])[0][0]).toMatchObject({
       correlationId: 'early-1',
       status: 415,
       error: { type: 'Error' },
