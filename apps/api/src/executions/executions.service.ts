@@ -2,6 +2,7 @@ import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
 import { Execution, Job, StepRun, Workflow } from '../entities';
+import { getCorrelationId, newCorrelationId } from '../observability/correlation';
 
 @Injectable()
 export class ExecutionsService {
@@ -11,17 +12,18 @@ export class ExecutionsService {
     @InjectRepository(StepRun) private readonly stepRuns: Repository<StepRun>,
   ) {}
 
-  /** Створює execution і job в одній транзакції. */
+  /** Створює execution і job в одній транзакції; обидва несуть кореляційний ID поточного контексту. */
   async enqueue(
     workflow: Workflow,
     input: Record<string, unknown>,
     trigger: Execution['trigger'],
   ): Promise<Execution> {
+    const correlationId = getCorrelationId() ?? newCorrelationId();
     return this.ds.transaction(async (em) => {
       const execution = await em.save(
-        em.create(Execution, { tenantId: workflow.tenantId, workflowId: workflow.id, input, trigger }),
+        em.create(Execution, { tenantId: workflow.tenantId, workflowId: workflow.id, input, trigger, correlationId }),
       );
-      await em.save(em.create(Job, { tenantId: workflow.tenantId, executionId: execution.id }));
+      await em.save(em.create(Job, { tenantId: workflow.tenantId, executionId: execution.id, correlationId }));
       return execution;
     });
   }

@@ -1,8 +1,11 @@
 import { Injectable, Logger, OnApplicationShutdown } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'crypto';
 import { Repository } from 'typeorm';
+import { EnvironmentVariables } from '../config/env.validation';
 import { Execution, Job, StepRun, Workflow } from '../entities';
+import { newCorrelationId, runWithCorrelationId } from '../observability/correlation';
 import { JobQueueService } from './job-queue.service';
 import { StepError, StepExecutor } from './step-executor';
 import { StepContext } from './template';
@@ -21,9 +24,10 @@ export class JobRunnerService implements OnApplicationShutdown {
     @InjectRepository(Execution) private readonly executions: Repository<Execution>,
     @InjectRepository(Workflow) private readonly workflows: Repository<Workflow>,
     @InjectRepository(StepRun) private readonly stepRuns: Repository<StepRun>,
+    private readonly config: ConfigService<EnvironmentVariables, true>,
   ) {}
 
-  start(concurrency = Number(process.env.WORKER_CONCURRENCY ?? 4)): void {
+  start(concurrency = this.config.get('WORKER_CONCURRENCY', { infer: true })): void {
     this.running = true;
     this.logger.log(`${this.workerId} started, concurrency=${concurrency}`);
     for (let i = 0; i < concurrency; i++) void this.loop();
@@ -49,7 +53,13 @@ export class JobRunnerService implements OnApplicationShutdown {
     }
   }
 
-  async process(job: Job): Promise<void> {
+  /** Обробляє задачу в кореляційному контексті запиту/спрацювання, що її створило. */
+  process(job: Job): Promise<void> {
+    return runWithCorrelationId(job.correlationId ?? newCorrelationId(), 'job', () => this.processInContext(job));
+  }
+
+  private async processInContext(job: Job): Promise<void> {
+    this.logger.log({ jobId: job.id, executionId: job.executionId, attempt: job.attempts }, 'processing job');
     const execution = await this.executions.findOneOrFail({ where: { id: job.executionId } });
     const workflow = await this.workflows.findOneOrFail({ where: { id: execution.workflowId } });
 

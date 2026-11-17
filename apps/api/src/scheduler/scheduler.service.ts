@@ -1,9 +1,12 @@
 import { Injectable, Logger, OnApplicationBootstrap, OnApplicationShutdown } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { parseExpression } from 'cron-parser';
 import { Repository } from 'typeorm';
+import { EnvironmentVariables } from '../config/env.validation';
 import { Workflow } from '../entities';
 import { ExecutionsService } from '../executions/executions.service';
+import { newCorrelationId, runWithCorrelationId } from '../observability/correlation';
 
 @Injectable()
 export class SchedulerService implements OnApplicationBootstrap, OnApplicationShutdown {
@@ -14,10 +17,11 @@ export class SchedulerService implements OnApplicationBootstrap, OnApplicationSh
   constructor(
     @InjectRepository(Workflow) private readonly workflows: Repository<Workflow>,
     private readonly executions: ExecutionsService,
+    private readonly config: ConfigService<EnvironmentVariables, true>,
   ) {}
 
   onApplicationBootstrap(): void {
-    const every = Number(process.env.SCHEDULER_TICK_MS ?? 30_000);
+    const every = this.config.get('SCHEDULER_TICK_MS', { infer: true });
     this.timer = setInterval(() => void this.tick().catch((e) => this.logger.error(e.message)), every);
   }
 
@@ -37,7 +41,8 @@ export class SchedulerService implements OnApplicationBootstrap, OnApplicationSh
       try {
         const it = parseExpression(wf.cron as string, { currentDate: this.lastTick });
         for (let next = it.next().toDate(); next <= now; next = it.next().toDate()) {
-          await this.executions.enqueue(wf, {}, 'cron');
+          // Кожне спрацювання — окремий ланцюжок, тож і власний кореляційний ID.
+          await runWithCorrelationId(newCorrelationId(), 'cron', () => this.executions.enqueue(wf, {}, 'cron'));
           fired++;
         }
       } catch (err) {

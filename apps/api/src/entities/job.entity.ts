@@ -35,6 +35,10 @@ export class Job {
   @Column({ type: 'text', nullable: true })
   lastError: string | null;
 
+  /** Кореляційний ID запиту/спрацювання, що породило запис (x-request-id). */
+  @Column({ type: 'varchar', length: 128, nullable: true })
+  correlationId: string | null;
+
   @CreateDateColumn()
   createdAt: Date;
 }

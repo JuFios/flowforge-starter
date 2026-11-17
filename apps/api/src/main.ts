@@ -1,14 +1,14 @@
-import { ValidationPipe } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { NestFactory } from '@nestjs/core';
+import { Logger } from 'nestjs-pino';
 import { AppModule } from './app.module';
+import { configureApp } from './bootstrap';
+import { EnvironmentVariables } from './config/env.validation';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
-  app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
-  app.enableShutdownHooks();
-  const port = Number(process.env.PORT ?? 3000);
+  const app = configureApp(await NestFactory.create(AppModule, { bufferLogs: true }));
+  const port = app.get(ConfigService<EnvironmentVariables, true>).get('PORT', { infer: true });
   await app.listen(port);
-  // eslint-disable-next-line no-console
-  console.log(`flowforge-api listening on ${port}`);
+  app.get(Logger).log(`flowforge-api listening on ${port}`);
 }
 bootstrap();
