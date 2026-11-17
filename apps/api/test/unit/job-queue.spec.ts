@@ -1,14 +1,63 @@
 import { backoffMs } from '../../src/engine/job-queue.service';
 
+interface BackoffOptions {
+  baseMs: number;
+  maxMs: number;
+  random: () => number;
+}
+// Сигнатура з налаштуваннями й джерелом випадковості (для детермінованої перевірки jitter).
+const backoff = backoffMs as unknown as (
+  attempt: number,
+  options: BackoffOptions,
+) => number;
+
 describe('backoffMs', () => {
-  it('grows exponentially with the attempt number', () => {
-    expect(backoffMs(1)).toBe(2000);
-    expect(backoffMs(2)).toBe(4000);
-    expect(backoffMs(3)).toBe(8000);
+  const opts = (random: () => number): BackoffOptions => ({
+    baseMs: 1_000,
+    maxMs: 60_000,
+    random,
   });
 
-  it.todo(
-    'claims each job exactly once when several workers poll concurrently',
-  );
-  it.todo('re-queues a job whose worker died while holding the lease');
+  it('spreads retries of the same attempt instead of firing them at the same moment', () => {
+    const low = backoff(
+      3,
+      opts(() => 0),
+    );
+    const high = backoff(
+      3,
+      opts(() => 0.999),
+    );
+    expect(low).not.toBe(high);
+  });
+
+  it('stays within base..base·2^attempt for every random value', () => {
+    for (const r of [0, 0.25, 0.5, 0.75, 0.999]) {
+      const delay = backoff(
+        3,
+        opts(() => r),
+      );
+      expect(delay).toBeGreaterThanOrEqual(1_000);
+      expect(delay).toBeLessThanOrEqual(8_000);
+    }
+  });
+
+  it('grows the upper bound exponentially with the attempt number', () => {
+    const top = (attempt: number) =>
+      backoff(
+        attempt,
+        opts(() => 0.999),
+      );
+    expect(top(2)).toBeLessThan(top(3));
+    expect(top(3)).toBeLessThan(top(4));
+  });
+
+  it('never exceeds the cap, even after many attempts', () => {
+    for (const attempt of [10, 40, 1_100])
+      expect(
+        backoff(
+          attempt,
+          opts(() => 0.999),
+        ),
+      ).toBeLessThanOrEqual(60_000);
+  });
 });
