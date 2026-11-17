@@ -29,8 +29,11 @@ export class JobQueueService {
         WHERE id = $3`,
       [workerId, LEASE_SECONDS, id],
     );
-    const [job] = await this.ds.query(`SELECT * FROM jobs WHERE id = $1`, [id]);
-    return job as Job;
+    const [job]: Job[] = await this.ds.query(
+      `SELECT * FROM jobs WHERE id = $1`,
+      [id],
+    );
+    return job;
   }
 
   async complete(jobId: string): Promise<void> {

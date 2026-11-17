@@ -57,7 +57,7 @@ export class StepExecutor {
       throw new StepError(`http ${res.status}`, res.status >= 500);
     }
     try {
-      return { status: res.status, body: JSON.parse(text) };
+      return { status: res.status, body: JSON.parse(text) as unknown };
     } catch {
       return { status: res.status, body: text.slice(0, 10_000) };
     }
