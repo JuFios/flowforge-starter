@@ -15,6 +15,7 @@
     "migration:run": "typeorm migration:run -d dist/database/data-source.js",
     "migration:revert": "typeorm migration:revert -d dist/database/data-source.js",
     "migration:show": "typeorm migration:show -d dist/database/data-source.js",
+    "pretest:integration": "nest build",
     "test:integration": "jest -c test/jest-integration.json",
     "test:all": "npm run test && npm run test:integration",
     "format": "prettier --write .",
