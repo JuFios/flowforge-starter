@@ -80,6 +80,13 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+      # Як у README «Запуск»: адмін-токен — випадковий, у .env поруч із docker-compose.yml.
+      - name: Generate the admin token
+        run: |
+          token="$(openssl rand -hex 24)"
+          echo "::add-mask::$token"
+          printf 'ADMIN_TOKEN=%s\n' "$token" > .env
+          echo "ADMIN_TOKEN=$token" >> "$GITHUB_ENV"
       - run: docker compose build
       # --wait: compose чекає, поки migrate завершиться з кодом 0, а api, обидва воркери й
       # фронтенд стануть healthy; не дочекався за --wait-timeout або сервіс впав — помилка.
@@ -100,7 +107,7 @@ jobs:
           done
       - name: Run a workflow end to end through a worker
         run: |
-          tenant="$(curl -fsS --max-time 10 -X POST localhost:3000/tenants -H 'x-admin-token: change-me-admin' \
+          tenant="$(curl -fsS --max-time 10 -X POST localhost:3000/tenants -H "x-admin-token: $ADMIN_TOKEN" \
             -H 'content-type: application/json' -d '{"name":"ci"}')"
           key="$(printf '%s' "$tenant" | jq -er .apiKey)"
           wf="$(curl -fsS --max-time 10 -X POST localhost:3000/workflows -H "x-api-key: $key" -H 'content-type: application/json' \

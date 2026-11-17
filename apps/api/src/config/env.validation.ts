@@ -1,12 +1,54 @@
 import 'reflect-metadata';
 import { plainToInstance, Type } from 'class-transformer';
-import { IsIn, IsInt, IsString, Matches, Max, Min, MinLength, validateSync } from 'class-validator';
+import {
+  IsIn,
+  IsInt,
+  IsString,
+  Matches,
+  Max,
+  Min,
+  MinLength,
+  registerDecorator,
+  ValidationArguments,
+  validateSync,
+} from 'class-validator';
 
 export const LOG_LEVELS = ['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent'] as const;
 export type LogLevel = (typeof LOG_LEVELS)[number];
 
 /** Найбільша затримка, яку приймають setTimeout/setInterval (2^31 - 1 мс). */
 export const MAX_TIMER_MS = 2_147_483_647;
+
+/** Значення-приклади й очевидні заглушки: публічно відомі, тож не є секретом. */
+const PLACEHOLDER_SECRET = /change[\s_-]*me|example|placeholder|default|password|secret|qwerty|12345/i;
+/** Менше різних символів — «aaaa…», «1212…» тощо. */
+const MIN_DISTINCT_CHARS = 8;
+
+export function isObviouslyInsecureSecret(value: string): boolean {
+  return PLACEHOLDER_SECRET.test(value) || new Set(value).size < MIN_DISTINCT_CHARS;
+}
+
+/**
+ * У production секрет не може бути прикладом із .env.example чи очевидною заглушкою.
+ * У development/test приклад дозволений, щоб локальний запуск працював «з коробки».
+ */
+function IsSecureSecretInProduction(): PropertyDecorator {
+  return (target, propertyName) =>
+    registerDecorator({
+      name: 'isSecureSecretInProduction',
+      target: target.constructor,
+      propertyName: propertyName as string,
+      validator: {
+        validate(value: unknown, args: ValidationArguments) {
+          const env = (args.object as { NODE_ENV?: string }).NODE_ENV;
+          return env !== 'production' || (typeof value === 'string' && !isObviouslyInsecureSecret(value));
+        },
+        defaultMessage: () =>
+          'у NODE_ENV=production значення з прикладу або очевидна заглушка заборонені; ' +
+          'згенеруйте випадкове, напр. `openssl rand -hex 24`',
+      },
+    });
+}
 
 /**
  * Підключення до Postgres. Окремий клас, бо його валідує й CLI міграцій, якому решта
@@ -61,6 +103,7 @@ export class EnvironmentVariables extends DatabaseEnvironment {
 
   @IsString()
   @MinLength(12)
+  @IsSecureSecretInProduction()
   ADMIN_TOKEN: string;
 
   @IsIn(LOG_LEVELS)

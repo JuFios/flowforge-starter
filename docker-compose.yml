@@ -1,6 +1,11 @@
 x-api-image: &api-image
   build: ./apps/api
   env_file: ./apps/api/.env.example
+  # Поверх прикладу: compose — це production-збірка, а адмін-токен задає користувач
+  # (файл .env у корені, див. README «Запуск»); без нього compose не стартує.
+  environment:
+    NODE_ENV: production
+    ADMIN_TOKEN: ${ADMIN_TOKEN:?задайте ADMIN_TOKEN у .env у корені репозиторію (див. README, розділ «Запуск»)}
 
 services:
   postgres:

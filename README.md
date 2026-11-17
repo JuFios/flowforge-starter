@@ -35,8 +35,15 @@
 ## Запуск
 
 ```bash
+# один раз: випадковий адмін-токен у .env поруч із docker-compose.yml (файл у .gitignore)
+printf 'ADMIN_TOKEN=%s\n' "$(openssl rand -hex 24)" > .env
 docker-compose up --build
 ```
+
+Compose запускає API й воркери з `NODE_ENV=production` і бере `ADMIN_TOKEN` лише з `.env` у корені
+(або зі змінної оточення); без нього compose завершується з підказкою, а приклад
+`change-me-admin` чи очевидна заглушка зупиняють API помилкою валідації (див. «Конфігурація»).
+Шаблон — `.env.example` у корені.
 
 Порядок старту: `postgres` (healthy) → `migrate` (застосовує міграції й завершується з кодом 0)
 → `api` і два `worker` (healthy за `/ready`) → `frontend` (healthy, коли відповідає сторінка).
@@ -85,10 +92,12 @@ npm run dev -- -p 3001
 
 ### Приклади запитів
 
-Створити тенанта (токен — `ADMIN_TOKEN` з `apps/api/.env.example`):
+Створити тенанта (з кореня репозиторію; токен — `ADMIN_TOKEN` із `.env`; при локальному
+запуску поза docker — з `apps/api/.env`, тобто `change-me-admin`):
 
 ```bash
-curl -X POST localhost:3000/tenants -H 'x-admin-token: change-me-admin' \
+ADMIN_TOKEN="$(sed -n 's/^ADMIN_TOKEN=//p' .env)"
+curl -X POST localhost:3000/tenants -H "x-admin-token: $ADMIN_TOKEN" \
   -H 'content-type: application/json' -d '{"name":"acme"}'
 ```
 
@@ -151,12 +160,24 @@ OpenAPI-документація — буде заповнено.
 | `DATABASE_URL` | — (обов'язкова) | `postgres://user:pass@host:5432/db` |
 | `DB_CONNECT_TIMEOUT_MS` | `5000` | таймаут встановлення з'єднання з Postgres, 100..60000 мс (і для CLI міграцій) |
 | `DB_STATEMENT_TIMEOUT_MS` | `30000` | межа одного SQL-запиту (`statement_timeout`) і простою відкритої транзакції (`idle_in_transaction_session_timeout`), 100..600000 мс; на CLI міграцій не діє |
-| `ADMIN_TOKEN` | — (обов'язкова, ≥ 12 символів) | токен `POST /tenants` |
+| `ADMIN_TOKEN` | — (обов'язкова, ≥ 12 символів) | токен `POST /tenants`; у `NODE_ENV=production` приклад і очевидні заглушки заборонені (див. нижче) |
 | `LOG_LEVEL` | `info` | рівень логування pino |
 | `WORKER_CONCURRENCY` | `4` | паралельні цикли обробки в одному воркері |
 | `WORKER_HTTP_PORT` | `3100` | службовий HTTP воркера |
 | `SCHEDULER_TICK_MS` | `30000` | період тіку планувальника, 100..2147483647 мс — **тимчасова межа** (лише ліміт таймерів Node, див. «Що не встигли») |
 | `TEST_DATABASE_URL` | `postgres://flowforge:flowforge@localhost:5432/flowforge_test` | лише для інтеграційних тестів |
+
+**Адмін-токен і `NODE_ENV`.** `apps/api/.env.example` — приклад для локальної розробки
+(`NODE_ENV=development`, `ADMIN_TOKEN=change-me-admin`). У `NODE_ENV=production` валідація
+відхиляє `ADMIN_TOKEN`, що містить `change-me`/`changeme`, `example`, `placeholder`, `default`,
+`password`, `secret`, `qwerty`, `12345` або має менше 8 різних символів; саме значення в помилці не
+друкується. docker-compose бере `apps/api/.env.example` як основу, але задає `NODE_ENV=production`
+і `ADMIN_TOKEN` із кореневого `.env`. Варіанти, що розглядались: окремий `NODE_ENV` для compose
+(приклад-токен працював би й далі в образі, який виглядає як production) і прибрати токен із
+прикладу зовсім (локальний запуск поза docker перестав би працювати «з коробки»). Обрано
+кореневий `.env`, якого немає в git: стандартний для compose механізм, секрет задає лише
+користувач, а production-образ не стартує з публічно відомим значенням. Обмеження: перевірка
+відсікає приклади й очевидні заглушки, але не оцінює ентропію довільного значення.
 
 `apps/frontend/.env.example`: `API_URL` — адреса API для сервера Next.js
 (`http://api:3000` у compose, `http://localhost:3000` локально).
@@ -383,6 +404,34 @@ CI (`.github/workflows/ci.yml`):
   `ALTER ROLE ... SET statement_timeout` на боці БД — не видно в коді й не діє на інші ролі.
   Лише клієнтський `query_timeout` — сервер продовжував би виконувати запит і тримати блокування.
   Окремі таймаути для захоплення задач — наступний етап (надійна черга).
+
+### 4. Compose запускав систему з публічно відомим адмін-токеном
+
+- **Що.** docker-compose брав `apps/api/.env.example` як є, тобто з `NODE_ENV=production` і
+  `ADMIN_TOKEN=change-me-admin`, а валідація перевіряла лише довжину токена.
+- **Чому небезпечно.** `POST /tenants` (створення тенанта з API-ключем) доступний кожному, хто
+  прочитав README; порт API опублікований. Ніщо не змушувало змінити значення перед запуском.
+- **Як відтворити.** `test/unit/admin-token.spec.ts`: `validateEnv` з `NODE_ENV=production` і
+  значенням із `apps/api/.env.example` (а також `CHANGEME-please-123`, `password1234567`,
+  `aaaaaaaaaaaaaaaa` тощо) має падати. До виправлення:
+
+  ```text
+  ✕ refuses the value from apps/api/.env.example
+  ✕ refuses an obviously insecure value (change-me-admin)
+  ✕ refuses an obviously insecure value (CHANGEME-please-123)
+  …
+  ✕ does not echo the refused value
+  ✓ accepts a random token
+  Tests:       9 failed, 1 passed, 10 total
+  ```
+
+- **Як виправлено.** Валідатор `ADMIN_TOKEN` для `NODE_ENV=production` (приклади й очевидні
+  заглушки заборонені, значення не друкується). Compose задає `NODE_ENV=production` і
+  `ADMIN_TOKEN` із кореневого `.env`, без якого не стартує; `apps/api/.env.example` став прикладом
+  для розробки (`NODE_ENV=development`). CI генерує токен так само, як README. Перевірено, що
+  compose з `ADMIN_TOKEN=change-me-admin` у `.env` не піднімає API.
+- **Альтернативи.** Див. «Конфігурація» → «Адмін-токен і `NODE_ENV`»; ще варіант — генерувати
+  токен при першому старті й друкувати в лог: секрет потрапив би в логи.
 
 ### Аудит решти наявних тестів
 
