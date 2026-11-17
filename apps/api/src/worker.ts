@@ -17,4 +17,9 @@ async function bootstrap() {
   app.get(Logger).log(`flowforge-worker service endpoints on ${port}`);
   app.get(JobRunnerService).start();
 }
-bootstrap();
+// Помилка старту (невалідна конфігурація, недоступна БД) має завершувати процес з ненульовим
+// кодом явно, а не через необроблене відхилення промісу.
+bootstrap().catch((err: unknown) => {
+  console.error('flowforge-worker failed to start', err);
+  process.exit(1);
+});

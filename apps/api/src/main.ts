@@ -15,4 +15,9 @@ async function bootstrap() {
   await app.listen(port);
   app.get(Logger).log(`flowforge-api listening on ${port}`);
 }
-bootstrap();
+// Помилка старту (невалідна конфігурація, недоступна БД) має завершувати процес з ненульовим
+// кодом явно, а не через необроблене відхилення промісу.
+bootstrap().catch((err: unknown) => {
+  console.error('flowforge-api failed to start', err);
+  process.exit(1);
+});
