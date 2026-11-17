@@ -1,12 +1,14 @@
 {
   "parser": "@typescript-eslint/parser",
   "parserOptions": {
-    "sourceType": "module"
+    "sourceType": "module",
+    "project": "./tsconfig.json",
+    "tsconfigRootDir": "."
   },
   "plugins": ["@typescript-eslint"],
   "extends": [
     "eslint:recommended",
-    "plugin:@typescript-eslint/recommended",
+    "plugin:@typescript-eslint/recommended-type-checked",
     "prettier"
   ],
   "root": true,
@@ -21,5 +23,6 @@
         "argsIgnorePattern": "^_"
       }
     ]
-  }
+  },
+  "ignorePatterns": ["dist", "node_modules", ".eslintrc.json"]
 }

@@ -7,7 +7,7 @@
     "start": "node dist/main",
     "start:worker": "node dist/worker",
     "start:dev": "nest start --watch",
-    "lint": "eslint \"{src,test}/**/*.ts\"",
+    "lint": "eslint \"{src,test}/**/*.ts\" --max-warnings 0",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "jest -c test/jest-unit.json",
     "migration:generate": "typeorm migration:generate -d dist/database/data-source.js",
