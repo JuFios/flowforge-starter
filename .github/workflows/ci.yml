@@ -108,6 +108,23 @@ jobs:
             done
             [ "$state" = "running/healthy" ] || { echo "worker $c is $state"; exit 1; }
           done
+      - name: Run a workflow end to end through a worker
+        run: |
+          tenant="$(curl -fsS -X POST localhost:3000/tenants -H 'x-admin-token: change-me-admin' \
+            -H 'content-type: application/json' -d '{"name":"ci"}')"
+          key="$(printf '%s' "$tenant" | jq -er .apiKey)"
+          wf="$(curl -fsS -X POST localhost:3000/workflows -H "x-api-key: $key" -H 'content-type: application/json' \
+            -d '{"name":"smoke","steps":[{"id":"hello","type":"log","message":"hi {{ input.name }}"}]}' | jq -er .id)"
+          exe="$(curl -fsS -X POST "localhost:3000/workflows/$wf/run" -H "x-api-key: $key" -H 'x-request-id: ci-smoke-1' \
+            -H 'content-type: application/json' -d '{"name":"ci"}' | jq -er .id)"
+          status=
+          for i in $(seq 1 30); do
+            status="$(curl -fsS "localhost:3000/executions/$exe" -H "x-api-key: $key" | jq -er .status)"
+            [ "$status" = succeeded ] && break
+            sleep 2
+          done
+          [ "$status" = succeeded ] || { echo "execution $exe is '$status'"; exit 1; }
+          curl -fsS "localhost:3000/executions/$exe" -H "x-api-key: $key" | jq -e '.correlationId == "ci-smoke-1"'
       - name: Logs on failure
         if: failure()
         run: docker compose logs --no-color
