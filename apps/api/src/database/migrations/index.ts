@@ -5,6 +5,7 @@ import { QueueLease1794949287178 } from './1794949287178-QueueLease';
 import { StepCheckpoints1794949553919 } from './1794949553919-StepCheckpoints';
 import { WorkflowVersions1794949818904 } from './1794949818904-WorkflowVersions';
 import { DurableTimers1794950256356 } from './1794950256356-DurableTimers';
+import { StepIdempotencyKey1794950965096 } from './1794950965096-StepIdempotencyKey';
 
 /**
  * Явний перелік міграцій у порядку застосування. Без glob-шаблонів, щоб однаково
@@ -19,4 +20,5 @@ export const MIGRATIONS = [
   StepCheckpoints1794949553919,
   WorkflowVersions1794949818904,
   DurableTimers1794950256356,
+  StepIdempotencyKey1794950965096,
 ];

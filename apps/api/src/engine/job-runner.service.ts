@@ -291,7 +291,10 @@ export class JobRunnerService implements BeforeApplicationShutdown {
           continue;
         }
         current = await this.checkpoints.startStep(job, i, step.id);
-        const output = await this.executor.execute(step, ctx, signal);
+        const output = await this.executor.execute(step, ctx, {
+          signal,
+          idempotencyKey: current.idempotencyKey,
+        });
         await this.checkpoints.checkpoint(job, current, output);
         current = undefined;
         ctx.steps[step.id] = output;

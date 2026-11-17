@@ -19,6 +19,13 @@ export class StepError extends Error {
   }
 }
 
+export interface StepRunOptions {
+  /** Скасування кроку (втрата lease, завершення воркера). */
+  signal?: AbortSignal;
+  /** Стабільний ключ ідемпотентності кроку (для `http` — заголовок `Idempotency-Key`). */
+  idempotencyKey?: string;
+}
+
 @Injectable()
 export class StepExecutor {
   private readonly logger = new Logger(StepExecutor.name);
@@ -26,7 +33,7 @@ export class StepExecutor {
   async execute(
     step: StepDefinition,
     ctx: StepContext,
-    signal?: AbortSignal,
+    { signal, idempotencyKey }: StepRunOptions = {},
   ): Promise<unknown> {
     switch (step.type) {
       case 'log':
@@ -41,7 +48,7 @@ export class StepExecutor {
       case 'transform':
         return this.transform(step.expr, ctx);
       case 'http':
-        return this.http(step, ctx, signal);
+        return this.http(step, ctx, signal, idempotencyKey);
     }
   }
 
@@ -59,11 +66,15 @@ export class StepExecutor {
     step: Extract<StepDefinition, { type: 'http' }>,
     ctx: StepContext,
     signal?: AbortSignal,
+    idempotencyKey?: string,
   ): Promise<unknown> {
     const url = renderTemplate(step.url, ctx);
     const res = await fetch(url, {
       method: step.method ?? 'GET',
-      headers: step.headers,
+      // Ключ однаковий для всіх спроб кроку: отримувач, що його враховує, виконає ефект один раз.
+      headers: idempotencyKey
+        ? { ...step.headers, 'Idempotency-Key': idempotencyKey }
+        : step.headers,
       body:
         step.body !== undefined ? renderTemplate(step.body, ctx) : undefined,
       signal: signal

@@ -156,4 +156,46 @@ describe('durable execution', () => {
     ).toBe('succeeded');
     expect(receiver.hits('/kept')).toHaveLength(1);
   });
+
+  it('sends one stable Idempotency-Key for all attempts of a step, unique per step and execution', async () => {
+    let payCalls = 0;
+    receiver.respond = (req, res) => {
+      if (req.path === '/pay' && ++payCalls <= 2) {
+        res.writeHead(503).end();
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{}');
+    };
+    const wf = await createWorkflow([
+      { id: 'pay', type: 'http', method: 'POST', url: receiver.url('/pay') },
+      {
+        id: 'notify',
+        type: 'http',
+        method: 'POST',
+        url: receiver.url('/notify'),
+      },
+    ]);
+    const first = await run(wf);
+    worker = await startWorker(1);
+    await finished(first);
+    const second = await run(wf);
+    await finished(second);
+
+    const keys = (path: string) =>
+      receiver.hits(path).map((r) => r.headers['idempotency-key']);
+    const pay = keys('/pay');
+    const notify = keys('/notify');
+    // 3 спроби першого виконання (дві 503 і успіх) + 1 спроба другого.
+    expect(pay).toHaveLength(4);
+    expect(new Set(pay.slice(0, 3)).size).toBe(1);
+    expect(pay[3]).not.toBe(pay[0]);
+    expect(notify).toHaveLength(2);
+    expect(new Set([pay[0], pay[3], ...notify]).size).toBe(4);
+
+    const stored = await ds
+      .getRepository(StepRun)
+      .findOneByOrFail({ executionId: first, stepId: 'pay' });
+    expect(stored).toMatchObject({ idempotencyKey: pay[0], attempts: 3 });
+  });
 });

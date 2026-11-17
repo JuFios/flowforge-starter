@@ -2,6 +2,7 @@ import {
   Column,
   CreateDateColumn,
   Entity,
+  Generated,
   Index,
   PrimaryGeneratedColumn,
 } from 'typeorm';
@@ -17,6 +18,8 @@ export type StepRunStatus = 'running' | 'succeeded' | 'failed';
 @Index('UQ_step_runs_execution_step', ['executionId', 'stepIndex'], {
   unique: true,
 })
+// Пошук кроку за ключем ідемпотентності (напр., коли отримувач питає про запит за ключем).
+@Index('UQ_step_runs_idempotency_key', ['idempotencyKey'], { unique: true })
 export class StepRun {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -32,6 +35,15 @@ export class StepRun {
 
   @Column({ type: 'varchar', default: 'running' })
   status: StepRunStatus;
+
+  /**
+   * Ключ ідемпотентності кроку: створюється разом із рядком при першій спробі й однаковий для
+   * всіх наступних (повтор після помилки, після падіння воркера). Крок `http` передає його
+   * отримувачу в заголовку `Idempotency-Key`.
+   */
+  @Column('uuid')
+  @Generated('uuid')
+  idempotencyKey: string;
 
   /** Скільки разів крок починали (повтори після помилки, падіння воркера). */
   @Column({ type: 'int', default: 1 })
