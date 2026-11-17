@@ -235,6 +235,15 @@ npm run build && npm run migration:generate -- src/database/migrations/<Name>
   змінювався відтоді, як рядки записано. `ALTER TYPE` переписує таблиці й перебудовує індекс
   `executions (tenantId, createdAt)` під `ACCESS EXCLUSIVE` — на великих таблицях потрібне вікно
   обслуговування. `down` виконує зворотне перетворення в тому самому поясі.
+- `QueueLease` — fencing-токен `jobs.lockToken`; часткові індекси `IDX_jobs_claim` і
+  `IDX_jobs_lease` замість `(status, "runAt")` (проблеми 6–7).
+- `StepCheckpoints` — `step_runs.attempts`, `finishedAt`, унікальний `(executionId, stepIndex)`;
+  дублікати спроб стартового коду згортаються до одного рядка на крок (проблема 8).
+- `WorkflowVersions` — таблиця `workflow_versions`, `executions.workflowVersionId` (FK, `CHECK`);
+  версії для наявних workflow, прив'язка наявних виконань, незавершені виконання видалених
+  workflow завершуються як `failed` (проблема 9).
+- `DurableTimers` — `step_runs.wakeAt` (проблема 10).
+- `StepIdempotencyKey` — `step_runs.idempotencyKey` (унікальний; наявні рядки отримують власний UUID).
 
 Команди беруть `DATABASE_URL` і `DB_CONNECT_TIMEOUT_MS` з оточення або з `apps/api/.env` (решта
 конфігурації застосунку CLI не потрібна). `statement_timeout` на міграції не діє: зміна схеми
@@ -259,9 +268,10 @@ docker-compose up --build
 до `npm run build` включно (залежності встановлено, `DATABASE_URL` у `apps/api/.env` вказує на
 `localhost`): ті самі `psql`-команди, потім `npm run migration:run` з `apps/api`.
 
-Перевірено на БД, створеній стартовим кодом: після цього застосовуються лише `AddCorrelationId` і
-`TimestampsWithTimeZone`, а `migration:generate --check` не знаходить розбіжностей між схемою і
-сутностями.
+Перевірено на БД, створеній стартовим кодом (і з даними в його форматі: дублікати `step_runs`,
+задачі в черзі, виконання вже видаленого workflow): після цього застосовуються решта міграцій, від
+`AddCorrelationId` до `StepIdempotencyKey`, а `migration:generate --check` не знаходить розбіжностей
+між схемою і сутностями.
 
 ## Тести
 
