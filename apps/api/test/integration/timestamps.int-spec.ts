@@ -75,3 +75,34 @@ describe('timestamps are absolute moments, independent of the session time zone'
     }
   });
 });
+
+describe('TimestampsWithTimeZone migration', () => {
+  it('keeps the moment of rows written before it, also when the server time zone is not UTC', async () => {
+    const admin = await openTestDataSource();
+    const dbName = new URL(testDatabaseUrl()).pathname.slice(1);
+    // Новий сеанс успадковує пояс бази — як сервер, налаштований не в UTC.
+    await admin.query(`ALTER DATABASE "${dbName}" SET timezone TO 'Pacific/Kiritimati'`);
+    const session = await openTestDataSource();
+    try {
+      const ours = session.migrations.findIndex((m) => m.name === 'TimestampsWithTimeZone1794920300000');
+      expect(ours).toBeGreaterThanOrEqual(0);
+      const newer = session.migrations.length - ours;
+      for (let i = 0; i < newer; i++) await session.undoLastMigration({ transaction: 'each' });
+      await truncateAll(session);
+
+      // Рядок у старій схемі (timestamp without time zone), записаний як у стартовому коді.
+      const [{ id, moment }] = await session.query(
+        `INSERT INTO "tenants" ("name", "apiKeyHash", "webhookSecret") VALUES ('old', 'h', 's') RETURNING "id", now() AS "moment"`,
+      );
+
+      await session.runMigrations({ transaction: 'each' });
+
+      const [{ createdAt }] = await session.query(`SELECT "createdAt" FROM "tenants" WHERE "id" = $1`, [id]);
+      expect((createdAt as Date).toISOString()).toBe((moment as Date).toISOString());
+    } finally {
+      await admin.query(`ALTER DATABASE "${dbName}" RESET timezone`);
+      await truncateAll(admin);
+      await Promise.all([session.destroy(), admin.destroy()]);
+    }
+  });
+});

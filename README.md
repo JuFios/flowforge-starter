@@ -181,6 +181,15 @@ npm run build && npm run migration:generate -- src/database/migrations/<Name>
   UUID генеруються вбудованою `gen_random_uuid()` (Postgres 13+), тож розширення й права на
   `CREATE EXTENSION` не потрібні.
 - `AddCorrelationId` — колонка `correlationId` у `executions` і `jobs`.
+- `TimestampsWithTimeZone` — `createdAt` у `tenants`, `workflows`, `executions`, `jobs` і
+  `step_runs.startedAt`: `timestamp` → `timestamptz` (проблема 2). Наявні значення
+  перетворюються `USING "<колонка>" AT TIME ZONE current_setting('TimeZone')`: їх записав
+  `DEFAULT now()` як час у поясі сесії, а сесія успадковує пояс сервера БД. Для сервера в UTC
+  (як у compose) це те саме, що `AT TIME ZONE 'UTC'`; для сервера в іншому поясі жорстко заданий
+  UTC зсунув би всі рядки (це перевіряє інтеграційний тест). Припущення: пояс сервера не
+  змінювався відтоді, як рядки записано. `ALTER TYPE` переписує таблиці й перебудовує індекс
+  `executions (tenantId, createdAt)` під `ACCESS EXCLUSIVE` — на великих таблицях потрібне вікно
+  обслуговування. `down` виконує зворотне перетворення в тому самому поясі.
 
 Команди беруть `DATABASE_URL` з оточення або з `apps/api/.env`.
 
@@ -195,8 +204,9 @@ docker-compose exec -T postgres psql -U flowforge -d flowforge -c \
 cd apps/api && npm run build && npm run migration:run
 ```
 
-Перевірено на БД, створеній стартовим кодом: після цього застосовується лише `AddCorrelationId`,
-а `migration:generate --check` не знаходить розбіжностей між схемою і сутностями.
+Перевірено на БД, створеній стартовим кодом: після цього застосовуються лише `AddCorrelationId` і
+`TimestampsWithTimeZone`, а `migration:generate --check` не знаходить розбіжностей між схемою і
+сутностями.
 
 ## Тести
 
@@ -294,6 +304,47 @@ CI (`.github/workflows/ci.yml`):
   `where: { tenantId }`: дешевше, але тестує деталь реалізації (зламається при переході на
   QueryBuilder/raw SQL/RLS і не зловить помилку в самому запиті). Реальна БД перевіряє
   поведінку, а інфраструктура для неї все одно потрібна (ТЗ, розд. 6).
+
+### 2. Моменти створення залежали від часового поясу сесії й процесу
+
+- **Що.** `createdAt` (`@CreateDateColumn()`) у `tenants`, `workflows`, `executions`, `jobs` і
+  `step_runs.startedAt` у стартовій схемі мають тип `timestamp without time zone`. `DEFAULT now()`
+  записує в них «настінний» час у поясі сесії БД, а драйвер `pg` читає такі значення як локальний
+  час процесу Node. Колонки `finishedAt`, `runAt`, `lockedUntil` уже були `timestamptz`.
+- **Чому небезпечно.** Один і той самий момент зберігається по-різному залежно від поясу сервера
+  БД чи сесії, а читається по-різному залежно від `TZ` процесу. API і воркери з різним `TZ`
+  (або перенесення БД на сервер з іншим поясом) зсувають `createdAt` на години: ламаються
+  сортування й курсорна пагінація виконань за `createdAt`, порівняння з `finishedAt`/`runAt`
+  (тривалість, затримка захоплення), відбір за часом. Помилка мовчазна — значення виглядають
+  правдоподібно.
+- **Як відтворити.** `test/integration/timestamps.int-spec.ts`: два підключення із сесіями в
+  `Pacific/Kiritimati` (UTC+14) і `Pacific/Pago_Pago` (UTC−11) майже одночасно створюють рядок у
+  кожній таблиці; моменти мають збігатися й лежати поряд із реальним часом запису. Тест не
+  залежить від поясу машини, на якій запущений. До виправлення:
+
+  ```text
+  ✕ tenants.createdAt written at the same moment from different time zones reads as the same moment
+  ✕ workflows.createdAt written at the same moment from different time zones reads as the same moment
+  ✕ executions.createdAt written at the same moment from different time zones reads as the same moment
+  ✕ jobs.createdAt written at the same moment from different time zones reads as the same moment
+  ✕ step_runs.startedAt written at the same moment from different time zones reads as the same moment
+    Expected: < 0.016666666666666666   (розбіжність, години)
+    Received:   24.999998055555555
+  Tests:       5 failed, 5 total
+  ```
+
+- **Як виправлено.** Нова міграція `TimestampsWithTimeZone` (базову `InitialSchema` не змінено):
+  `ALTER COLUMN ... TYPE timestamptz USING ... AT TIME ZONE current_setting('TimeZone')`, у
+  сутностях — `@CreateDateColumn({ type: 'timestamptz' })`. Наявні рядки зберігають свій момент:
+  окремий тест відкочує міграцію на базі з поясом `Pacific/Kiritimati`, записує рядок у старій
+  схемі, застосовує міграцію і перевіряє, що момент не змінився (з `AT TIME ZONE 'UTC'` цей тест
+  червоний: зсув на 14 годин). Тести «no drift» і revert/re-apply зелені.
+- **Альтернативи.** Лишити `timestamp` і примусово працювати в UTC (`TZ=UTC` у кожному процесі та
+  `-c timezone=UTC` у підключенні) — коректність тримається на конфігурації кожного процесу й
+  клієнта, а схема лишається неоднозначною. Власний парсер типу `timestamp` у `pg` (читати як
+  UTC) — глобальний побічний ефект, і він не виправляє запис у сесії з іншим поясом. У міграції —
+  `AT TIME ZONE 'UTC'` (простіше, але неправильно для сервера не в UTC) або без `USING` (те саме
+  перетворення в поясі сесії міграції, але неявно).
 
 ### Аудит решти наявних тестів
 
@@ -403,8 +454,6 @@ effectively-once) і за яких умов — буде заповнено.
 
 ## Що не встигли або зробили б інакше
 
-- Базова міграція зберігає схему стартового коду як є, зокрема `createdAt` типу `timestamp`
-  без часового поясу; зміна типу — окремою міграцією, якщо знадобиться.
 - Node.js 20 вже поза періодом підтримки (EOL — квітень 2026). Версію не змінювали за умовами
   роботи; перехід на актуальну LTS — окремим кроком.
 - **Тимчасово:** верхня межа `SCHEDULER_TICK_MS` (2147483647 мс, ~24,8 доби) — лише захист

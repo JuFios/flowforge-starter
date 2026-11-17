@@ -34,6 +34,6 @@ export class Workflow {
   @Column({ default: 1 })
   version: number;
 
-  @CreateDateColumn()
+  @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;
 }

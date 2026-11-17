@@ -39,6 +39,6 @@ export class Job {
   @Column({ type: 'varchar', length: 128, nullable: true })
   correlationId: string | null;
 
-  @CreateDateColumn()
+  @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;
 }
