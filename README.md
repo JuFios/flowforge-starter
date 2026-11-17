@@ -48,6 +48,37 @@ docker-compose up --build
 | Postgres | localhost:5432 (`flowforge` / `flowforge`) |
 | Воркери | лише в мережі compose, порт `3100` (`/health`, `/ready`, `/metrics`) |
 
+### Локальний запуск поза docker
+
+Потрібні Node.js 20 і Docker (для Postgres). Якщо compose-стек уже запущено, звільніть порти:
+`docker-compose stop api worker frontend`.
+
+```bash
+# з кореня репозиторію
+docker-compose up -d postgres
+cd apps/api
+cp .env.example .env
+sed -i.bak 's/@postgres:/@localhost:/' .env   # хост БД для запуску поза docker
+npm ci
+npm run build
+npm run migration:run
+npm run start          # API на :3000
+```
+
+Воркер — в іншому терміналі, з `apps/api`: `npm run start:worker` (службовий HTTP на `:3100`).
+Застосунок і CLI міграцій читають `apps/api/.env` (якщо файл є); змінні, задані в оточенні
+(як у docker-compose), мають пріоритет над файлом.
+
+Фронтенд — з кореня репозиторію, в іншому терміналі:
+
+```bash
+cd apps/frontend
+cp .env.example .env.local
+sed -i.bak 's#http://api:3000#http://localhost:3000#' .env.local
+npm ci
+npm run dev -- -p 3001
+```
+
 ### Приклади запитів
 
 Створити тенанта (токен — `ADMIN_TOKEN` з `apps/api/.env.example`):
@@ -121,12 +152,6 @@ OpenAPI-документація — буде заповнено.
 
 `apps/frontend/.env.example`: `API_URL` — адреса API для сервера Next.js
 (`http://api:3000` у compose, `http://localhost:3000` локально).
-
-Локальний запуск поза docker: `cp apps/api/.env.example apps/api/.env`, замінити хост БД на
-`localhost`, підняти Postgres (`docker-compose up -d postgres`), далі
-`npm ci && npm run build && npm run migration:run && npm run start` (воркер — `npm run start:worker`).
-Застосунок і CLI міграцій читають `apps/api/.env` (якщо файл є); змінні, задані в оточенні
-(як у docker-compose), мають пріоритет над файлом.
 
 ## Міграції БД
 
