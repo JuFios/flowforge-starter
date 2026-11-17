@@ -2,6 +2,14 @@ import { Injectable, Logger } from '@nestjs/common';
 import { StepDefinition } from '../entities';
 import { renderTemplate, StepContext } from './template';
 
+/**
+ * Статуси, після яких запит варто повторити: таймаут запиту (408), «зарано» (425), обмеження
+ * частоти (429) і помилки сервера (5xx). Решта 4xx — помилка в самому запиті, повтор її не змінить.
+ */
+export function isRetryableStatus(status: number): boolean {
+  return status === 408 || status === 425 || status === 429 || status >= 500;
+}
+
 export class StepError extends Error {
   constructor(
     message: string,
@@ -64,7 +72,7 @@ export class StepExecutor {
     });
     const text = await res.text();
     if (!res.ok) {
-      throw new StepError(`http ${res.status}`, res.status >= 500);
+      throw new StepError(`http ${res.status}`, isRetryableStatus(res.status));
     }
     try {
       return { status: res.status, body: JSON.parse(text) as unknown };
