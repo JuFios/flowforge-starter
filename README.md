@@ -116,14 +116,15 @@ curl localhost:3000/executions/<executionId> -H "x-api-key: $API_KEY"
 | GET | `/ready` | readiness: доступна БД |
 | GET | `/metrics` | метрики у форматі Prometheus |
 
-Приклад workflow з кількома кроками:
+Приклад workflow з кількома кроками (результат кроку доступний наступним як
+`{{ steps.<id>.<поле> }}`):
 
 ```json
 {
-  "name": "demo",
+  "name": "fetch-demo",
   "steps": [
-    { "id": "fetch", "type": "http", "url": "https://example.com/api?q={{ input.q }}" },
-    { "id": "shape", "type": "transform", "expr": "ctx.steps.fetch.body" }
+    { "id": "fetch", "type": "http", "url": "https://example.com/?q={{ input.q }}" },
+    { "id": "report", "type": "log", "message": "example.com answered {{ steps.fetch.status }}" }
   ]
 }
 ```
@@ -147,7 +148,7 @@ OpenAPI-документація — буде заповнено.
 | `LOG_LEVEL` | `info` | рівень логування pino |
 | `WORKER_CONCURRENCY` | `4` | паралельні цикли обробки в одному воркері |
 | `WORKER_HTTP_PORT` | `3100` | службовий HTTP воркера |
-| `SCHEDULER_TICK_MS` | `30000` | період тіку планувальника |
+| `SCHEDULER_TICK_MS` | `30000` | період тіку планувальника, 100..2147483647 мс (межа таймерів Node) |
 | `TEST_DATABASE_URL` | `postgres://flowforge:flowforge@localhost:5432/flowforge_test` | лише для інтеграційних тестів |
 
 `apps/frontend/.env.example`: `API_URL` — адреса API для сервера Next.js
@@ -176,8 +177,21 @@ npm run build && npm run migration:generate -- src/database/migrations/<Name>
   `CREATE EXTENSION` не потрібні.
 - `AddCorrelationId` — колонка `correlationId` у `executions` і `jobs`.
 
-Для БД, створеної раніше через `synchronize`, базову міграцію треба позначити як застосовану
-(рядок у таблиці `migrations`), а не виконувати повторно.
+Команди беруть `DATABASE_URL` з оточення або з `apps/api/.env`.
+
+Для БД, створеної стартовим кодом через `synchronize`, базову міграцію не виконують повторно
+(таблиці вже є), а позначають як застосовану, після чого застосовують решту:
+
+```bash
+# з кореня репозиторію (БД у compose)
+docker-compose exec -T postgres psql -U flowforge -d flowforge -c \
+  "CREATE TABLE IF NOT EXISTS migrations (id SERIAL PRIMARY KEY, \"timestamp\" bigint NOT NULL, name varchar NOT NULL);
+   INSERT INTO migrations (\"timestamp\", name) VALUES (1794920217603, 'InitialSchema1794920217603');"
+cd apps/api && npm run build && npm run migration:run
+```
+
+Перевірено на БД, створеній стартовим кодом: після цього застосовується лише `AddCorrelationId`,
+а `migration:generate --check` не знаходить розбіжностей між схемою і сутностями.
 
 ## Тести
 
@@ -204,7 +218,7 @@ CI (`.github/workflows/ci.yml`):
 | `api` | lint, typecheck, unit, build |
 | `integration` | інтеграційні тести з `services: postgres` |
 | `frontend` | lint, build |
-| `compose` | `docker compose up --build` з нуля: міграції, healthy API і обидва воркери, фронтенд |
+| `compose` | `docker compose up --build` з нуля: міграції, healthy API і рівно два healthy воркери, фронтенд, запуск workflow наскрізь (виконання `succeeded` зі збереженим `correlationId`) |
 
 ## Спостережуваність
 
@@ -224,9 +238,12 @@ CI (`.github/workflows/ci.yml`):
 - **Health** — `GET /health` (liveness, без залежностей) і `GET /ready` (readiness: ping БД,
   `@nestjs/terminus`) в API і воркері; використовуються healthcheck-ами docker-compose.
 - **Помилки** — глобальний фільтр (`src/observability/all-exceptions.filter.ts`): `HttpException`
-  віддаються як є, будь-яка інша помилка — `{"statusCode":500,"message":"Internal server error"}`;
-  до кожної відповіді з помилкою додається `correlationId`, деталі (стек, текст помилки БД) —
-  лише в лог. `/ready` при недоступній БД не розкриває адресу чи причину.
+  віддаються як є; помилки розбору тіла запиту — зі своїм статусом 4xx і стандартним текстом
+  (413 завелике тіло, 415 непідтримуване кодування чи кодова сторінка); будь-яка інша помилка —
+  `{"statusCode":500,"message":"Internal server error"}`. Кожна відповідь з помилкою містить
+  `correlationId` і заголовок `x-request-id`. У лог іде лише тип, повідомлення, код і стек помилки
+  (без тексту SQL, параметрів запиту, деталей драйвера) разом із тим самим `correlationId`.
+  `/ready` при недоступній БД віддає лише `database: down`, причина — у лог.
 
 ## Знайдені проблеми
 
