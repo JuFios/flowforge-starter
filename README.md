@@ -125,6 +125,8 @@ OpenAPI-документація — буде заповнено.
 Локальний запуск поза docker: `cp apps/api/.env.example apps/api/.env`, замінити хост БД на
 `localhost`, підняти Postgres (`docker-compose up -d postgres`), далі
 `npm ci && npm run build && npm run migration:run && npm run start` (воркер — `npm run start:worker`).
+Застосунок і CLI міграцій читають `apps/api/.env` (якщо файл є); змінні, задані в оточенні
+(як у docker-compose), мають пріоритет над файлом.
 
 ## Міграції БД
 
