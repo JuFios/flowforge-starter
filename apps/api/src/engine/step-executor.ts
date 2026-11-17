@@ -69,18 +69,25 @@ export class StepExecutor {
     idempotencyKey?: string,
   ): Promise<unknown> {
     const url = renderTemplate(step.url, ctx);
-    const res = await fetch(url, {
-      method: step.method ?? 'GET',
-      // Ключ однаковий для всіх спроб кроку: отримувач, що його враховує, виконає ефект один раз.
-      headers: idempotencyKey
-        ? { ...step.headers, 'Idempotency-Key': idempotencyKey }
-        : step.headers,
-      body:
-        step.body !== undefined ? renderTemplate(step.body, ctx) : undefined,
-      signal: signal
-        ? AbortSignal.any([signal, AbortSignal.timeout(15_000)])
-        : AbortSignal.timeout(15_000),
-    });
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method: step.method ?? 'GET',
+        // Ключ однаковий для всіх спроб кроку: отримувач, що його враховує, виконає ефект один раз.
+        headers: idempotencyKey
+          ? { ...step.headers, 'Idempotency-Key': idempotencyKey }
+          : step.headers,
+        body:
+          step.body !== undefined ? renderTemplate(step.body, ctx) : undefined,
+        signal: signal
+          ? AbortSignal.any([signal, AbortSignal.timeout(15_000)])
+          : AbortSignal.timeout(15_000),
+      });
+    } catch (err) {
+      // Скасування воркером (lease, завершення) — не помилка кроку, передаємо як є.
+      if (signal?.aborted) throw err;
+      throw new StepError(`http request failed: ${networkReason(err)}`, true);
+    }
     const text = await res.text();
     if (!res.ok) {
       throw new StepError(`http ${res.status}`, isRetryableStatus(res.status));
@@ -90,5 +97,30 @@ export class StepExecutor {
     } catch {
       return { status: res.status, body: text.slice(0, 10_000) };
     }
+  }
+}
+
+/**
+ * Причина мережевої помилки для тенанта: лише клас збою, без адрес і внутрішнього тексту
+ * (`ECONNREFUSED 10.0.0.7:5432` розкривав би інфраструктуру).
+ */
+function networkReason(err: unknown): string {
+  if (err instanceof DOMException && err.name === 'TimeoutError')
+    return 'timed out';
+  const code = (err as { cause?: { code?: unknown } }).cause?.code;
+  switch (code) {
+    case 'ECONNREFUSED':
+      return 'connection refused';
+    case 'ENOTFOUND':
+    case 'EAI_AGAIN':
+      return 'host not found';
+    case 'ECONNRESET':
+    case 'UND_ERR_SOCKET':
+      return 'connection reset';
+    case 'UND_ERR_CONNECT_TIMEOUT':
+    case 'ETIMEDOUT':
+      return 'timed out';
+    default:
+      return 'network error';
   }
 }

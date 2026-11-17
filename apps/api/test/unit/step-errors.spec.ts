@@ -36,4 +36,39 @@ describe('http step error classification', () => {
       expect((await failureFor(status)).retryable).toBe(false);
     },
   );
+
+  it.each([
+    [
+      'a timeout',
+      new DOMException('The operation timed out', 'TimeoutError'),
+      'timed out',
+    ],
+    [
+      'an unknown host',
+      Object.assign(new TypeError('fetch failed'), {
+        cause: { code: 'ENOTFOUND', hostname: 'internal.corp' },
+      }),
+      'host not found',
+    ],
+    [
+      'a reset connection',
+      Object.assign(new TypeError('fetch failed'), {
+        cause: { code: 'ECONNRESET', address: '10.0.0.7' },
+      }),
+      'connection reset',
+    ],
+  ])(
+    'retries %s and names only the class of the network failure',
+    async (_case, error, reason) => {
+      jest.spyOn(globalThis, 'fetch').mockRejectedValue(error);
+      const failure = executor.execute(
+        { id: 'call', type: 'http', url: 'https://receiver.example/hook' },
+        ctx,
+      );
+      await expect(failure).rejects.toMatchObject({
+        message: `http request failed: ${reason}`,
+        retryable: true,
+      });
+    },
+  );
 });

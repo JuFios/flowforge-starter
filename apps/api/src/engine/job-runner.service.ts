@@ -29,6 +29,9 @@ class ShutdownAbort extends Error {
   }
 }
 
+/** Повідомлення для тенанта про збій, що стався не в самому кроці. */
+const INTERNAL_STEP_ERROR = 'internal error while running the step';
+
 /** Скільки після скасування кроків чекаємо, поки задачі повернуться в чергу. */
 const RELEASE_WAIT_MS = 5_000;
 
@@ -320,12 +323,14 @@ export class JobRunnerService implements BeforeApplicationShutdown {
       await this.checkpoints.finish(job, ctx.steps[last.id]);
     } catch (err) {
       if (err instanceof LeaseLostError || signal.aborted) throw err;
-      const retryable = err instanceof StepError ? err.retryable : true;
+      // Тенант бачить лише помилки самого кроку; текст будь-якої іншої (БД, ORM, баг) може
+      // містити внутрішні деталі — він іде лише в лог (нижче, з кореляційним ID).
+      const stepError = err instanceof StepError;
       const outcome = await this.checkpoints.fail(
         job,
         current,
-        (err as Error).message,
-        retryable,
+        stepError ? err.message : INTERNAL_STEP_ERROR,
+        stepError ? err.retryable : true,
       );
       this.metrics.observeFailure(outcome, 'step_error');
       this.logger.warn(

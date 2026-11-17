@@ -792,6 +792,33 @@ npm run lint           # ESLint, 0 попереджень
   (`@ValidateNested` + `discriminator`) погано дає точні повідомлення для полів, що
   залежать від типу. Ручний валідатор на 200 рядків — найпрозоріший варіант.
 
+### 16. Результат виконання розкривав текст внутрішніх помилок
+
+- **Що.** Воркер записував `err.message` будь-якої помилки в `step_runs.error`,
+  `executions.error` і `jobs.lastError`, а `GET /executions/:id` віддає перші два тенанту. Помилка
+  БД чи ORM (наприклад, `EntityNotFoundError` з умовою пошуку, текст `QueryFailedError`)
+  потрапляла у відповідь API. Мережеві збої кроку `http` давали неінформативне `fetch failed`.
+- **Чому небезпечно.** Внутрішні деталі (імена таблиць, адреси, умови запитів) доступні тенанту
+  (ТЗ, розд. 4: «помилки не розкривають внутрішні деталі»).
+- **Як відтворити.** `test/integration/execution-errors.int-spec.ts`: тригер БД обриває кожен
+  запис результату кроку помилкою з «внутрішнім» текстом.
+
+  ```text
+  ✕ does not expose the text of an internal error
+    GET /executions/:id → "error": "internal detail: relation pg_secret at 10.0.0.7; no attempts left (3/3)"
+  ✕ reports an unreachable receiver without the network details of the failure
+    Received: "fetch failed; no attempts left (3/3)"
+  ```
+
+- **Як виправлено.** Тенант бачить лише помилки самого кроку (`StepError`: `http 404`,
+  `transform: …`). Будь-яка інша помилка записується як `internal error while running the step`,
+  а її безпечний опис (`toSafeError`) іде в лог із кореляційним ID задачі. Мережеві помилки
+  `fetch` стають повторюваними `StepError` з класом збою без адрес: `http request failed:
+  connection refused` / `host not found` / `connection reset` / `timed out` / `network error`.
+- **Альтернативи.** Фільтрувати текст помилок регулярними виразами (як `safe-error.ts` для логів):
+  у відповідь тенанту все одно потрапляв би довільний внутрішній текст, лише частково замаскований.
+  Ховати й помилки кроку: тенант не зміг би зрозуміти, чому його workflow впав.
+
 ### Аудит решти наявних тестів
 
 Кожен тест перевірено мутацією коду, поведінку якого він заявляє:
