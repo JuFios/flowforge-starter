@@ -48,13 +48,13 @@ describe('API observability and error handling', () => {
     });
   });
 
-  it('GET /metrics exposes default process metrics in Prometheus format', async () => {
-    const res = await get('/metrics');
-    expect(res.status).toBe(200);
-    expect(res.headers.get('content-type')).toMatch(/^text\/plain/);
-    const text = await res.text();
-    expect(text).toMatch(/^# TYPE process_cpu_user_seconds_total counter$/m);
-    expect(text).toMatch(/^nodejs_eventloop_lag_seconds /m);
+  describe('metrics', () => {
+    it('GET /metrics is not served on the public API port', async () => {
+      // Порт API опублікований назовні (docker-compose), метрики — лише для збирача у внутрішній мережі.
+      const res = await get('/metrics');
+      expect(res.status).toBe(404);
+      expect(await res.text()).not.toMatch(/process_cpu_user_seconds_total/);
+    });
   });
 
   describe('correlation id', () => {
