@@ -110,4 +110,50 @@ describe('durable execution', () => {
       ['notify', 'succeeded'],
     ]);
   });
+
+  it('runs the workflow version that was current when the execution started', async () => {
+    const wf = await createWorkflow([
+      { id: 'call', type: 'http', url: receiver.url('/v1') },
+    ]);
+    const id = await run(wf);
+    const patched = await api(
+      apiApp.baseUrl,
+      apiKey,
+      'PATCH',
+      `/workflows/${wf}`,
+      { steps: [{ id: 'other', type: 'http', url: receiver.url('/v2') }] },
+    );
+    expect(patched.status).toBe(200);
+
+    worker = await startWorker(1);
+    await finished(id);
+
+    expect(
+      (await ds.getRepository(Execution).findOneByOrFail({ id })).status,
+    ).toBe('succeeded');
+    expect(receiver.hits('/v1')).toHaveLength(1);
+    expect(receiver.hits('/v2')).toHaveLength(0);
+  });
+
+  it('finishes an execution whose workflow was deleted after it started', async () => {
+    const wf = await createWorkflow([
+      { id: 'call', type: 'http', url: receiver.url('/kept') },
+    ]);
+    const id = await run(wf);
+    const deleted = await api(
+      apiApp.baseUrl,
+      apiKey,
+      'DELETE',
+      `/workflows/${wf}`,
+    );
+    expect(deleted.status).toBe(204);
+
+    worker = await startWorker(1);
+    await finished(id);
+
+    expect(
+      (await ds.getRepository(Execution).findOneByOrFail({ id })).status,
+    ).toBe('succeeded');
+    expect(receiver.hits('/kept')).toHaveLength(1);
+  });
 });
