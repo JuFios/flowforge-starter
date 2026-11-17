@@ -1,6 +1,7 @@
 import { Controller, Get } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import { Execution, Job } from '../../src/entities';
+import { MetricsServer } from '../../src/observability/metrics-server';
 import { RunningApp, startApp } from '../helpers/app';
 import { createTenant, createWorkflow, openTestDataSource, TestTenant, truncateAll } from '../helpers/db';
 
@@ -54,6 +55,25 @@ describe('API observability and error handling', () => {
       const res = await get('/metrics');
       expect(res.status).toBe(404);
       expect(await res.text()).not.toMatch(/process_cpu_user_seconds_total/);
+    });
+
+    it('GET /metrics on the metrics port exposes default process metrics in Prometheus format', async () => {
+      const port = running.app.get(MetricsServer).port;
+      expect(port).toEqual(expect.any(Number));
+      const res = await fetch(`http://127.0.0.1:${port}/metrics`);
+      expect(res.status).toBe(200);
+      expect(res.headers.get('content-type')).toMatch(/^text\/plain/);
+      const text = await res.text();
+      expect(text).toMatch(/^# TYPE process_cpu_user_seconds_total counter$/m);
+      expect(text).toMatch(/^nodejs_eventloop_lag_seconds /m);
+    });
+
+    it('the metrics port serves nothing but /metrics', async () => {
+      const base = `http://127.0.0.1:${running.app.get(MetricsServer).port}`;
+      for (const path of ['/', '/health', '/ready', '/executions', '/metrics/x']) {
+        expect((await fetch(`${base}${path}`)).status).toBe(404);
+      }
+      expect((await fetch(`${base}/metrics`, { method: 'POST' })).status).toBe(404);
     });
   });
 

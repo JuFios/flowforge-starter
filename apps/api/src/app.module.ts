@@ -9,6 +9,8 @@ import { JobRunnerService } from './engine/job-runner.service';
 import { StepExecutor } from './engine/step-executor';
 import { ExecutionsController } from './executions/executions.controller';
 import { ExecutionsService } from './executions/executions.service';
+import { MetricsController } from './observability/metrics.controller';
+import { MetricsServer } from './observability/metrics-server';
 import { ObservabilityModule } from './observability/observability.module';
 import { SchedulerService } from './scheduler/scheduler.service';
 import { TenantsController } from './tenants/tenants.controller';
@@ -34,17 +36,18 @@ const coreImports = [
   ObservabilityModule,
 ];
 
-/** HTTP API + планувальник. */
+/** HTTP API + планувальник. Метрики — на окремому службовому порту (MetricsServer, METRICS_PORT). */
 @Module({
   imports: coreImports,
   controllers: [TenantsController, WorkflowsController, ExecutionsController, WebhooksController],
-  providers: [ApiKeyGuard, WorkflowsService, ExecutionsService, SchedulerService],
+  providers: [ApiKeyGuard, WorkflowsService, ExecutionsService, SchedulerService, MetricsServer],
 })
 export class AppModule {}
 
 /** Окремий процес-воркер. HTTP лише службовий: /health, /ready, /metrics. */
 @Module({
   imports: coreImports,
+  controllers: [MetricsController],
   providers: [JobQueueService, JobRunnerService, StepExecutor],
 })
 export class WorkerModule {}

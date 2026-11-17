@@ -7,6 +7,7 @@ describe('validateEnv', () => {
     const env = validateEnv({ ...base, PORT: '8080' });
     expect(env).toMatchObject({
       PORT: 8080,
+      METRICS_PORT: 3200,
       WORKER_CONCURRENCY: 4,
       WORKER_HTTP_PORT: 3100,
       SCHEDULER_TICK_MS: 30_000,
@@ -51,5 +52,11 @@ describe('validateEnv', () => {
     // setInterval/setTimeout приймають щонайбільше 2^31-1 мс; більше значення стає 1 мс.
     expect(() => validateEnv({ ...base, SCHEDULER_TICK_MS: '2147483648' })).toThrow(/SCHEDULER_TICK_MS/);
     expect(validateEnv({ ...base, SCHEDULER_TICK_MS: '2147483647' }).SCHEDULER_TICK_MS).toBe(2147483647);
+  });
+
+  it('accepts METRICS_PORT=0 (random free port) but not out-of-range values', () => {
+    expect(validateEnv({ ...base, METRICS_PORT: '0' }).METRICS_PORT).toBe(0);
+    expect(() => validateEnv({ ...base, METRICS_PORT: '-1' })).toThrow(/METRICS_PORT/);
+    expect(() => validateEnv({ ...base, METRICS_PORT: '65536' })).toThrow(/METRICS_PORT/);
   });
 });

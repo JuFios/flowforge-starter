@@ -26,8 +26,9 @@
 
 ## Склад
 
-- `apps/api` — NestJS: HTTP API (`src/main.ts`), планувальник cron (у процесі API),
-  окремий процес-воркер (`src/worker.ts`) зі службовим HTTP (`/health`, `/ready`, `/metrics`).
+- `apps/api` — NestJS: HTTP API (`src/main.ts`) зі службовим портом метрик, планувальник cron
+  (у процесі API), окремий процес-воркер (`src/worker.ts`) зі службовим HTTP (`/health`, `/ready`,
+  `/metrics`).
 - `apps/frontend` — Next.js (App Router): ввід API-ключа, список workflow, сторінка виконання.
 - `docker-compose.yml` — Postgres, одноразовий крок міграцій, API, два воркери, фронтенд.
 
@@ -44,7 +45,8 @@ docker-compose up --build
 
 | Сервіс | Адреса |
 |---|---|
-| API | http://localhost:3000 |
+| API | http://localhost:3000 (`/metrics` тут немає — 404) |
+| Метрики API | лише в мережі compose: `http://api:3200/metrics` |
 | Фронтенд | http://localhost:3001 |
 | Postgres | localhost:5432 (`flowforge` / `flowforge`) |
 | Воркери | лише в мережі compose, порт `3100` (`/health`, `/ready`, `/metrics`) |
@@ -66,6 +68,7 @@ npm run migration:run
 npm run start          # API на :3000
 ```
 
+Метрики API — `curl localhost:3200/metrics` (службовий порт `METRICS_PORT`).
 Воркер — в іншому терміналі, з `apps/api`: `npm run start:worker` (службовий HTTP на `:3100`).
 Застосунок і CLI міграцій читають `apps/api/.env` (якщо файл є); змінні, задані в оточенні
 (як у docker-compose), мають пріоритет над файлом.
@@ -115,7 +118,7 @@ curl localhost:3000/executions/<executionId> -H "x-api-key: $API_KEY"
 | POST | `/hooks/:workflowId` | вхідний webhook, підпис у `x-signature` (HMAC-SHA256 hex) |
 | GET | `/health` | liveness: процес живий |
 | GET | `/ready` | readiness: доступна БД |
-| GET | `/metrics` | метрики у форматі Prometheus |
+| GET | `/metrics` | метрики у форматі Prometheus — **не на порту API**: службовий порт `METRICS_PORT` (API) або `WORKER_HTTP_PORT` (воркер) |
 
 Приклад workflow з кількома кроками (результат кроку доступний наступним як
 `{{ steps.<id>.<поле> }}`):
@@ -144,6 +147,7 @@ OpenAPI-документація — буде заповнено.
 |---|---|---|
 | `NODE_ENV` | `development` | `development` / `test` / `production` |
 | `PORT` | `3000` | порт HTTP API |
+| `METRICS_PORT` | `3200` | службовий порт API лише для `GET /metrics`; compose його не публікує; `0` — випадковий вільний порт (тести) |
 | `DATABASE_URL` | — (обов'язкова) | `postgres://user:pass@host:5432/db` |
 | `ADMIN_TOKEN` | — (обов'язкова, ≥ 12 символів) | токен `POST /tenants` |
 | `LOG_LEVEL` | `info` | рівень логування pino |
@@ -239,7 +243,11 @@ CI (`.github/workflows/ci.yml`):
   отримує власний ID. Передача ID у вихідні запити кроків і outbox — буде заповнено.
 - **Метрики** — `GET /metrics` (`prom-client`) в API і в кожному воркері: стандартні метрики
   процесу Node.js; доменні метрики реєструються в тому ж реєстрі (`MetricsService`) — буде
-  заповнено.
+  заповнено. Метрики віддаються лише на службових портах, які docker-compose не публікує:
+  в API — окремий HTTP-сервер на `METRICS_PORT` (`src/observability/metrics-server.ts`, лише
+  `GET /metrics`, решта — 404), у воркері — `WORKER_HTTP_PORT`. На публічному порту API (`PORT`)
+  `/metrics` дає 404. Збирач метрик звертається з внутрішньої мережі: `api:3200`, `worker:3100`
+  (кожна репліка воркера окремо).
 - **Health** — `GET /health` (liveness, без залежностей) і `GET /ready` (readiness: ping БД,
   `@nestjs/terminus`) в API і воркері; використовуються healthcheck-ами docker-compose.
 - **Помилки** — глобальний фільтр (`src/observability/all-exceptions.filter.ts`): `HttpException`
@@ -348,6 +356,17 @@ compose локально): семантика черги (`SKIP LOCKED`, бло�
 зайва залежність для однієї властивості контексту. Воркер отримав службовий HTTP-порт, щоб
 мати ті самі `/health`, `/ready`, `/metrics`, що й API.
 
+**Метрики не на публічному порту.** Порт API опублікований назовні, а метрики розкривають
+внутрішній стан (а з доменними метриками — і тенантів). Варіанти: токен для збирача на тому самому
+порту; прив'язка до `127.0.0.1`; окремий службовий порт. Обрано службовий порт `METRICS_PORT`
+(як `WORKER_HTTP_PORT` у воркера): compose його не публікує, секрет для збирача не потрібен, а
+публічний порт метрик не віддає взагалі (404). Токен лишив би `/metrics` досяжним ззовні й додав
+секрет для ротації; `127.0.0.1` недосяжний для збирача з іншого контейнера. Реалізація — вбудований
+`node:http` у процесі API зі спільним реєстром `MetricsService`, без другого Nest-застосунку.
+`/health` і `/ready` лишаються на `PORT`: від них залежать healthcheck-и compose, і вони віддають
+лише `up`/`down`. Обмеження: службовий порт захищає мережева межа, а не автентифікація — у
+середовищі, де внутрішня мережа не довірена, знадобиться ще й автентифікація збирача.
+
 ### 3.3.1 Надійна черга — буде заповнено
 
 ### 3.3.2 Durable execution — буде заповнено
@@ -384,8 +403,6 @@ effectively-once) і за яких умов — буде заповнено.
 
 ## Що не встигли або зробили б інакше
 
-- `/metrics` не захищений автентифікацією: у compose порт API опублікований назовні. Для
-  продакшену — окремий внутрішній порт або токен для збирача метрик.
 - Базова міграція зберігає схему стартового коду як є, зокрема `createdAt` типу `timestamp`
   без часового поясу; зміна типу — окремою міграцією, якщо знадобиться.
 - Node.js 20 вже поза періодом підтримки (EOL — квітень 2026). Версію не змінювали за умовами

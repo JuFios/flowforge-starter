@@ -22,6 +22,16 @@ export class EnvironmentVariables {
   @Max(65535)
   PORT = 3000;
 
+  /**
+   * Службовий порт API лише для GET /metrics. Не публікується назовні (docker-compose),
+   * на публічному PORT метрик немає. 0 — випадковий вільний порт (інтеграційні тести).
+   */
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(65535)
+  METRICS_PORT = 3200;
+
   @IsString()
   @Matches(/^postgres(ql)?:\/\/\S+$/, { message: 'DATABASE_URL має бути URL виду postgres://user:pass@host:5432/db' })
   DATABASE_URL: string;

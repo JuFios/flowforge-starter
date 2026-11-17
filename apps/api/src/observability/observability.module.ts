@@ -8,10 +8,13 @@ import { AllExceptionsFilter } from './all-exceptions.filter';
 import { CorrelationIdMiddleware } from './correlation.middleware';
 import { HealthController } from './health.controller';
 import { buildLoggerParams } from './logger.options';
-import { MetricsController } from './metrics.controller';
 import { MetricsService } from './metrics.service';
 
-/** Спільна для API і воркера спостережуваність: логи, кореляція, метрики, health/readiness, помилки. */
+/**
+ * Спільна для API і воркера спостережуваність: логи, кореляція, реєстр метрик, health/readiness,
+ * помилки. Де віддаються метрики, вирішує процес: воркер — MetricsController на службовому порту,
+ * API — окремий MetricsServer (публічний порт API метрик не віддає).
+ */
 @Module({
   imports: [
     LoggerModule.forRootAsync({
@@ -21,7 +24,7 @@ import { MetricsService } from './metrics.service';
     }),
     TerminusModule,
   ],
-  controllers: [HealthController, MetricsController],
+  controllers: [HealthController],
   providers: [MetricsService, { provide: APP_FILTER, useClass: AllExceptionsFilter }],
   exports: [MetricsService],
 })
