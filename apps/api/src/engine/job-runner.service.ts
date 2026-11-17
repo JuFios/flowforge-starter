@@ -1,8 +1,15 @@
 import { Injectable, Logger, OnApplicationShutdown } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'crypto';
 import { Repository } from 'typeorm';
+import { EnvironmentVariables } from '../config/env.validation';
 import { Execution, Job, StepRun, Workflow } from '../entities';
+import {
+  newCorrelationId,
+  runWithCorrelationId,
+} from '../observability/correlation';
+import { toSafeError } from '../observability/safe-error';
 import { JobQueueService } from './job-queue.service';
 import { StepError, StepExecutor } from './step-executor';
 import { StepContext } from './template';
@@ -18,12 +25,17 @@ export class JobRunnerService implements OnApplicationShutdown {
   constructor(
     private readonly queue: JobQueueService,
     private readonly executor: StepExecutor,
-    @InjectRepository(Execution) private readonly executions: Repository<Execution>,
-    @InjectRepository(Workflow) private readonly workflows: Repository<Workflow>,
+    @InjectRepository(Execution)
+    private readonly executions: Repository<Execution>,
+    @InjectRepository(Workflow)
+    private readonly workflows: Repository<Workflow>,
     @InjectRepository(StepRun) private readonly stepRuns: Repository<StepRun>,
+    private readonly config: ConfigService<EnvironmentVariables, true>,
   ) {}
 
-  start(concurrency = Number(process.env.WORKER_CONCURRENCY ?? 4)): void {
+  start(
+    concurrency = this.config.get('WORKER_CONCURRENCY', { infer: true }),
+  ): void {
     this.running = true;
     this.logger.log(`${this.workerId} started, concurrency=${concurrency}`);
     for (let i = 0; i < concurrency; i++) void this.loop();
@@ -35,23 +47,66 @@ export class JobRunnerService implements OnApplicationShutdown {
 
   private async loop(): Promise<void> {
     while (this.running) {
+      let job: Job | null;
       try {
-        const job = await this.queue.claimNext(this.workerId);
-        if (!job) {
-          await sleep(250);
-          continue;
-        }
-        await this.process(job);
+        job = await this.queue.claimNext(this.workerId);
       } catch (err) {
-        this.logger.error(`loop error: ${(err as Error).message}`);
+        // Задачі ще немає, тож і кореляційного контексту теж.
+        this.logger.error({ error: toSafeError(err) }, 'job claim failed');
+        await sleep(1000);
+        continue;
+      }
+      if (!job) {
+        await sleep(250);
+        continue;
+      }
+      try {
+        await this.process(job);
+      } catch {
+        // Уже залоговано в process() — у контексті задачі; лише пауза перед наступною.
         await sleep(1000);
       }
     }
   }
 
-  async process(job: Job): Promise<void> {
-    const execution = await this.executions.findOneOrFail({ where: { id: job.executionId } });
-    const workflow = await this.workflows.findOneOrFail({ where: { id: execution.workflowId } });
+  /**
+   * Обробляє задачу в кореляційному контексті запиту/спрацювання, що її створило.
+   * Непередбачена помилка логується тут же, всередині контексту (той самий correlationId,
+   * jobId, executionId), і передається далі.
+   */
+  process(job: Job): Promise<void> {
+    return runWithCorrelationId(
+      job.correlationId ?? newCorrelationId(),
+      'job',
+      async () => {
+        try {
+          await this.processInContext(job);
+        } catch (err) {
+          this.logger.error(
+            {
+              jobId: job.id,
+              executionId: job.executionId,
+              error: toSafeError(err),
+            },
+            'job processing failed',
+          );
+          throw err;
+        }
+      },
+    );
+  }
+
+  private async processInContext(job: Job): Promise<void> {
+    this.logger.log(
+      { jobId: job.id, executionId: job.executionId, attempt: job.attempts },
+      'processing job',
+    );
+    const execution = await this.executions.findOneOrFail({
+      where: { id: job.executionId },
+    });
+    const workflow = await this.workflows.findOneOrFail({
+      where: { id: execution.workflowId },
+    });
 
     await this.executions.update(execution.id, { status: 'running' });
     const ctx: StepContext = { input: execution.input, steps: {} };
@@ -60,14 +115,24 @@ export class JobRunnerService implements OnApplicationShutdown {
       for (let i = 0; i < workflow.steps.length; i++) {
         const step = workflow.steps[i];
         const run = await this.stepRuns.save(
-          this.stepRuns.create({ executionId: execution.id, stepIndex: i, stepId: step.id }),
+          this.stepRuns.create({
+            executionId: execution.id,
+            stepIndex: i,
+            stepId: step.id,
+          }),
         );
         try {
           const output = await this.executor.execute(step, ctx);
           ctx.steps[step.id] = output;
-          await this.stepRuns.update(run.id, { status: 'succeeded', output: output as object });
+          await this.stepRuns.update(run.id, {
+            status: 'succeeded',
+            output: output as object,
+          });
         } catch (err) {
-          await this.stepRuns.update(run.id, { status: 'failed', error: (err as Error).message });
+          await this.stepRuns.update(run.id, {
+            status: 'failed',
+            error: (err as Error).message,
+          });
           throw err;
         }
       }
@@ -80,7 +145,11 @@ export class JobRunnerService implements OnApplicationShutdown {
       await this.queue.complete(job.id);
     } catch (err) {
       const retryable = err instanceof StepError ? err.retryable : true;
-      const willRetry = await this.queue.fail(job, (err as Error).message, retryable);
+      const willRetry = await this.queue.fail(
+        job,
+        (err as Error).message,
+        retryable,
+      );
       if (!willRetry) {
         await this.executions.update(execution.id, {
           status: 'failed',

@@ -2,8 +2,19 @@
 
 import { useEffect, useState } from 'react';
 
-interface Step { id: string; stepIndex: number; stepId: string; status: string; error: string | null }
-interface Execution { id: string; status: string; error: string | null; steps: Step[] }
+interface Step {
+  id: string;
+  stepIndex: number;
+  stepId: string;
+  status: string;
+  error: string | null;
+}
+interface Execution {
+  id: string;
+  status: string;
+  error: string | null;
+  steps: Step[];
+}
 
 export default function ExecutionPage({ params }: { params: { id: string } }) {
   const [execution, setExecution] = useState<Execution | null>(null);
@@ -23,7 +34,9 @@ export default function ExecutionPage({ params }: { params: { id: string } }) {
       {execution.error && <p style={{ color: 'crimson' }}>{execution.error}</p>}
       <ol>
         {execution.steps.map((s) => (
-          <li key={s.id}>{s.stepId} — {s.status}</li>
+          <li key={s.id}>
+            {s.stepId} — {s.status}
+          </li>
         ))}
       </ol>
     </>

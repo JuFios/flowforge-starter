@@ -1,5 +1,5 @@
 import { BadRequestException } from '@nestjs/common';
-import { validateSteps } from '../src/workflows/definition';
+import { validateSteps } from '../../src/workflows/definition';
 
 describe('validateSteps', () => {
   it('accepts a valid definition', () => {
@@ -24,10 +24,14 @@ describe('validateSteps', () => {
   });
 
   it('rejects an unknown step type', () => {
-    expect(() => validateSteps([{ id: 'a', type: 'shell', cmd: 'ls' }])).toThrow(BadRequestException);
+    expect(() =>
+      validateSteps([{ id: 'a', type: 'shell', cmd: 'ls' }]),
+    ).toThrow(BadRequestException);
   });
 
   it('rejects a negative delay', () => {
-    expect(() => validateSteps([{ id: 'a', type: 'delay', ms: -1 }])).toThrow(BadRequestException);
+    expect(() => validateSteps([{ id: 'a', type: 'delay', ms: -1 }])).toThrow(
+      BadRequestException,
+    );
   });
 });

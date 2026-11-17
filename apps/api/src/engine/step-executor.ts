@@ -3,7 +3,10 @@ import { StepDefinition } from '../entities';
 import { renderTemplate, StepContext } from './template';
 
 export class StepError extends Error {
-  constructor(message: string, readonly retryable = true) {
+  constructor(
+    message: string,
+    readonly retryable = true,
+  ) {
     super(message);
   }
 }
@@ -29,6 +32,7 @@ export class StepExecutor {
 
   private transform(expr: string, ctx: StepContext): unknown {
     try {
+      // eslint-disable-next-line @typescript-eslint/no-implied-eval -- відомий дефект: transform виконує довільний код хоста; виправлення — PR 4 (пісочниця JSONata)
       const fn = new Function('ctx', `return (${expr});`);
       return fn(ctx);
     } catch (err) {
@@ -36,12 +40,16 @@ export class StepExecutor {
     }
   }
 
-  private async http(step: Extract<StepDefinition, { type: 'http' }>, ctx: StepContext): Promise<unknown> {
+  private async http(
+    step: Extract<StepDefinition, { type: 'http' }>,
+    ctx: StepContext,
+  ): Promise<unknown> {
     const url = renderTemplate(step.url, ctx);
     const res = await fetch(url, {
       method: step.method ?? 'GET',
       headers: step.headers,
-      body: step.body !== undefined ? renderTemplate(step.body, ctx) : undefined,
+      body:
+        step.body !== undefined ? renderTemplate(step.body, ctx) : undefined,
       signal: AbortSignal.timeout(15_000),
     });
     const text = await res.text();
@@ -49,7 +57,7 @@ export class StepExecutor {
       throw new StepError(`http ${res.status}`, res.status >= 500);
     }
     try {
-      return { status: res.status, body: JSON.parse(text) };
+      return { status: res.status, body: JSON.parse(text) as unknown };
     } catch {
       return { status: res.status, body: text.slice(0, 10_000) };
     }

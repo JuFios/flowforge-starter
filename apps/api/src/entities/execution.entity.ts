@@ -1,4 +1,10 @@
-import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn } from 'typeorm';
+import {
+  Column,
+  CreateDateColumn,
+  Entity,
+  Index,
+  PrimaryGeneratedColumn,
+} from 'typeorm';
 
 export type ExecutionStatus = 'pending' | 'running' | 'succeeded' | 'failed';
 
@@ -29,7 +35,11 @@ export class Execution {
   @Column({ type: 'varchar', default: 'api' })
   trigger: 'api' | 'webhook' | 'cron';
 
-  @CreateDateColumn()
+  /** Кореляційний ID запиту/спрацювання, що породило запис (x-request-id). */
+  @Column({ type: 'varchar', length: 128, nullable: true })
+  correlationId: string | null;
+
+  @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;
 
   @Column({ type: 'timestamptz', nullable: true })

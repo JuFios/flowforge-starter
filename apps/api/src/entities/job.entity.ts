@@ -1,4 +1,10 @@
-import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn } from 'typeorm';
+import {
+  Column,
+  CreateDateColumn,
+  Entity,
+  Index,
+  PrimaryGeneratedColumn,
+} from 'typeorm';
 
 export type JobStatus = 'queued' | 'running' | 'done' | 'failed';
 
@@ -35,6 +41,10 @@ export class Job {
   @Column({ type: 'text', nullable: true })
   lastError: string | null;
 
-  @CreateDateColumn()
+  /** Кореляційний ID запиту/спрацювання, що породило запис (x-request-id). */
+  @Column({ type: 'varchar', length: 128, nullable: true })
+  correlationId: string | null;
+
+  @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;
 }

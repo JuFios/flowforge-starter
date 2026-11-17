@@ -29,12 +29,18 @@ export class JobQueueService {
         WHERE id = $3`,
       [workerId, LEASE_SECONDS, id],
     );
-    const [job] = await this.ds.query(`SELECT * FROM jobs WHERE id = $1`, [id]);
-    return job as Job;
+    const [job]: Job[] = await this.ds.query(
+      `SELECT * FROM jobs WHERE id = $1`,
+      [id],
+    );
+    return job;
   }
 
   async complete(jobId: string): Promise<void> {
-    await this.ds.query(`UPDATE jobs SET status = 'done', "lockedBy" = NULL, "lockedUntil" = NULL WHERE id = $1`, [jobId]);
+    await this.ds.query(
+      `UPDATE jobs SET status = 'done', "lockedBy" = NULL, "lockedUntil" = NULL WHERE id = $1`,
+      [jobId],
+    );
   }
 
   /** Повертає true, якщо задачу буде повторено, false — якщо вичерпано спроби. */

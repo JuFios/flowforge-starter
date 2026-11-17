@@ -1,4 +1,10 @@
-import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn } from 'typeorm';
+import {
+  Column,
+  CreateDateColumn,
+  Entity,
+  Index,
+  PrimaryGeneratedColumn,
+} from 'typeorm';
 
 @Entity('step_runs')
 @Index(['executionId', 'stepIndex'])
@@ -24,6 +30,6 @@ export class StepRun {
   @Column({ type: 'text', nullable: true })
   error: string | null;
 
-  @CreateDateColumn()
+  @CreateDateColumn({ type: 'timestamptz' })
   startedAt: Date;
 }

@@ -1,9 +1,17 @@
-import { Body, Controller, ForbiddenException, Headers, Post } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  ForbiddenException,
+  Headers,
+  Post,
+} from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { randomBytes, timingSafeEqual } from 'crypto';
 import { IsString, MinLength } from 'class-validator';
 import { Repository } from 'typeorm';
 import { hashApiKey } from '../auth/api-key.guard';
+import { EnvironmentVariables } from '../config/env.validation';
 import { Tenant } from '../entities';
 
 class CreateTenantDto {
@@ -20,19 +28,29 @@ function safeEqual(a: string, b: string): boolean {
 
 @Controller('tenants')
 export class TenantsController {
-  constructor(@InjectRepository(Tenant) private readonly tenants: Repository<Tenant>) {}
+  constructor(
+    @InjectRepository(Tenant) private readonly tenants: Repository<Tenant>,
+    private readonly config: ConfigService<EnvironmentVariables, true>,
+  ) {}
 
   /** Службовий ендпоінт створення тенанта (захищений ADMIN_TOKEN). */
   @Post()
-  async create(@Body() dto: CreateTenantDto, @Headers('x-admin-token') admin?: string) {
-    const expected = process.env.ADMIN_TOKEN ?? '';
+  async create(
+    @Body() dto: CreateTenantDto,
+    @Headers('x-admin-token') admin?: string,
+  ) {
+    const expected = this.config.get('ADMIN_TOKEN', { infer: true });
     if (!expected || !admin || !safeEqual(admin, expected)) {
       throw new ForbiddenException();
     }
     const apiKey = `ff_${randomBytes(24).toString('hex')}`;
     const webhookSecret = randomBytes(24).toString('hex');
     const tenant = await this.tenants.save(
-      this.tenants.create({ name: dto.name, apiKeyHash: hashApiKey(apiKey), webhookSecret }),
+      this.tenants.create({
+        name: dto.name,
+        apiKeyHash: hashApiKey(apiKey),
+        webhookSecret,
+      }),
     );
     return { id: tenant.id, name: tenant.name, apiKey, webhookSecret };
   }
