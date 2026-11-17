@@ -1,4 +1,4 @@
-import { backoffMs } from '../src/engine/job-queue.service';
+import { backoffMs } from '../../src/engine/job-queue.service';
 
 describe('backoffMs', () => {
   it('grows exponentially with the attempt number', () => {

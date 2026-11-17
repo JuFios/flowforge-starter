@@ -1,5 +1,5 @@
 import { BadRequestException } from '@nestjs/common';
-import { validateSteps } from '../src/workflows/definition';
+import { validateSteps } from '../../src/workflows/definition';
 
 describe('validateSteps', () => {
   it('accepts a valid definition', () => {

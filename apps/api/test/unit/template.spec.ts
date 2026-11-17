@@ -1,4 +1,4 @@
-import { renderTemplate } from '../src/engine/template';
+import { renderTemplate } from '../../src/engine/template';
 
 describe('renderTemplate', () => {
   const ctx = { input: { user: { name: 'Ada' }, n: 3 }, steps: { fetch: { status: 200 } } };
