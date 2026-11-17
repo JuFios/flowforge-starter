@@ -3,14 +3,7 @@ import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { DataSource, EntityManager, Repository } from 'typeorm';
 import { Workflow, WorkflowVersion } from '../entities';
 import { validateSteps } from './definition';
-
-export interface WorkflowInput {
-  name: string;
-  steps: unknown;
-  cron?: string | null;
-  timezone?: string;
-  enabled?: boolean;
-}
+import { CreateWorkflowDto, UpdateWorkflowDto } from './dto/workflow.dto';
 
 @Injectable()
 export class WorkflowsService {
@@ -34,7 +27,7 @@ export class WorkflowsService {
   }
 
   /** Workflow і його перша версія — в одній транзакції. */
-  create(tenantId: string, input: WorkflowInput): Promise<Workflow> {
+  create(tenantId: string, input: CreateWorkflowDto): Promise<Workflow> {
     const steps = validateSteps(input.steps);
     return this.ds.transaction(async (em) => {
       const wf = await em.save(
@@ -59,7 +52,7 @@ export class WorkflowsService {
   async update(
     tenantId: string,
     id: string,
-    input: Partial<WorkflowInput>,
+    input: UpdateWorkflowDto,
   ): Promise<Workflow> {
     const steps =
       input.steps !== undefined ? validateSteps(input.steps) : undefined;

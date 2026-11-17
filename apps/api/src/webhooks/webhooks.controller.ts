@@ -14,6 +14,7 @@ import { createHmac } from 'crypto';
 import { Repository } from 'typeorm';
 import { Tenant, Workflow } from '../entities';
 import { ExecutionsService } from '../executions/executions.service';
+import { RunInputPipe } from '../executions/run-input.pipe';
 
 /**
  * Вхідні webhook-и. Підпис: hex HMAC-SHA256 від тіла запиту
@@ -32,7 +33,7 @@ export class WebhooksController {
   @HttpCode(202)
   async receive(
     @Param('workflowId', ParseUUIDPipe) workflowId: string,
-    @Body() body: Record<string, unknown>,
+    @Body(RunInputPipe) body: Record<string, unknown>,
     @Headers('x-signature') signature?: string,
   ) {
     const workflow = await this.workflows.findOne({

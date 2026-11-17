@@ -13,7 +13,8 @@ import {
 import { ApiKeyGuard } from '../auth/api-key.guard';
 import { CurrentTenant } from '../auth/current-tenant.decorator';
 import { Tenant } from '../entities';
-import { WorkflowInput, WorkflowsService } from './workflows.service';
+import { CreateWorkflowDto, UpdateWorkflowDto } from './dto/workflow.dto';
+import { WorkflowsService } from './workflows.service';
 
 @Controller('workflows')
 @UseGuards(ApiKeyGuard)
@@ -31,7 +32,7 @@ export class WorkflowsController {
   }
 
   @Post()
-  create(@CurrentTenant() t: Tenant, @Body() body: WorkflowInput) {
+  create(@CurrentTenant() t: Tenant, @Body() body: CreateWorkflowDto) {
     return this.workflows.create(t.id, body);
   }
 
@@ -39,7 +40,7 @@ export class WorkflowsController {
   update(
     @CurrentTenant() t: Tenant,
     @Param('id', ParseUUIDPipe) id: string,
-    @Body() body: Partial<WorkflowInput>,
+    @Body() body: UpdateWorkflowDto,
   ) {
     return this.workflows.update(t.id, id, body);
   }

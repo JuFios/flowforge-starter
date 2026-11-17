@@ -13,6 +13,7 @@ import { CurrentTenant } from '../auth/current-tenant.decorator';
 import { Tenant } from '../entities';
 import { WorkflowsService } from '../workflows/workflows.service';
 import { ExecutionsService } from './executions.service';
+import { RunInputPipe } from './run-input.pipe';
 
 @Controller()
 @UseGuards(ApiKeyGuard)
@@ -26,10 +27,10 @@ export class ExecutionsController {
   async run(
     @CurrentTenant() t: Tenant,
     @Param('id', ParseUUIDPipe) id: string,
-    @Body() input: Record<string, unknown> = {},
+    @Body(RunInputPipe) input: Record<string, unknown>,
   ) {
     const workflow = await this.workflows.get(t.id, id);
-    return this.executions.enqueue(workflow, input ?? {}, 'api');
+    return this.executions.enqueue(workflow, input, 'api');
   }
 
   @Get('executions')
