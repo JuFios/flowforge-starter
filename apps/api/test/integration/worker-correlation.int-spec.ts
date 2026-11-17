@@ -1,5 +1,6 @@
 import { DataSource } from 'typeorm';
 import { WorkerModule } from '../../src/app.module';
+import { JobQueueService } from '../../src/engine/job-queue.service';
 import { JobRunnerService } from '../../src/engine/job-runner.service';
 import { StepExecutor } from '../../src/engine/step-executor';
 import { Execution, Job } from '../../src/entities';
@@ -43,9 +44,11 @@ describe('worker carries the correlation id of the originating request', () => {
       executionId: execution.id,
       correlationId: 'origin-req-7',
     });
-    const job = await ds
-      .getRepository(Job)
-      .findOneByOrFail({ executionId: execution.id });
+    // Обробляти можна лише захоплену задачу (з lease і fencing-токеном), як у циклі воркера.
+    const job = (await worker.app
+      .get(JobQueueService)
+      .claimNext(worker.app.get(JobRunnerService).workerId))!;
+    expect(job.executionId).toBe(execution.id);
 
     const seen: Array<string | undefined> = [];
     const executor = worker.app.get(StepExecutor);

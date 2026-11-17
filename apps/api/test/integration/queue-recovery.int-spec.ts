@@ -143,12 +143,19 @@ describe('a job whose worker vanished', () => {
     worker = await startWorker(1);
 
     await waitFor(
-      'the abandoned execution to be finished by the new worker',
+      'the abandoned job to be finished by the new worker',
       async () =>
-        (await ds.getRepository(Execution).findOneByOrFail({ id: run.body.id }))
-          .status === 'succeeded',
+        (
+          await ds
+            .getRepository(Job)
+            .findOneByOrFail({ executionId: run.body.id })
+        ).status === 'done',
       { timeoutMs: 10_000 },
     );
+    expect(
+      (await ds.getRepository(Execution).findOneByOrFail({ id: run.body.id }))
+        .status,
+    ).toBe('succeeded');
     const job = await ds
       .getRepository(Job)
       .findOneByOrFail({ executionId: run.body.id });

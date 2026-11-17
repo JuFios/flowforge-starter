@@ -2,6 +2,7 @@ import { InitialSchema1794920217603 } from './1794920217603-InitialSchema';
 import { AddCorrelationId1794920232623 } from './1794920232623-AddCorrelationId';
 import { TimestampsWithTimeZone1794920300000 } from './1794920300000-TimestampsWithTimeZone';
 import { QueueLease1794949287178 } from './1794949287178-QueueLease';
+import { StepCheckpoints1794949553919 } from './1794949553919-StepCheckpoints';
 
 /**
  * Явний перелік міграцій у порядку застосування. Без glob-шаблонів, щоб однаково
@@ -13,4 +14,5 @@ export const MIGRATIONS = [
   AddCorrelationId1794920232623,
   TimestampsWithTimeZone1794920300000,
   QueueLease1794949287178,
+  StepCheckpoints1794949553919,
 ];

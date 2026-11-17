@@ -6,8 +6,17 @@ import {
   PrimaryGeneratedColumn,
 } from 'typeorm';
 
+export type StepRunStatus = 'running' | 'succeeded' | 'failed';
+
+/**
+ * Чекпоінт кроку виконання: рівно один рядок на крок (`executionId`, `stepIndex`). Повтор задачі
+ * продовжує з першого кроку, що не має `succeeded`; результат завершеного кроку береться звідси,
+ * а не обчислюється знову.
+ */
 @Entity('step_runs')
-@Index(['executionId', 'stepIndex'])
+@Index('UQ_step_runs_execution_step', ['executionId', 'stepIndex'], {
+  unique: true,
+})
 export class StepRun {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -22,7 +31,11 @@ export class StepRun {
   stepId: string;
 
   @Column({ type: 'varchar', default: 'running' })
-  status: 'running' | 'succeeded' | 'failed';
+  status: StepRunStatus;
+
+  /** Скільки разів крок починали (повтори після помилки, падіння воркера). */
+  @Column({ type: 'int', default: 1 })
+  attempts: number;
 
   @Column({ type: 'jsonb', nullable: true })
   output: unknown;
@@ -32,4 +45,7 @@ export class StepRun {
 
   @CreateDateColumn({ type: 'timestamptz' })
   startedAt: Date;
+
+  @Column({ type: 'timestamptz', nullable: true })
+  finishedAt: Date | null;
 }

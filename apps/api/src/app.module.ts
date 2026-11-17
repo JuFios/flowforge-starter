@@ -4,6 +4,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { ApiKeyGuard } from './auth/api-key.guard';
 import { EnvironmentVariables, validateEnv } from './config/env.validation';
 import { buildDataSourceOptions, ENTITIES } from './database/database.options';
+import { CheckpointService } from './engine/checkpoint.service';
 import { JobQueueService } from './engine/job-queue.service';
 import { JobRunnerService } from './engine/job-runner.service';
 import { StepExecutor } from './engine/step-executor';
@@ -67,6 +68,11 @@ export class AppModule {}
 @Module({
   imports: coreImports,
   controllers: [MetricsController],
-  providers: [JobQueueService, JobRunnerService, StepExecutor],
+  providers: [
+    JobQueueService,
+    CheckpointService,
+    JobRunnerService,
+    StepExecutor,
+  ],
 })
 export class WorkerModule {}

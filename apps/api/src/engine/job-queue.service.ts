@@ -83,16 +83,18 @@ export class JobQueueService {
 
   /**
    * Перевіряє в транзакції `em`, що lease досі наш, і блокує рядок задачі до кінця транзакції
-   * (reaper і heartbeat чекатимуть). Кидає LeaseLostError — транзакцію буде відкочено.
+   * (reaper і heartbeat чекатимуть) і повертає його поточний стан. Кидає LeaseLostError —
+   * транзакцію буде відкочено.
    */
-  async assertLease(em: EntityManager, job: Job): Promise<void> {
-    const rows: unknown[] = await em.query(
-      `SELECT id FROM jobs
+  async assertLease(em: EntityManager, job: Job): Promise<Job> {
+    const rows: Job[] = await em.query(
+      `SELECT * FROM jobs
         WHERE id = $1 AND "lockToken" = $2 AND status = 'running'
         FOR UPDATE`,
       [job.id, job.lockToken],
     );
     if (rows.length !== 1) throw new LeaseLostError(job.id);
+    return rows[0];
   }
 
   async complete(job: Job): Promise<void> {
@@ -109,14 +111,14 @@ export class JobQueueService {
   /** Повертає true, якщо задачу буде повторено, false — якщо вичерпано спроби. */
   async fail(job: Job, error: string, retryable: boolean): Promise<boolean> {
     return this.ds.transaction(async (em) => {
-      await this.assertLease(em, job);
-      if (retryable && job.attempts < job.maxAttempts) {
+      const current = await this.assertLease(em, job);
+      if (retryable && current.attempts < current.maxAttempts) {
         await em.query(
           `UPDATE jobs
               SET status = 'queued', "lockedBy" = NULL, "lockedUntil" = NULL, "lockToken" = NULL,
                   "lastError" = $2, "runAt" = now() + make_interval(secs => $3)
             WHERE id = $1`,
-          [job.id, error, backoffMs(job.attempts) / 1000],
+          [job.id, error, backoffMs(current.attempts) / 1000],
         );
         return true;
       }

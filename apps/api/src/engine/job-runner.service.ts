@@ -4,12 +4,13 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'crypto';
 import { Repository } from 'typeorm';
 import { EnvironmentVariables } from '../config/env.validation';
-import { Execution, Job, StepRun, Workflow } from '../entities';
+import { Execution, Job, Workflow } from '../entities';
 import {
   newCorrelationId,
   runWithCorrelationId,
 } from '../observability/correlation';
 import { toSafeError } from '../observability/safe-error';
+import { CheckpointService } from './checkpoint.service';
 import { JobQueueService, LeaseLostError } from './job-queue.service';
 import { LeaseKeeper } from './lease-keeper';
 import { StepError, StepExecutor } from './step-executor';
@@ -31,7 +32,7 @@ export class JobRunnerService implements OnApplicationShutdown {
     private readonly executions: Repository<Execution>,
     @InjectRepository(Workflow)
     private readonly workflows: Repository<Workflow>,
-    @InjectRepository(StepRun) private readonly stepRuns: Repository<StepRun>,
+    private readonly checkpoints: CheckpointService,
     private readonly config: ConfigService<EnvironmentVariables, true>,
   ) {}
 
@@ -162,34 +163,34 @@ export class JobRunnerService implements OnApplicationShutdown {
       where: { id: execution.workflowId },
     });
 
-    await this.executions.update(execution.id, { status: 'running' });
     const ctx: StepContext = { input: execution.input, steps: {} };
+    const done = new Map(
+      (await this.checkpoints.load(execution.id))
+        .filter((r) => r.status === 'succeeded')
+        .map((r) => [r.stepIndex, r]),
+    );
 
     try {
       for (let i = 0; i < workflow.steps.length; i++) {
         const step = workflow.steps[i];
-        const run = await this.stepRuns.save(
-          this.stepRuns.create({
-            executionId: execution.id,
-            stepIndex: i,
-            stepId: step.id,
-          }),
-        );
+        const checkpoint = done.get(i);
+        if (checkpoint) {
+          // Крок уже завершено в попередній спробі: беремо збережений результат, не виконуємо знову.
+          ctx.steps[step.id] = checkpoint.output;
+          continue;
+        }
+        signal.throwIfAborted();
+        const run = await this.checkpoints.startStep(job, i, step.id);
+        let output: unknown;
         try {
-          signal.throwIfAborted();
-          const output = await this.executor.execute(step, ctx, signal);
-          ctx.steps[step.id] = output;
-          await this.stepRuns.update(run.id, {
-            status: 'succeeded',
-            output: output as object,
-          });
+          output = await this.executor.execute(step, ctx, signal);
         } catch (err) {
-          await this.stepRuns.update(run.id, {
-            status: 'failed',
-            error: (err as Error).message,
-          });
+          if (!signal.aborted)
+            await this.checkpoints.stepFailed(job, run, (err as Error).message);
           throw err;
         }
+        await this.checkpoints.checkpoint(job, run, output);
+        ctx.steps[step.id] = output;
       }
       const last = workflow.steps[workflow.steps.length - 1];
       await this.executions.update(execution.id, {

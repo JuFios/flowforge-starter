@@ -2,10 +2,11 @@ import { Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { QueryFailedError, Repository } from 'typeorm';
 import { EnvironmentVariables } from '../../src/config/env.validation';
+import { CheckpointService } from '../../src/engine/checkpoint.service';
 import { JobQueueService } from '../../src/engine/job-queue.service';
 import { JobRunnerService } from '../../src/engine/job-runner.service';
 import { StepExecutor } from '../../src/engine/step-executor';
-import { Execution, StepRun, Workflow } from '../../src/entities';
+import { Execution, Workflow } from '../../src/entities';
 import { ExecutionsService } from '../../src/executions/executions.service';
 import { SchedulerService } from '../../src/scheduler/scheduler.service';
 
@@ -102,7 +103,7 @@ describe('background loops log errors without input values', () => {
       {} as StepExecutor,
       {} as Repository<Execution>,
       {} as Repository<Workflow>,
-      {} as Repository<StepRun>,
+      {} as CheckpointService,
       config({ WORKER_CONCURRENCY: 1, JOB_LEASE_MS: 60_000 }),
     );
 
