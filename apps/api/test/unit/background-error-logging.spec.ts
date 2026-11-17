@@ -110,7 +110,7 @@ describe('background loops log errors without input values', () => {
     runner.start(1);
     for (let i = 0; i < 50 && logged.length === 0; i++)
       await new Promise((r) => setTimeout(r, 10));
-    runner.onApplicationShutdown();
+    await runner.beforeApplicationShutdown();
     // дати циклу вийти з паузи після помилки, щоб не лишати таймер
     await new Promise((r) => setTimeout(r, 1100));
 

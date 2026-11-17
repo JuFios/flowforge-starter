@@ -108,6 +108,23 @@ export class JobQueueService {
     });
   }
 
+  /**
+   * Повертає задачу в чергу одразу, без зарахованої спроби (завершення воркера): робота не
+   * провалилась, її просто перервали. Продовження — з останнього чекпоінта.
+   */
+  async release(job: Job): Promise<void> {
+    await this.ds.transaction(async (em) => {
+      await this.assertLease(em, job);
+      await em.query(
+        `UPDATE jobs
+            SET status = 'queued', "runAt" = now(), attempts = GREATEST(attempts - 1, 0),
+                "lockedBy" = NULL, "lockedUntil" = NULL, "lockToken" = NULL
+          WHERE id = $1`,
+        [job.id],
+      );
+    });
+  }
+
   /** Повертає true, якщо задачу буде повторено, false — якщо вичерпано спроби. */
   async fail(job: Job, error: string, retryable: boolean): Promise<boolean> {
     return this.ds.transaction(async (em) => {

@@ -1,7 +1,8 @@
-import { Injectable, Logger, OnApplicationShutdown } from '@nestjs/common';
+import { BeforeApplicationShutdown, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 import { Repository } from 'typeorm';
 import { EnvironmentVariables } from '../config/env.validation';
 import { Execution, Job, WorkflowVersion } from '../entities';
@@ -16,13 +17,27 @@ import { LeaseKeeper } from './lease-keeper';
 import { StepError, StepExecutor } from './step-executor';
 import { StepContext } from './template';
 
-const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+/** Причина скасування кроку, коли воркер завершується і пільговий час вичерпано. */
+class ShutdownAbort extends Error {
+  constructor() {
+    super('worker is shutting down');
+  }
+}
+
+/** Скільки після скасування кроків чекаємо, поки задачі повернуться в чергу. */
+const RELEASE_WAIT_MS = 5_000;
 
 @Injectable()
-export class JobRunnerService implements OnApplicationShutdown {
+export class JobRunnerService implements BeforeApplicationShutdown {
   private readonly logger = new Logger(JobRunnerService.name);
   readonly workerId = `worker-${randomUUID().slice(0, 8)}`;
-  private running = false;
+  /** Скасовується на початку завершення: цикли перестають брати задачі й виходять із пауз. */
+  private stopping = new AbortController();
+  private loops: Promise<void>[] = [];
+  private readonly inFlight = new Map<
+    string,
+    { keeper: LeaseKeeper; done: Promise<void> }
+  >();
   private reaper?: NodeJS.Timeout;
 
   constructor(
@@ -39,22 +54,64 @@ export class JobRunnerService implements OnApplicationShutdown {
   start(
     concurrency = this.config.get('WORKER_CONCURRENCY', { infer: true }),
   ): void {
-    this.running = true;
+    this.stopping = new AbortController();
     this.logger.log(`${this.workerId} started, concurrency=${concurrency}`);
-    for (let i = 0; i < concurrency; i++) void this.loop();
+    for (let i = 0; i < concurrency; i++) this.loops.push(this.loop());
     const leaseMs = this.config.get('JOB_LEASE_MS', { infer: true });
     this.reaper = setInterval(() => void this.reap(), leaseMs / 2);
   }
 
-  onApplicationShutdown(): void {
-    this.running = false;
+  /**
+   * Graceful shutdown (SIGTERM, app.close()). Виконується до того, як Nest закриє пул з'єднань:
+   * 1) нові задачі більше не беруться; 2) поточні мають WORKER_SHUTDOWN_GRACE_MS, щоб завершитись;
+   * 3) ті, що не встигли, скасовуються й повертаються в чергу без зарахованої спроби — інший
+   * воркер продовжить їх з останнього чекпоінта, не чекаючи, поки мине lease.
+   */
+  async beforeApplicationShutdown(): Promise<void> {
+    if (this.stopping.signal.aborted) return;
+    this.stopping.abort();
     clearInterval(this.reaper);
+    const grace = this.config.get('WORKER_SHUTDOWN_GRACE_MS', { infer: true });
+    const pending = () => [...this.inFlight.values()].map((j) => j.done);
+    if (this.inFlight.size > 0) {
+      this.logger.log(
+        { jobs: this.inFlight.size, graceMs: grace },
+        'shutting down: waiting for jobs in progress',
+      );
+      const finished = await Promise.race([
+        Promise.allSettled(pending()).then(() => true),
+        delay(grace, false),
+      ]);
+      if (!finished) {
+        this.logger.warn(
+          { jobs: this.inFlight.size },
+          'shutdown grace period is over: releasing unfinished jobs',
+        );
+        for (const { keeper } of this.inFlight.values())
+          keeper.abort(new ShutdownAbort());
+        await Promise.race([
+          Promise.allSettled(pending()),
+          delay(RELEASE_WAIT_MS),
+        ]);
+      }
+    }
+    await Promise.allSettled(this.loops);
+    this.loops = [];
+  }
+
+  /** Пауза, яку перериває початок завершення. */
+  private async pause(ms: number): Promise<void> {
+    try {
+      await delay(ms, undefined, { signal: this.stopping.signal });
+    } catch {
+      // Завершення: виходимо з паузи одразу.
+    }
   }
 
   /** Пауза опитування з відхиленням ±50%: воркери не стукають у БД синхронно. */
   private idle(): Promise<void> {
     const base = this.config.get('WORKER_POLL_INTERVAL_MS', { infer: true });
-    return sleep(base * (0.5 + Math.random()));
+    return this.pause(base * (0.5 + Math.random()));
   }
 
   /** Повертає в чергу задачі зниклих воркерів. Помилка не зупиняє воркер — наступний прохід повторить. */
@@ -86,14 +143,14 @@ export class JobRunnerService implements OnApplicationShutdown {
   }
 
   private async loop(): Promise<void> {
-    while (this.running) {
+    while (!this.stopping.signal.aborted) {
       let job: Job | null;
       try {
         job = await this.queue.claimNext(this.workerId);
       } catch (err) {
         // Задачі ще немає, тож і кореляційного контексту теж.
         this.logger.error({ error: toSafeError(err) }, 'job claim failed');
-        await sleep(1000);
+        await this.pause(1000);
         continue;
       }
       if (!job) {
@@ -104,7 +161,7 @@ export class JobRunnerService implements OnApplicationShutdown {
         await this.process(job);
       } catch {
         // Уже залоговано в process() — у контексті задачі; лише пауза перед наступною.
-        await sleep(1000);
+        await this.pause(1000);
       }
     }
   }
@@ -115,18 +172,23 @@ export class JobRunnerService implements OnApplicationShutdown {
    * jobId, executionId), і передається далі.
    */
   process(job: Job): Promise<void> {
-    return runWithCorrelationId(
+    const keeper = new LeaseKeeper(
+      this.queue,
+      job,
+      this.config.get('JOB_LEASE_MS', { infer: true }),
+    );
+    const done = runWithCorrelationId(
       job.correlationId ?? newCorrelationId(),
       'job',
       async () => {
-        const keeper = new LeaseKeeper(
-          this.queue,
-          job,
-          this.config.get('JOB_LEASE_MS', { infer: true }),
-        ).start();
+        keeper.start();
         try {
           await this.processInContext(job, keeper.signal);
         } catch (err) {
+          if (keeper.signal.reason instanceof ShutdownAbort) {
+            await this.releaseOnShutdown(job);
+            return;
+          }
           if (err instanceof LeaseLostError || keeper.signal.aborted) {
             // Задачу вже повернуто в чергу або вона в іншого воркера — тут нічого не записуємо.
             this.logger.warn(
@@ -149,6 +211,26 @@ export class JobRunnerService implements OnApplicationShutdown {
         }
       },
     );
+    const tracked = done.catch(() => undefined);
+    this.inFlight.set(job.id, { keeper, done: tracked });
+    void tracked.finally(() => this.inFlight.delete(job.id));
+    return done;
+  }
+
+  private async releaseOnShutdown(job: Job): Promise<void> {
+    try {
+      await this.queue.release(job);
+      this.logger.warn(
+        { jobId: job.id, executionId: job.executionId },
+        'job released on shutdown, another worker will continue it',
+      );
+    } catch (err) {
+      // Не вдалося (lease уже забрано або БД недоступна): задачу поверне reaper, коли мине lease.
+      this.logger.warn(
+        { jobId: job.id, error: toSafeError(err) },
+        'job could not be released on shutdown, it will be reclaimed after its lease expires',
+      );
+    }
   }
 
   private async processInContext(job: Job, signal: AbortSignal): Promise<void> {

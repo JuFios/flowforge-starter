@@ -44,6 +44,9 @@ services:
   worker:
     <<: *api-image
     command: ['node', 'dist/worker']
+    # Час між SIGTERM і SIGKILL: воркер чекає на задачі WORKER_SHUTDOWN_GRACE_MS (20 с), решту
+    # повертає в чергу — тому запас тут більший.
+    stop_grace_period: 30s
     depends_on:
       postgres: { condition: service_healthy }
       migrate: { condition: service_completed_successfully }
