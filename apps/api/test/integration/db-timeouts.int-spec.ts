@@ -21,6 +21,24 @@ async function within<T>(
   }
 }
 
+/**
+ * Задає змінні оточення й повертає функцію відновлення. Тести цього файлу змінюють
+ * DATABASE_URL і таймаути, тож мусять повертати їх, щоб не впливати на інші тести
+ * (порядок describe-блоків не гарантований, напр. з --randomize).
+ */
+function setEnv(values: Record<string, string>): () => void {
+  const saved = Object.fromEntries(
+    Object.keys(values).map((key) => [key, process.env[key]]),
+  );
+  Object.assign(process.env, values);
+  return () => {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  };
+}
+
 async function settle(promise: Promise<unknown>): Promise<{ error?: unknown }> {
   try {
     await promise;
@@ -33,15 +51,19 @@ async function settle(promise: Promise<unknown>): Promise<{ error?: unknown }> {
 describe('database calls are bounded by timeouts', () => {
   describe('statement timeout (application connection)', () => {
     let running: RunningApp;
+    let restoreEnv: () => void;
 
     beforeAll(async () => {
       // Оточення читається під час імпорту модуля застосунку, тож імпорт — після налаштування.
-      process.env.DB_STATEMENT_TIMEOUT_MS = '300';
+      restoreEnv = setEnv({ DB_STATEMENT_TIMEOUT_MS: '300' });
       const { startApp } = await import('../helpers/app');
       running = await startApp();
     });
 
-    afterAll(() => running?.close());
+    afterAll(async () => {
+      await running?.close();
+      restoreEnv();
+    });
 
     it('cancels a query that runs longer than DB_STATEMENT_TIMEOUT_MS', async () => {
       const started = Date.now();
@@ -61,6 +83,7 @@ describe('database calls are bounded by timeouts', () => {
   describe('connect timeout (migration CLI connection)', () => {
     let silent: Server;
     const sockets: Socket[] = [];
+    let restoreEnv: () => void = () => undefined;
 
     beforeAll(async () => {
       // Приймає TCP-з'єднання й нічого не відповідає — як завислий сервер або мережевий шлюз.
@@ -71,14 +94,17 @@ describe('database calls are bounded by timeouts', () => {
     });
 
     afterAll(async () => {
+      restoreEnv();
       sockets.forEach((s) => s.destroy());
       await new Promise((resolve) => silent.close(resolve));
     });
 
     it('gives up connecting to a server that never answers after DB_CONNECT_TIMEOUT_MS', async () => {
       const { port } = silent.address() as AddressInfo;
-      process.env.DATABASE_URL = `postgres://flowforge:flowforge@127.0.0.1:${port}/flowforge_test`;
-      process.env.DB_CONNECT_TIMEOUT_MS = '300';
+      restoreEnv = setEnv({
+        DATABASE_URL: `postgres://flowforge:flowforge@127.0.0.1:${port}/flowforge_test`,
+        DB_CONNECT_TIMEOUT_MS: '300',
+      });
       const { default: cliDataSource } =
         await import('../../src/database/data-source');
 
