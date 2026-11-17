@@ -1,0 +1,75 @@
+import { Logger } from '@nestjs/common';
+import { JobQueueService } from '../../src/engine/job-queue.service';
+import { LeaseKeeper } from '../../src/engine/lease-keeper';
+import { Job } from '../../src/entities';
+
+const LEASE_MS = 3_000;
+const job = { id: 'job-1', executionId: 'exec-1', lockToken: 't' } as Job;
+
+function keeperWith(heartbeat: jest.Mock): LeaseKeeper {
+  return new LeaseKeeper(
+    { heartbeat } as unknown as JobQueueService,
+    job,
+    LEASE_MS,
+  ).start();
+}
+
+describe('LeaseKeeper', () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+    jest.restoreAllMocks();
+  });
+
+  it('renews the lease every third of its duration while the job runs', async () => {
+    const heartbeat = jest.fn().mockResolvedValue(true);
+    const keeper = keeperWith(heartbeat);
+
+    await jest.advanceTimersByTimeAsync(LEASE_MS * 3);
+    keeper.stop();
+
+    expect(heartbeat).toHaveBeenCalledTimes(9);
+    expect(keeper.signal.aborted).toBe(false);
+  });
+
+  it('aborts at once when the lease was taken over', async () => {
+    const heartbeat = jest.fn().mockResolvedValue(false);
+    const keeper = keeperWith(heartbeat);
+
+    await jest.advanceTimersByTimeAsync(LEASE_MS / 3);
+
+    expect(keeper.signal.aborted).toBe(true);
+    await jest.advanceTimersByTimeAsync(LEASE_MS * 3);
+    expect(heartbeat).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps working through a short database outage', async () => {
+    const heartbeat = jest
+      .fn()
+      .mockRejectedValueOnce(new Error('connection reset'))
+      .mockResolvedValue(true);
+    const keeper = keeperWith(heartbeat);
+
+    await jest.advanceTimersByTimeAsync(LEASE_MS * 2);
+    keeper.stop();
+
+    expect(keeper.signal.aborted).toBe(false);
+  });
+
+  it('gives the job up before the lease runs out when renewals keep failing', async () => {
+    const heartbeat = jest.fn().mockRejectedValue(new Error('db down'));
+    const keeper = keeperWith(heartbeat);
+
+    // Друга невдала спроба — на 2/3 lease: запас 20% ще є, працюємо далі.
+    await jest.advanceTimersByTimeAsync((LEASE_MS * 2) / 3);
+    expect(keeper.signal.aborted).toBe(false);
+    // Третя — на межі lease: інший воркер уже може забрати задачу.
+    await jest.advanceTimersByTimeAsync(LEASE_MS / 3);
+    expect(keeper.signal.aborted).toBe(true);
+    keeper.stop();
+  });
+});
