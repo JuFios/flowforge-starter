@@ -9,7 +9,11 @@ import {
 export type JobStatus = 'queued' | 'running' | 'done' | 'failed';
 
 @Entity('jobs')
-@Index(['status', 'runAt'])
+// Захоплення: найраніша готова задача серед queued (часткий індекс не містить завершених задач,
+// яких з часом переважна більшість).
+@Index('IDX_jobs_claim', ['runAt'], { where: `"status" = 'queued'` })
+// Reaper: задачі в роботі з простроченим lease.
+@Index('IDX_jobs_lease', ['lockedUntil'], { where: `"status" = 'running'` })
 export class Job {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -37,6 +41,13 @@ export class Job {
 
   @Column({ type: 'timestamptz', nullable: true })
   lockedUntil: Date | null;
+
+  /**
+   * Fencing-токен поточного lease: новий на кожне захоплення. Кожен запис воркера про задачу
+   * містить умову на цей токен, тож воркер, чий lease уже забрали, нічого не перезапише.
+   */
+  @Column({ type: 'uuid', nullable: true })
+  lockToken: string | null;
 
   @Column({ type: 'text', nullable: true })
   lastError: string | null;

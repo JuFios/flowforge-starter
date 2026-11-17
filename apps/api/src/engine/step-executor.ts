@@ -15,18 +15,22 @@ export class StepError extends Error {
 export class StepExecutor {
   private readonly logger = new Logger(StepExecutor.name);
 
-  async execute(step: StepDefinition, ctx: StepContext): Promise<unknown> {
+  async execute(
+    step: StepDefinition,
+    ctx: StepContext,
+    signal?: AbortSignal,
+  ): Promise<unknown> {
     switch (step.type) {
       case 'log':
         this.logger.log(renderTemplate(step.message, ctx));
         return { logged: true };
       case 'delay':
-        await new Promise((resolve) => setTimeout(resolve, step.ms));
+        await abortableSleep(step.ms, signal);
         return { waitedMs: step.ms };
       case 'transform':
         return this.transform(step.expr, ctx);
       case 'http':
-        return this.http(step, ctx);
+        return this.http(step, ctx, signal);
     }
   }
 
@@ -43,6 +47,7 @@ export class StepExecutor {
   private async http(
     step: Extract<StepDefinition, { type: 'http' }>,
     ctx: StepContext,
+    signal?: AbortSignal,
   ): Promise<unknown> {
     const url = renderTemplate(step.url, ctx);
     const res = await fetch(url, {
@@ -50,7 +55,9 @@ export class StepExecutor {
       headers: step.headers,
       body:
         step.body !== undefined ? renderTemplate(step.body, ctx) : undefined,
-      signal: AbortSignal.timeout(15_000),
+      signal: signal
+        ? AbortSignal.any([signal, AbortSignal.timeout(15_000)])
+        : AbortSignal.timeout(15_000),
     });
     const text = await res.text();
     if (!res.ok) {
@@ -62,4 +69,18 @@ export class StepExecutor {
       return { status: res.status, body: text.slice(0, 10_000) };
     }
   }
+}
+
+function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener(
+      'abort',
+      () => {
+        clearTimeout(timer);
+        reject(signal.reason as Error);
+      },
+      { once: true },
+    );
+  });
 }

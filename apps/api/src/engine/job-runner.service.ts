@@ -10,17 +10,19 @@ import {
   runWithCorrelationId,
 } from '../observability/correlation';
 import { toSafeError } from '../observability/safe-error';
-import { JobQueueService } from './job-queue.service';
+import { JobQueueService, LeaseLostError } from './job-queue.service';
+import { LeaseKeeper } from './lease-keeper';
 import { StepError, StepExecutor } from './step-executor';
 import { StepContext } from './template';
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 @Injectable()
 export class JobRunnerService implements OnApplicationShutdown {
   private readonly logger = new Logger(JobRunnerService.name);
   readonly workerId = `worker-${randomUUID().slice(0, 8)}`;
   private running = false;
+  private reaper?: NodeJS.Timeout;
 
   constructor(
     private readonly queue: JobQueueService,
@@ -39,10 +41,47 @@ export class JobRunnerService implements OnApplicationShutdown {
     this.running = true;
     this.logger.log(`${this.workerId} started, concurrency=${concurrency}`);
     for (let i = 0; i < concurrency; i++) void this.loop();
+    const leaseMs = this.config.get('JOB_LEASE_MS', { infer: true });
+    this.reaper = setInterval(() => void this.reap(), leaseMs / 2);
   }
 
   onApplicationShutdown(): void {
     this.running = false;
+    clearInterval(this.reaper);
+  }
+
+  /** Пауза опитування з відхиленням ±50%: воркери не стукають у БД синхронно. */
+  private idle(): Promise<void> {
+    const base = this.config.get('WORKER_POLL_INTERVAL_MS', { infer: true });
+    return sleep(base * (0.5 + Math.random()));
+  }
+
+  /** Повертає в чергу задачі зниклих воркерів. Помилка не зупиняє воркер — наступний прохід повторить. */
+  private async reap(): Promise<void> {
+    try {
+      for (const job of await this.queue.reapExpired()) {
+        await runWithCorrelationId(
+          job.correlationId ?? newCorrelationId(),
+          'job',
+          () => {
+            this.logger.warn(
+              {
+                jobId: job.id,
+                executionId: job.executionId,
+                attempt: job.attempts,
+                outcome: job.status,
+              },
+              job.status === 'queued'
+                ? 'lease expired, job returned to the queue'
+                : 'lease expired, no attempts left',
+            );
+            return Promise.resolve();
+          },
+        );
+      }
+    } catch (err) {
+      this.logger.error({ error: toSafeError(err) }, 'lease reaper failed');
+    }
   }
 
   private async loop(): Promise<void> {
@@ -57,7 +96,7 @@ export class JobRunnerService implements OnApplicationShutdown {
         continue;
       }
       if (!job) {
-        await sleep(250);
+        await this.idle();
         continue;
       }
       try {
@@ -79,9 +118,22 @@ export class JobRunnerService implements OnApplicationShutdown {
       job.correlationId ?? newCorrelationId(),
       'job',
       async () => {
+        const keeper = new LeaseKeeper(
+          this.queue,
+          job,
+          this.config.get('JOB_LEASE_MS', { infer: true }),
+        ).start();
         try {
-          await this.processInContext(job);
+          await this.processInContext(job, keeper.signal);
         } catch (err) {
+          if (err instanceof LeaseLostError || keeper.signal.aborted) {
+            // Задачу вже повернуто в чергу або вона в іншого воркера — тут нічого не записуємо.
+            this.logger.warn(
+              { jobId: job.id, executionId: job.executionId },
+              'job abandoned: lease is no longer held',
+            );
+            return;
+          }
           this.logger.error(
             {
               jobId: job.id,
@@ -91,12 +143,14 @@ export class JobRunnerService implements OnApplicationShutdown {
             'job processing failed',
           );
           throw err;
+        } finally {
+          keeper.stop();
         }
       },
     );
   }
 
-  private async processInContext(job: Job): Promise<void> {
+  private async processInContext(job: Job, signal: AbortSignal): Promise<void> {
     this.logger.log(
       { jobId: job.id, executionId: job.executionId, attempt: job.attempts },
       'processing job',
@@ -122,7 +176,8 @@ export class JobRunnerService implements OnApplicationShutdown {
           }),
         );
         try {
-          const output = await this.executor.execute(step, ctx);
+          signal.throwIfAborted();
+          const output = await this.executor.execute(step, ctx, signal);
           ctx.steps[step.id] = output;
           await this.stepRuns.update(run.id, {
             status: 'succeeded',
@@ -142,8 +197,9 @@ export class JobRunnerService implements OnApplicationShutdown {
         output: ctx.steps[last.id] as object,
         finishedAt: new Date(),
       });
-      await this.queue.complete(job.id);
+      await this.queue.complete(job);
     } catch (err) {
+      if (err instanceof LeaseLostError || signal.aborted) throw err;
       const retryable = err instanceof StepError ? err.retryable : true;
       const willRetry = await this.queue.fail(
         job,

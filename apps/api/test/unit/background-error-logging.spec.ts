@@ -95,6 +95,7 @@ describe('background loops log errors without input values', () => {
   it('worker: a failing claim in the processing loop', async () => {
     const queue = {
       claimNext: jest.fn().mockRejectedValue(dbError()),
+      reapExpired: jest.fn().mockResolvedValue([]),
     } as unknown as JobQueueService;
     const runner = new JobRunnerService(
       queue,
@@ -102,7 +103,7 @@ describe('background loops log errors without input values', () => {
       {} as Repository<Execution>,
       {} as Repository<Workflow>,
       {} as Repository<StepRun>,
-      config({ WORKER_CONCURRENCY: 1 }),
+      config({ WORKER_CONCURRENCY: 1, JOB_LEASE_MS: 60_000 }),
     );
 
     runner.start(1);
