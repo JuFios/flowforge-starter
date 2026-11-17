@@ -78,20 +78,35 @@ jobs:
       - run: docker compose up -d --build
       - name: Wait for API, workers and frontend
         run: |
+          ready=
           for i in $(seq 1 60); do
-            if curl -fsS localhost:3000/ready > /dev/null && curl -fsS -o /dev/null localhost:3001/connect; then
+            if curl -fsS -o /dev/null localhost:3000/ready && curl -fsS -o /dev/null localhost:3001/connect; then
+              ready=1
               break
             fi
             sleep 3
           done
-          curl -fsS localhost:3000/ready
-          test "$(docker compose ps -a migrate --format '{{.ExitCode}}')" = "0"
-          for c in $(docker compose ps -q worker); do
+          if [ -z "$ready" ]; then
+            echo "API or frontend not ready after 180s"
+            exit 1
+          fi
+      - name: Check migrations, API, frontend and both workers
+        run: |
+          migrate_exit="$(docker compose ps -a migrate --format '{{.ExitCode}}')"
+          [ "$migrate_exit" = "0" ] || { echo "migrate exited with '$migrate_exit'"; exit 1; }
+          curl -fsS localhost:3000/ready; echo
+          curl -fsS -o /dev/null localhost:3001/connect
+          workers="$(docker compose ps -a -q worker)"
+          count="$(printf '%s\n' "$workers" | grep -c . || true)"
+          [ "$count" -eq 2 ] || { echo "expected 2 worker containers, found $count"; exit 1; }
+          for c in $workers; do
+            state=
             for i in $(seq 1 30); do
-              [ "$(docker inspect -f '{{.State.Health.Status}}' "$c")" = healthy ] && break
+              state="$(docker inspect -f '{{.State.Status}}/{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$c")"
+              [ "$state" = "running/healthy" ] && break
               sleep 2
             done
-            test "$(docker inspect -f '{{.State.Health.Status}}' "$c")" = healthy
+            [ "$state" = "running/healthy" ] || { echo "worker $c is $state"; exit 1; }
           done
       - name: Logs on failure
         if: failure()
