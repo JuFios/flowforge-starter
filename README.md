@@ -219,16 +219,24 @@ npm run build && npm run migration:generate -- src/database/migrations/<Name>
 конфігурації застосунку CLI не потрібна). `statement_timeout` на міграції не діє: зміна схеми
 великої таблиці легітимно триває довше за запит застосунку.
 
-Для БД, створеної стартовим кодом через `synchronize`, базову міграцію не виконують повторно
-(таблиці вже є), а позначають як застосовану, після чого застосовують решту:
+Для БД, створеної стартовим кодом через `synchronize` (наприклад, том `pgdata` після запуску
+стартового репозиторію в compose), базову міграцію не виконують повторно — таблиці вже є, і крок
+`migrate` упав би. Її позначають як застосовану, решту міграцій застосовують тим самим образом,
+що й compose, а вже потім піднімають систему. Усе — з кореня репозиторію, з `.env` з розділу
+[«Запуск»](#запуск); Node.js на хості не потрібен:
 
 ```bash
-# з кореня репозиторію (БД у compose)
+docker-compose up -d postgres
 docker-compose exec -T postgres psql -U flowforge -d flowforge -c \
   "CREATE TABLE IF NOT EXISTS migrations (id SERIAL PRIMARY KEY, \"timestamp\" bigint NOT NULL, name varchar NOT NULL);
    INSERT INTO migrations (\"timestamp\", name) VALUES (1794920217603, 'InitialSchema1794920217603');"
-cd apps/api && npm run build && npm run migration:run
+docker-compose run --rm --build migrate
+docker-compose up --build
 ```
+
+Те саме з хоста — після кроків [«Локальний запуск поза docker»](#локальний-запуск-поза-docker)
+до `npm run build` включно (залежності встановлено, `DATABASE_URL` у `apps/api/.env` вказує на
+`localhost`): ті самі `psql`-команди, потім `npm run migration:run` з `apps/api`.
 
 Перевірено на БД, створеній стартовим кодом: після цього застосовуються лише `AddCorrelationId` і
 `TimestampsWithTimeZone`, а `migration:generate --check` не знаходить розбіжностей між схемою і
