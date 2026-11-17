@@ -1,8 +1,11 @@
-import { Controller, Get } from '@nestjs/common';
+import { Controller, Get, Logger } from '@nestjs/common';
 import { HealthCheck, HealthCheckError, HealthCheckService, HealthIndicatorResult, TypeOrmHealthIndicator } from '@nestjs/terminus';
+import { toSafeError } from './safe-error';
 
 @Controller()
 export class HealthController {
+  private readonly logger = new Logger(HealthController.name);
+
   constructor(
     private readonly health: HealthCheckService,
     private readonly db: TypeOrmHealthIndicator,
@@ -25,8 +28,9 @@ export class HealthController {
   private async database(): Promise<HealthIndicatorResult> {
     try {
       return await this.db.pingCheck('database', { timeout: 2000 });
-    } catch {
-      // Текст помилки драйвера (адреса хоста, причина) назовні не віддаємо.
+    } catch (err) {
+      // Текст помилки драйвера (адреса хоста, причина) назовні не віддаємо — лише в лог.
+      this.logger.warn({ error: toSafeError(err) }, 'readiness: database check failed');
       throw new HealthCheckError('database unavailable', { database: { status: 'down' } });
     }
   }
