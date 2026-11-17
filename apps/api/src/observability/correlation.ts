@@ -24,7 +24,7 @@ export function newCorrelationId(): string {
 
 /** Повертає ID із заголовка, якщо він валідний; інакше undefined. */
 export function normalizeCorrelationId(raw: unknown): string | undefined {
-  const value = Array.isArray(raw) ? raw[0] : raw;
+  const value: unknown = Array.isArray(raw) ? (raw as unknown[])[0] : raw;
   return typeof value === 'string' && VALID_ID.test(value) ? value : undefined;
 }
 

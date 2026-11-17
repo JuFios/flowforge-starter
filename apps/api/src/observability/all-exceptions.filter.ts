@@ -50,7 +50,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
   catch(exception: unknown, host: ArgumentsHost): void {
     const { httpAdapter } = this.adapterHost;
     const http = host.switchToHttp();
-    const response = http.getResponse();
+    const response = http.getResponse<unknown>();
     // Із запиту, а не з AsyncLocalStorage: помилка могла виникнути ще до middleware кореляції
     // (наприклад, у body-parser), а ID однаково має повернутися клієнту.
     const correlationId = correlationIdForRequest(
@@ -72,7 +72,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
       body =
         typeof payload === 'string'
           ? { statusCode: status, message: payload }
-          : { ...(payload as object) };
+          : { ...payload };
       if (status >= 500) {
         this.logger.error(
           { ...logContext, status, error: toSafeError(exception) },
