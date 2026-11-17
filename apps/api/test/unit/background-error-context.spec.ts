@@ -5,6 +5,7 @@ import { EnvironmentVariables } from '../../src/config/env.validation';
 import { CheckpointService } from '../../src/engine/checkpoint.service';
 import { JobQueueService } from '../../src/engine/job-queue.service';
 import { JobRunnerService } from '../../src/engine/job-runner.service';
+import { QueueMetrics } from '../../src/engine/queue.metrics';
 import { StepExecutor } from '../../src/engine/step-executor';
 import { Execution, Job, Workflow, WorkflowVersion } from '../../src/entities';
 import { ExecutionsService } from '../../src/executions/executions.service';
@@ -61,6 +62,7 @@ describe('background error logs keep the correlation context', () => {
       {} as Repository<WorkflowVersion>,
       {} as CheckpointService,
       config({ WORKER_CONCURRENCY: 1 }),
+      {} as QueueMetrics,
     );
     const job = {
       id: 'job-1',

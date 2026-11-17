@@ -5,6 +5,7 @@ import { EnvironmentVariables } from '../../src/config/env.validation';
 import { CheckpointService } from '../../src/engine/checkpoint.service';
 import { JobQueueService } from '../../src/engine/job-queue.service';
 import { JobRunnerService } from '../../src/engine/job-runner.service';
+import { QueueMetrics } from '../../src/engine/queue.metrics';
 import { StepExecutor } from '../../src/engine/step-executor';
 import { Execution, Workflow, WorkflowVersion } from '../../src/entities';
 import { ExecutionsService } from '../../src/executions/executions.service';
@@ -105,6 +106,7 @@ describe('background loops log errors without input values', () => {
       {} as Repository<WorkflowVersion>,
       {} as CheckpointService,
       config({ WORKER_CONCURRENCY: 1, JOB_LEASE_MS: 60_000 }),
+      {} as QueueMetrics,
     );
 
     runner.start(1);

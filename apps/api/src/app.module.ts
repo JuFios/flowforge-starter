@@ -7,6 +7,7 @@ import { buildDataSourceOptions, ENTITIES } from './database/database.options';
 import { CheckpointService } from './engine/checkpoint.service';
 import { JobQueueService } from './engine/job-queue.service';
 import { JobRunnerService } from './engine/job-runner.service';
+import { QueueMetrics } from './engine/queue.metrics';
 import { StepExecutor } from './engine/step-executor';
 import { ExecutionsController } from './executions/executions.controller';
 import { ExecutionsService } from './executions/executions.service';
@@ -73,6 +74,7 @@ export class AppModule {}
     CheckpointService,
     JobRunnerService,
     StepExecutor,
+    QueueMetrics,
   ],
 })
 export class WorkerModule {}

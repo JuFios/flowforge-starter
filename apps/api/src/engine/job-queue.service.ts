@@ -37,6 +37,9 @@ export class LeaseLostError extends Error {
   }
 }
 
+/** Захоплена задача: момент захоплення — за годинником БД (для метрики затримки захоплення). */
+export type ClaimedJob = Job & { claimedAt: Date };
+
 /** Задача, повернута reaper-ом після простроченого lease. */
 export interface ReapedJob {
   id: string;
@@ -81,8 +84,8 @@ export class JobQueueService {
    * задачу не може отримати двоє. `RETURNING *` повертає вже оновлений рядок. Кожне захоплення
    * видає новий fencing-токен `lockToken`. Увесь час — за годинником БД, не процесу.
    */
-  async claimNext(workerId: string): Promise<Job | null> {
-    const [rows]: [Job[], number] = await this.ds.query(
+  async claimNext(workerId: string): Promise<ClaimedJob | null> {
+    const [rows]: [ClaimedJob[], number] = await this.ds.query(
       `UPDATE jobs
           SET status = 'running', "lockedBy" = $1, "lockToken" = gen_random_uuid(),
               "lockedUntil" = now() + make_interval(secs => $2),
@@ -94,7 +97,7 @@ export class JobQueueService {
                  LIMIT 1
                  FOR UPDATE SKIP LOCKED
               )
-        RETURNING *`,
+        RETURNING *, now() AS "claimedAt"`,
       [workerId, this.leaseSeconds],
     );
     return rows[0] ?? null;

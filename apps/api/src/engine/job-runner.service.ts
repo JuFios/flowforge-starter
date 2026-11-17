@@ -12,8 +12,13 @@ import {
 } from '../observability/correlation';
 import { toSafeError } from '../observability/safe-error';
 import { CheckpointService } from './checkpoint.service';
-import { JobQueueService, LeaseLostError } from './job-queue.service';
+import {
+  ClaimedJob,
+  JobQueueService,
+  LeaseLostError,
+} from './job-queue.service';
 import { LeaseKeeper } from './lease-keeper';
+import { QueueMetrics } from './queue.metrics';
 import { StepError, StepExecutor } from './step-executor';
 import { StepContext } from './template';
 
@@ -49,6 +54,7 @@ export class JobRunnerService implements BeforeApplicationShutdown {
     private readonly versions: Repository<WorkflowVersion>,
     private readonly checkpoints: CheckpointService,
     private readonly config: ConfigService<EnvironmentVariables, true>,
+    private readonly metrics: QueueMetrics,
   ) {}
 
   start(
@@ -118,6 +124,8 @@ export class JobRunnerService implements BeforeApplicationShutdown {
   private async reap(): Promise<void> {
     try {
       for (const job of await this.queue.reapExpired()) {
+        this.metrics.leasesExpired.inc();
+        this.metrics.observeFailure(job.outcome, 'lease_expired');
         await runWithCorrelationId(
           job.correlationId ?? newCorrelationId(),
           'job',
@@ -144,7 +152,7 @@ export class JobRunnerService implements BeforeApplicationShutdown {
 
   private async loop(): Promise<void> {
     while (!this.stopping.signal.aborted) {
-      let job: Job | null;
+      let job: ClaimedJob | null;
       try {
         job = await this.queue.claimNext(this.workerId);
       } catch (err) {
@@ -157,6 +165,7 @@ export class JobRunnerService implements BeforeApplicationShutdown {
         await this.idle();
         continue;
       }
+      this.metrics.observeClaim(job);
       try {
         await this.process(job);
       } catch {
@@ -291,10 +300,18 @@ export class JobRunnerService implements BeforeApplicationShutdown {
           continue;
         }
         current = await this.checkpoints.startStep(job, i, step.id);
-        const output = await this.executor.execute(step, ctx, {
-          signal,
-          idempotencyKey: current.idempotencyKey,
-        });
+        const startedAt = Date.now();
+        let output: unknown;
+        try {
+          output = await this.executor.execute(step, ctx, {
+            signal,
+            idempotencyKey: current.idempotencyKey,
+          });
+        } catch (err) {
+          this.metrics.observeStep(step.type, 'failed', startedAt);
+          throw err;
+        }
+        this.metrics.observeStep(step.type, 'succeeded', startedAt);
         await this.checkpoints.checkpoint(job, current, output);
         current = undefined;
         ctx.steps[step.id] = output;
@@ -304,11 +321,23 @@ export class JobRunnerService implements BeforeApplicationShutdown {
     } catch (err) {
       if (err instanceof LeaseLostError || signal.aborted) throw err;
       const retryable = err instanceof StepError ? err.retryable : true;
-      await this.checkpoints.fail(
+      const outcome = await this.checkpoints.fail(
         job,
         current,
         (err as Error).message,
         retryable,
+      );
+      this.metrics.observeFailure(outcome, 'step_error');
+      this.logger.warn(
+        {
+          jobId: job.id,
+          executionId: job.executionId,
+          stepId: current?.stepId,
+          attempt: job.attempts,
+          outcome,
+          error: toSafeError(err),
+        },
+        outcome === 'retry' ? 'step failed, will retry' : 'step failed',
       );
     }
   }
