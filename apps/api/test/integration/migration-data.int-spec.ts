@@ -71,4 +71,72 @@ describe('data migrations', () => {
       [1, 'failed', 2, '2026-01-01T00:00:04.000Z'],
     ]);
   });
+
+  it('WorkflowVersions snapshots existing workflows and finishes runs of deleted ones', async () => {
+    await truncateAll(ds);
+    await revertThrough('WorkflowVersions');
+    const tenantId = '00000000-0000-4000-8000-0000000000aa';
+    const deletedWf = '00000000-0000-4000-8000-0000000000dd';
+    const [{ id: wfId }]: Array<{ id: string }> = await ds.query(
+      `INSERT INTO workflows ("tenantId", name, steps, version)
+       VALUES ($1, 'kept', '[{"id":"a","type":"log","message":"x"}]', 3) RETURNING id`,
+      [tenantId],
+    );
+    const insertExecution = async (workflowId: string, status: string) => {
+      const [{ id }]: Array<{ id: string }> = await ds.query(
+        `INSERT INTO executions ("tenantId", "workflowId", status) VALUES ($1, $2, $3) RETURNING id`,
+        [tenantId, workflowId, status],
+      );
+      await ds.query(
+        `INSERT INTO jobs ("tenantId", "executionId", status) VALUES ($1, $2, $3)`,
+        [tenantId, id, status === 'succeeded' ? 'done' : 'queued'],
+      );
+      return id;
+    };
+    const live = await insertExecution(wfId, 'pending');
+    const orphan = await insertExecution(deletedWf, 'pending');
+    const history = await insertExecution(deletedWf, 'succeeded');
+
+    await ds.runMigrations({ transaction: 'each' });
+
+    const versions: Array<{ id: string; version: number; steps: unknown }> =
+      await ds.query(
+        `SELECT id, version, steps FROM workflow_versions WHERE "workflowId" = $1`,
+        [wfId],
+      );
+    expect(versions).toEqual([
+      {
+        id: expect.any(String) as string,
+        version: 3,
+        steps: [{ id: 'a', type: 'log', message: 'x' }],
+      },
+    ]);
+    const state = async (id: string) => {
+      const [row]: Array<{
+        status: string;
+        workflowVersionId: string | null;
+        job: string;
+      }> = await ds.query(
+        `SELECT e.status, e."workflowVersionId", j.status AS job
+           FROM executions e JOIN jobs j ON j."executionId" = e.id WHERE e.id = $1`,
+        [id],
+      );
+      return row;
+    };
+    expect(await state(live)).toEqual({
+      status: 'pending',
+      workflowVersionId: versions[0].id,
+      job: 'queued',
+    });
+    expect(await state(orphan)).toEqual({
+      status: 'failed',
+      workflowVersionId: null,
+      job: 'failed',
+    });
+    expect(await state(history)).toEqual({
+      status: 'succeeded',
+      workflowVersionId: null,
+      job: 'done',
+    });
+  });
 });

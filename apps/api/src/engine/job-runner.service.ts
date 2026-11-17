@@ -4,7 +4,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'crypto';
 import { Repository } from 'typeorm';
 import { EnvironmentVariables } from '../config/env.validation';
-import { Execution, Job, Workflow } from '../entities';
+import { Execution, Job, WorkflowVersion } from '../entities';
 import {
   newCorrelationId,
   runWithCorrelationId,
@@ -30,8 +30,8 @@ export class JobRunnerService implements OnApplicationShutdown {
     private readonly executor: StepExecutor,
     @InjectRepository(Execution)
     private readonly executions: Repository<Execution>,
-    @InjectRepository(Workflow)
-    private readonly workflows: Repository<Workflow>,
+    @InjectRepository(WorkflowVersion)
+    private readonly versions: Repository<WorkflowVersion>,
     private readonly checkpoints: CheckpointService,
     private readonly config: ConfigService<EnvironmentVariables, true>,
   ) {}
@@ -159,8 +159,9 @@ export class JobRunnerService implements OnApplicationShutdown {
     const execution = await this.executions.findOneOrFail({
       where: { id: job.executionId },
     });
-    const workflow = await this.workflows.findOneOrFail({
-      where: { id: execution.workflowId },
+    // Знімок версії, зафіксований під час створення виконання, а не поточний стан workflow.
+    const snapshot = await this.versions.findOneOrFail({
+      where: { id: execution.workflowVersionId ?? undefined },
     });
 
     const ctx: StepContext = { input: execution.input, steps: {} };
@@ -171,8 +172,8 @@ export class JobRunnerService implements OnApplicationShutdown {
     );
 
     try {
-      for (let i = 0; i < workflow.steps.length; i++) {
-        const step = workflow.steps[i];
+      for (let i = 0; i < snapshot.steps.length; i++) {
+        const step = snapshot.steps[i];
         const checkpoint = done.get(i);
         if (checkpoint) {
           // Крок уже завершено в попередній спробі: беремо збережений результат, не виконуємо знову.
@@ -192,7 +193,7 @@ export class JobRunnerService implements OnApplicationShutdown {
         await this.checkpoints.checkpoint(job, run, output);
         ctx.steps[step.id] = output;
       }
-      const last = workflow.steps[workflow.steps.length - 1];
+      const last = snapshot.steps[snapshot.steps.length - 1];
       await this.executions.update(execution.id, {
         status: 'succeeded',
         output: ctx.steps[last.id] as object,

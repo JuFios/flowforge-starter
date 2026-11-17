@@ -6,7 +6,7 @@ import { CheckpointService } from '../../src/engine/checkpoint.service';
 import { JobQueueService } from '../../src/engine/job-queue.service';
 import { JobRunnerService } from '../../src/engine/job-runner.service';
 import { StepExecutor } from '../../src/engine/step-executor';
-import { Execution, Workflow } from '../../src/entities';
+import { Execution, Workflow, WorkflowVersion } from '../../src/entities';
 import { ExecutionsService } from '../../src/executions/executions.service';
 import { SchedulerService } from '../../src/scheduler/scheduler.service';
 
@@ -102,7 +102,7 @@ describe('background loops log errors without input values', () => {
       queue,
       {} as StepExecutor,
       {} as Repository<Execution>,
-      {} as Repository<Workflow>,
+      {} as Repository<WorkflowVersion>,
       {} as CheckpointService,
       config({ WORKER_CONCURRENCY: 1, JOB_LEASE_MS: 60_000 }),
     );

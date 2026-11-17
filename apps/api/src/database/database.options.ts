@@ -1,9 +1,23 @@
 import { DataSourceOptions } from 'typeorm';
 import type { DatabaseEnvironment } from '../config/env.validation';
-import { Execution, Job, StepRun, Tenant, Workflow } from '../entities';
+import {
+  Execution,
+  Job,
+  StepRun,
+  Tenant,
+  Workflow,
+  WorkflowVersion,
+} from '../entities';
 import { MIGRATIONS } from './migrations';
 
-export const ENTITIES = [Tenant, Workflow, Execution, StepRun, Job];
+export const ENTITIES = [
+  Tenant,
+  Workflow,
+  WorkflowVersion,
+  Execution,
+  StepRun,
+  Job,
+];
 
 /**
  * Запас клієнтського query_timeout понад statement_timeout: спершу запит скасовує сервер (з

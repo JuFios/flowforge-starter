@@ -6,7 +6,7 @@ import { CheckpointService } from '../../src/engine/checkpoint.service';
 import { JobQueueService } from '../../src/engine/job-queue.service';
 import { JobRunnerService } from '../../src/engine/job-runner.service';
 import { StepExecutor } from '../../src/engine/step-executor';
-import { Execution, Job, Workflow } from '../../src/entities';
+import { Execution, Job, Workflow, WorkflowVersion } from '../../src/entities';
 import { ExecutionsService } from '../../src/executions/executions.service';
 import { getCorrelationId } from '../../src/observability/correlation';
 import { SchedulerService } from '../../src/scheduler/scheduler.service';
@@ -58,7 +58,7 @@ describe('background error logs keep the correlation context', () => {
       {} as JobQueueService,
       {} as StepExecutor,
       executions,
-      {} as Repository<Workflow>,
+      {} as Repository<WorkflowVersion>,
       {} as CheckpointService,
       config({ WORKER_CONCURRENCY: 1 }),
     );

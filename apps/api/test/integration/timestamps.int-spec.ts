@@ -46,7 +46,12 @@ const COLUMNS: Array<{
       (
         await ds
           .getRepository(Execution)
-          .save({ tenantId: randomUUID(), workflowId: randomUUID() })
+          // Завершене виконання може не мати знімку версії (CHK_executions_version_snapshot).
+          .save({
+            tenantId: randomUUID(),
+            workflowId: randomUUID(),
+            status: 'succeeded',
+          })
       ).createdAt,
   },
   {

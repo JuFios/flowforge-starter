@@ -7,6 +7,7 @@ import { Execution, Job } from '../../src/entities';
 import { getCorrelationId } from '../../src/observability/correlation';
 import { RunningApp, startApp } from '../helpers/app';
 import {
+  createExecution,
   createTenant,
   createWorkflow,
   openTestDataSource,
@@ -33,9 +34,7 @@ describe('worker carries the correlation id of the originating request', () => {
     const { tenant } = await createTenant(ds);
     const wf = await createWorkflow(ds, tenant.id);
     // Так, як їх створює API (ланцюжок запит → execution/job перевірено в observability.int-spec).
-    const execution = await ds.getRepository(Execution).save({
-      tenantId: tenant.id,
-      workflowId: wf.id,
+    const execution = await createExecution(ds, wf, {
       input: { name: 'Ada' },
       correlationId: 'origin-req-7',
     });
