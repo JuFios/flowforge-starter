@@ -12,6 +12,7 @@ jobs:
   api:
     name: api (lint, typecheck, unit, build)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     defaults: { run: { working-directory: apps/api } }
     steps:
       - uses: actions/checkout@v4
@@ -29,6 +30,7 @@ jobs:
   integration:
     name: api integration (real Postgres)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults: { run: { working-directory: apps/api } }
     services:
       postgres:
@@ -58,6 +60,7 @@ jobs:
   frontend:
     name: frontend (lint, build)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     defaults: { run: { working-directory: apps/frontend } }
     steps:
       - uses: actions/checkout@v4
@@ -73,58 +76,45 @@ jobs:
   compose:
     name: docker-compose smoke (migrations from scratch)
     runs-on: ubuntu-latest
+    # Верхня межа на весь job: жоден крок, що завис, не чекає 6-годинного ліміту GitHub.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - run: docker compose up -d --build
-      - name: Wait for API, workers and frontend
-        run: |
-          ready=
-          for i in $(seq 1 60); do
-            if curl -fsS -o /dev/null localhost:3000/ready && curl -fsS -o /dev/null localhost:3001/connect; then
-              ready=1
-              break
-            fi
-            sleep 3
-          done
-          if [ -z "$ready" ]; then
-            echo "API or frontend not ready after 180s"
-            exit 1
-          fi
+      - run: docker compose build
+      # --wait: compose чекає, поки migrate завершиться з кодом 0, а api, обидва воркери й
+      # фронтенд стануть healthy; не дочекався за --wait-timeout або сервіс впав — помилка.
+      - name: Start the stack and wait until every service is healthy
+        run: docker compose up -d --wait --wait-timeout 180
       - name: Check migrations, API, frontend and both workers
         run: |
           migrate_exit="$(docker compose ps -a migrate --format '{{.ExitCode}}')"
           [ "$migrate_exit" = "0" ] || { echo "migrate exited with '$migrate_exit'"; exit 1; }
-          curl -fsS localhost:3000/ready; echo
-          curl -fsS -o /dev/null localhost:3001/connect
+          curl -fsS --max-time 5 localhost:3000/ready; echo
+          curl -fsS --max-time 5 -o /dev/null localhost:3001/connect
           workers="$(docker compose ps -a -q worker)"
           count="$(printf '%s\n' "$workers" | grep -c . || true)"
           [ "$count" -eq 2 ] || { echo "expected 2 worker containers, found $count"; exit 1; }
           for c in $workers; do
-            state=
-            for i in $(seq 1 30); do
-              state="$(docker inspect -f '{{.State.Status}}/{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$c")"
-              [ "$state" = "running/healthy" ] && break
-              sleep 2
-            done
+            state="$(docker inspect -f '{{.State.Status}}/{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$c")"
             [ "$state" = "running/healthy" ] || { echo "worker $c is $state"; exit 1; }
           done
       - name: Run a workflow end to end through a worker
         run: |
-          tenant="$(curl -fsS -X POST localhost:3000/tenants -H 'x-admin-token: change-me-admin' \
+          tenant="$(curl -fsS --max-time 10 -X POST localhost:3000/tenants -H 'x-admin-token: change-me-admin' \
             -H 'content-type: application/json' -d '{"name":"ci"}')"
           key="$(printf '%s' "$tenant" | jq -er .apiKey)"
-          wf="$(curl -fsS -X POST localhost:3000/workflows -H "x-api-key: $key" -H 'content-type: application/json' \
+          wf="$(curl -fsS --max-time 10 -X POST localhost:3000/workflows -H "x-api-key: $key" -H 'content-type: application/json' \
             -d '{"name":"smoke","steps":[{"id":"hello","type":"log","message":"hi {{ input.name }}"}]}' | jq -er .id)"
-          exe="$(curl -fsS -X POST "localhost:3000/workflows/$wf/run" -H "x-api-key: $key" -H 'x-request-id: ci-smoke-1' \
+          exe="$(curl -fsS --max-time 10 -X POST "localhost:3000/workflows/$wf/run" -H "x-api-key: $key" -H 'x-request-id: ci-smoke-1' \
             -H 'content-type: application/json' -d '{"name":"ci"}' | jq -er .id)"
           status=
           for i in $(seq 1 30); do
-            status="$(curl -fsS "localhost:3000/executions/$exe" -H "x-api-key: $key" | jq -er .status)"
+            status="$(curl -fsS --max-time 10 "localhost:3000/executions/$exe" -H "x-api-key: $key" | jq -er .status)"
             [ "$status" = succeeded ] && break
             sleep 2
           done
           [ "$status" = succeeded ] || { echo "execution $exe is '$status'"; exit 1; }
-          curl -fsS "localhost:3000/executions/$exe" -H "x-api-key: $key" | jq -e '.correlationId == "ci-smoke-1"'
+          curl -fsS --max-time 10 "localhost:3000/executions/$exe" -H "x-api-key: $key" | jq -e '.correlationId == "ci-smoke-1"'
       - name: Logs on failure
         if: failure()
         run: docker compose logs --no-color

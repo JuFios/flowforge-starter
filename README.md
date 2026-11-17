@@ -38,7 +38,8 @@ docker-compose up --build
 ```
 
 Порядок старту: `postgres` (healthy) → `migrate` (застосовує міграції й завершується з кодом 0)
-→ `api` і два `worker` (healthy за `/ready`) → `frontend`. Схема БД будується лише міграціями,
+→ `api` і два `worker` (healthy за `/ready`) → `frontend` (healthy, коли відповідає сторінка).
+`docker-compose up -d --wait` повертає керування, коли всі сервіси healthy (або з помилкою). Схема БД будується лише міграціями,
 тож система піднімається з порожнього тому.
 
 | Сервіс | Адреса |
@@ -218,7 +219,11 @@ CI (`.github/workflows/ci.yml`):
 | `api` | lint, typecheck, unit, build |
 | `integration` | інтеграційні тести з `services: postgres` |
 | `frontend` | lint, build |
-| `compose` | `docker compose up --build` з нуля: міграції, healthy API і рівно два healthy воркери, фронтенд, запуск workflow наскрізь (виконання `succeeded` зі збереженим `correlationId`) |
+| `compose` | `docker compose up --wait` з нуля: міграції, healthy API, рівно два healthy воркери і фронтенд, запуск workflow наскрізь (виконання `succeeded` зі збереженим `correlationId`) |
+
+Усі job-и мають `timeout-minutes`; у `compose` очікування готовності обмежене `--wait-timeout 180`,
+а кожен `curl` — `--max-time`, тож сервіс, що прийняв з'єднання й мовчить, валить job за таймаутом,
+а не тримає його до 6-годинного ліміту GitHub.
 
 ## Спостережуваність
 
