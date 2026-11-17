@@ -8,9 +8,12 @@ export interface SafeError {
 
 function errorCode(err: Error): string | undefined {
   const own = (err as { code?: unknown }).code;
-  const driver = (err as { driverError?: { code?: unknown } }).driverError?.code;
+  const driver = (err as { driverError?: { code?: unknown } }).driverError
+    ?.code;
   const code = own ?? driver;
-  return typeof code === 'string' || typeof code === 'number' ? String(code) : undefined;
+  return typeof code === 'string' || typeof code === 'number'
+    ? String(code)
+    : undefined;
 }
 
 export const REDACTED = '[redacted]';
@@ -45,15 +48,26 @@ const VALUE_PATTERNS: Array<[RegExp, string]> = [
  * BadRequestException, у яку його загортає Nest) переносять у лог шматок тіла запиту, а там
  * можуть бути секрети (заголовки http-кроків). Стосується будь-якого типу помилки.
  */
-const JSON_SNIPPET: [RegExp, string] = [/(, )(?:\.\.\.)?"[\s\S]*"(?:\.\.\.)?( is not valid JSON)/, `$1"${REDACTED}"$2`];
+const JSON_SNIPPET: [RegExp, string] = [
+  /(, )(?:\.\.\.)?"[\s\S]*"(?:\.\.\.)?( is not valid JSON)/,
+  `$1"${REDACTED}"$2`,
+];
 
 function isDatabaseError(err: Error, code: string | undefined): boolean {
-  return err.name === 'QueryFailedError' || 'driverError' in err || (code !== undefined && SQLSTATE.test(code));
+  return (
+    err.name === 'QueryFailedError' ||
+    'driverError' in err ||
+    (code !== undefined && SQLSTATE.test(code))
+  );
 }
 
 export function maskDatabaseMessage(message: string): string {
-  let masked = VALUE_PATTERNS.reduce((text, [pattern, replacement]) => text.replace(pattern, replacement), message);
-  if (masked.length > MAX_DB_MESSAGE_LENGTH) masked = `${masked.slice(0, MAX_DB_MESSAGE_LENGTH)}…`;
+  let masked = VALUE_PATTERNS.reduce(
+    (text, [pattern, replacement]) => text.replace(pattern, replacement),
+    message,
+  );
+  if (masked.length > MAX_DB_MESSAGE_LENGTH)
+    masked = `${masked.slice(0, MAX_DB_MESSAGE_LENGTH)}…`;
   return masked;
 }
 
@@ -61,7 +75,8 @@ export function maskDatabaseMessage(message: string): string {
 function maskStack(err: Error, masked: string): string | undefined {
   if (!err.stack || masked === err.message) return err.stack;
   const header = `${err.name}: ${err.message}`;
-  if (err.stack.startsWith(header)) return `${err.name}: ${masked}${err.stack.slice(header.length)}`;
+  if (err.stack.startsWith(header))
+    return `${err.name}: ${masked}${err.stack.slice(header.length)}`;
   // Нестандартний стек: лишаємо тільки кадри викликів, без тексту повідомлення.
   const frames = err.stack.split('\n').filter((line) => /^\s+at /.test(line));
   return [`${err.name}: ${masked}`, ...frames].join('\n');
@@ -82,7 +97,14 @@ export function toSafeError(err: unknown): SafeError {
   }
   const code = errorCode(err);
   const masked = err.message.replace(...JSON_SNIPPET);
-  const message = isDatabaseError(err, code) ? maskDatabaseMessage(masked) : masked;
+  const message = isDatabaseError(err, code)
+    ? maskDatabaseMessage(masked)
+    : masked;
   const stack = maskStack(err, message);
-  return { type: err.name, message, ...(code !== undefined && { code }), stack };
+  return {
+    type: err.name,
+    message,
+    ...(code !== undefined && { code }),
+    stack,
+  };
 }

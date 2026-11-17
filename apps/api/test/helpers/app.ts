@@ -24,22 +24,38 @@ export interface StartOptions extends ModuleMetadata {
  * Піднімає справжній Nest-застосунок (з тими самими налаштуваннями, що й main.ts)
  * на випадковому порту. Запити — через вбудований fetch.
  */
-export async function startApp(rootModule: Type = AppModule, options: StartOptions = {}): Promise<RunningApp> {
+export async function startApp(
+  rootModule: Type = AppModule,
+  options: StartOptions = {},
+): Promise<RunningApp> {
   const { captureLogs, ...extra } = options;
   const logs: Array<Record<string, unknown>> = [];
-  let builder = Test.createTestingModule({ ...extra, imports: [rootModule, ...(extra.imports ?? [])] });
+  let builder = Test.createTestingModule({
+    ...extra,
+    imports: [rootModule, ...(extra.imports ?? [])],
+  });
   if (captureLogs) {
     const sink = new Writable({
       write(chunk, _enc, cb) {
-        for (const line of chunk.toString().split('\n').filter(Boolean)) logs.push(JSON.parse(line));
+        for (const line of chunk.toString().split('\n').filter(Boolean))
+          logs.push(JSON.parse(line));
         cb();
       },
     });
-    builder = builder.overrideProvider(PARAMS_PROVIDER_TOKEN).useValue({ pinoHttp: [buildPinoHttpOptions('info'), sink] });
+    builder = builder
+      .overrideProvider(PARAMS_PROVIDER_TOKEN)
+      .useValue({ pinoHttp: [buildPinoHttpOptions('info'), sink] });
   }
   const moduleRef = await builder.compile();
-  const app = configureApp(moduleRef.createNestApplication({ bufferLogs: true }));
+  const app = configureApp(
+    moduleRef.createNestApplication({ bufferLogs: true }),
+  );
   await app.listen(0, '127.0.0.1');
   const { port } = app.getHttpServer().address() as AddressInfo;
-  return { app, baseUrl: `http://127.0.0.1:${port}`, logs, close: () => app.close() };
+  return {
+    app,
+    baseUrl: `http://127.0.0.1:${port}`,
+    logs,
+    close: () => app.close(),
+  };
 }

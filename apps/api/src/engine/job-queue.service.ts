@@ -34,7 +34,10 @@ export class JobQueueService {
   }
 
   async complete(jobId: string): Promise<void> {
-    await this.ds.query(`UPDATE jobs SET status = 'done', "lockedBy" = NULL, "lockedUntil" = NULL WHERE id = $1`, [jobId]);
+    await this.ds.query(
+      `UPDATE jobs SET status = 'done', "lockedBy" = NULL, "lockedUntil" = NULL WHERE id = $1`,
+      [jobId],
+    );
   }
 
   /** Повертає true, якщо задачу буде повторено, false — якщо вичерпано спроби. */

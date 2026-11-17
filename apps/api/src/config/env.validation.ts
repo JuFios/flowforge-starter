@@ -13,19 +13,30 @@ import {
   validateSync,
 } from 'class-validator';
 
-export const LOG_LEVELS = ['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent'] as const;
+export const LOG_LEVELS = [
+  'fatal',
+  'error',
+  'warn',
+  'info',
+  'debug',
+  'trace',
+  'silent',
+] as const;
 export type LogLevel = (typeof LOG_LEVELS)[number];
 
 /** Найбільша затримка, яку приймають setTimeout/setInterval (2^31 - 1 мс). */
 export const MAX_TIMER_MS = 2_147_483_647;
 
 /** Значення-приклади й очевидні заглушки: публічно відомі, тож не є секретом. */
-const PLACEHOLDER_SECRET = /change[\s_-]*me|example|placeholder|default|password|secret|qwerty|12345/i;
+const PLACEHOLDER_SECRET =
+  /change[\s_-]*me|example|placeholder|default|password|secret|qwerty|12345/i;
 /** Менше різних символів — «aaaa…», «1212…» тощо. */
 const MIN_DISTINCT_CHARS = 8;
 
 export function isObviouslyInsecureSecret(value: string): boolean {
-  return PLACEHOLDER_SECRET.test(value) || new Set(value).size < MIN_DISTINCT_CHARS;
+  return (
+    PLACEHOLDER_SECRET.test(value) || new Set(value).size < MIN_DISTINCT_CHARS
+  );
 }
 
 /**
@@ -41,7 +52,10 @@ function IsSecureSecretInProduction(): PropertyDecorator {
       validator: {
         validate(value: unknown, args: ValidationArguments) {
           const env = (args.object as { NODE_ENV?: string }).NODE_ENV;
-          return env !== 'production' || (typeof value === 'string' && !isObviouslyInsecureSecret(value));
+          return (
+            env !== 'production' ||
+            (typeof value === 'string' && !isObviouslyInsecureSecret(value))
+          );
         },
         defaultMessage: () =>
           'у NODE_ENV=production значення з прикладу або очевидна заглушка заборонені; ' +
@@ -56,7 +70,9 @@ function IsSecureSecretInProduction(): PropertyDecorator {
  */
 export class DatabaseEnvironment {
   @IsString()
-  @Matches(/^postgres(ql)?:\/\/\S+$/, { message: 'DATABASE_URL має бути URL виду postgres://user:pass@host:5432/db' })
+  @Matches(/^postgres(ql)?:\/\/\S+$/, {
+    message: 'DATABASE_URL має бути URL виду postgres://user:pass@host:5432/db',
+  })
   DATABASE_URL: string;
 
   /** Скільки чекати встановлення з'єднання з Postgres (TCP + автентифікація). */
@@ -135,22 +151,33 @@ export class EnvironmentVariables extends DatabaseEnvironment {
   SCHEDULER_TICK_MS = 30_000;
 }
 
-export function validateEnv(raw: Record<string, unknown>): EnvironmentVariables {
+export function validateEnv(
+  raw: Record<string, unknown>,
+): EnvironmentVariables {
   return validateAs(EnvironmentVariables, raw);
 }
 
 /** Лише змінні підключення до БД — для CLI міграцій. */
-export function validateDatabaseEnv(raw: Record<string, unknown>): DatabaseEnvironment {
+export function validateDatabaseEnv(
+  raw: Record<string, unknown>,
+): DatabaseEnvironment {
   return validateAs(DatabaseEnvironment, raw);
 }
 
-function validateAs<T extends object>(schema: new () => T, raw: Record<string, unknown>): T {
+function validateAs<T extends object>(
+  schema: new () => T,
+  raw: Record<string, unknown>,
+): T {
   const env = plainToInstance(schema, raw, { exposeDefaultValues: true });
   const errors = validateSync(env, { skipMissingProperties: false });
   if (errors.length > 0) {
     // Значення не друкуємо: у них можуть бути секрети (пароль у DATABASE_URL, ADMIN_TOKEN).
-    const details = errors.map((e) => `${e.property}: ${Object.values(e.constraints ?? {}).join('; ')}`);
-    throw new Error(`Невалідна конфігурація оточення:\n  ${details.join('\n  ')}`);
+    const details = errors.map(
+      (e) => `${e.property}: ${Object.values(e.constraints ?? {}).join('; ')}`,
+    );
+    throw new Error(
+      `Невалідна конфігурація оточення:\n  ${details.join('\n  ')}`,
+    );
   }
   return env;
 }

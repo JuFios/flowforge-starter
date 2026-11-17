@@ -20,15 +20,18 @@ describe('toSafeError with real Postgres errors', () => {
     ['SELECT $1::timestamptz', SECRET, '22007'],
     ['SELECT $1::int', `9999999999999${SECRET.replace(/\D/g, '')}`, '22003'],
     ['SELECT $1::int[]', SECRET, '22P02'],
-  ])('%s does not carry the value into the logged error', async (sql, value, code) => {
-    const error = await ds.query(sql, [value]).then(
-      () => undefined,
-      (err: unknown) => err,
-    );
-    expect(error).toBeDefined();
+  ])(
+    '%s does not carry the value into the logged error',
+    async (sql, value, code) => {
+      const error = await ds.query(sql, [value]).then(
+        () => undefined,
+        (err: unknown) => err,
+      );
+      expect(error).toBeDefined();
 
-    const safe = toSafeError(error);
-    expect(JSON.stringify(safe)).not.toContain(value);
-    expect(safe).toMatchObject({ type: 'QueryFailedError', code });
-  });
+      const safe = toSafeError(error);
+      expect(JSON.stringify(safe)).not.toContain(value);
+      expect(safe).toMatchObject({ type: 'QueryFailedError', code });
+    },
+  );
 });

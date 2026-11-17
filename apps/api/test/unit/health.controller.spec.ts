@@ -24,20 +24,30 @@ describe('HealthController readiness', () => {
 
   it('reports the database up', async () => {
     pingCheck.mockResolvedValue({ database: { status: 'up' } });
-    await expect(controller.readiness()).resolves.toMatchObject({ status: 'ok' });
+    await expect(controller.readiness()).resolves.toMatchObject({
+      status: 'ok',
+    });
   });
 
   it('answers 503 without the driver error details', async () => {
-    pingCheck.mockRejectedValue(new Error('connect ECONNREFUSED 10.1.2.3:5432'));
-    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    pingCheck.mockRejectedValue(
+      new Error('connect ECONNREFUSED 10.1.2.3:5432'),
+    );
+    const warn = jest
+      .spyOn(Logger.prototype, 'warn')
+      .mockImplementation(() => undefined);
 
     const error = await controller.readiness().catch((e: unknown) => e);
     expect(error).toBeInstanceOf(ServiceUnavailableException);
-    const body = JSON.stringify((error as ServiceUnavailableException).getResponse());
+    const body = JSON.stringify(
+      (error as ServiceUnavailableException).getResponse(),
+    );
     expect(body).toContain('"database":{"status":"down"}');
     expect(body).not.toContain('10.1.2.3');
 
     // причина не губиться: вона йде в лог (внутрішній), а не у відповідь
-    expect(JSON.stringify(warn.mock.calls)).toContain('ECONNREFUSED 10.1.2.3:5432');
+    expect(JSON.stringify(warn.mock.calls)).toContain(
+      'ECONNREFUSED 10.1.2.3:5432',
+    );
   });
 });

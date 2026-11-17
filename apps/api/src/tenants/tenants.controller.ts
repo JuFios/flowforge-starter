@@ -1,4 +1,10 @@
-import { Body, Controller, ForbiddenException, Headers, Post } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  ForbiddenException,
+  Headers,
+  Post,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { randomBytes, timingSafeEqual } from 'crypto';
@@ -29,7 +35,10 @@ export class TenantsController {
 
   /** Службовий ендпоінт створення тенанта (захищений ADMIN_TOKEN). */
   @Post()
-  async create(@Body() dto: CreateTenantDto, @Headers('x-admin-token') admin?: string) {
+  async create(
+    @Body() dto: CreateTenantDto,
+    @Headers('x-admin-token') admin?: string,
+  ) {
     const expected = this.config.get('ADMIN_TOKEN', { infer: true });
     if (!expected || !admin || !safeEqual(admin, expected)) {
       throw new ForbiddenException();
@@ -37,7 +46,11 @@ export class TenantsController {
     const apiKey = `ff_${randomBytes(24).toString('hex')}`;
     const webhookSecret = randomBytes(24).toString('hex');
     const tenant = await this.tenants.save(
-      this.tenants.create({ name: dto.name, apiKeyHash: hashApiKey(apiKey), webhookSecret }),
+      this.tenants.create({
+        name: dto.name,
+        apiKeyHash: hashApiKey(apiKey),
+        webhookSecret,
+      }),
     );
     return { id: tenant.id, name: tenant.name, apiKey, webhookSecret };
   }

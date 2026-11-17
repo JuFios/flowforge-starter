@@ -8,10 +8,17 @@ async function ensureDatabaseExists(url: string): Promise<void> {
   const dbName = target.pathname.replace(/^\//, '');
   const admin = new URL(url);
   admin.pathname = '/postgres';
-  const ds = await new DataSource({ type: 'postgres', url: admin.toString() }).initialize();
+  const ds = await new DataSource({
+    type: 'postgres',
+    url: admin.toString(),
+  }).initialize();
   try {
-    const rows: unknown[] = await ds.query('SELECT 1 FROM pg_database WHERE datname = $1', [dbName]);
-    if (rows.length === 0) await ds.query(`CREATE DATABASE "${dbName.replace(/"/g, '""')}"`);
+    const rows: unknown[] = await ds.query(
+      'SELECT 1 FROM pg_database WHERE datname = $1',
+      [dbName],
+    );
+    if (rows.length === 0)
+      await ds.query(`CREATE DATABASE "${dbName.replace(/"/g, '""')}"`);
   } finally {
     await ds.destroy();
   }
@@ -25,7 +32,9 @@ export default async function globalSetup(): Promise<void> {
   const url = testDatabaseUrl();
   await ensureDatabaseExists(url);
   // Як CLI міграцій: без statement_timeout.
-  const ds = new DataSource(buildDataSourceOptions(testDatabaseEnv(), { statementTimeout: false }));
+  const ds = new DataSource(
+    buildDataSourceOptions(testDatabaseEnv(), { statementTimeout: false }),
+  );
   await ds.initialize();
   try {
     await ds.query('DROP SCHEMA IF EXISTS public CASCADE');

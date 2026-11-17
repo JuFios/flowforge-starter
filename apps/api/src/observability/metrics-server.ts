@@ -1,6 +1,16 @@
-import { Injectable, Logger, OnApplicationBootstrap, OnApplicationShutdown } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  OnApplicationBootstrap,
+  OnApplicationShutdown,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { createServer, IncomingMessage, Server, ServerResponse } from 'node:http';
+import {
+  createServer,
+  IncomingMessage,
+  Server,
+  ServerResponse,
+} from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { EnvironmentVariables } from '../config/env.validation';
 import { toSafeError } from './safe-error';
@@ -13,7 +23,9 @@ import { MetricsService } from './metrics.service';
  * службовому порту (WORKER_HTTP_PORT), де й так немає публічних маршрутів.
  */
 @Injectable()
-export class MetricsServer implements OnApplicationBootstrap, OnApplicationShutdown {
+export class MetricsServer
+  implements OnApplicationBootstrap, OnApplicationShutdown
+{
   private readonly logger = new Logger(MetricsServer.name);
   private server?: Server;
 
@@ -52,9 +64,15 @@ export class MetricsServer implements OnApplicationBootstrap, OnApplicationShutd
     });
   }
 
-  private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  private async handle(
+    req: IncomingMessage,
+    res: ServerResponse,
+  ): Promise<void> {
     const path = (req.url ?? '').split('?')[0];
-    if (path !== '/metrics' || (req.method !== 'GET' && req.method !== 'HEAD')) {
+    if (
+      path !== '/metrics' ||
+      (req.method !== 'GET' && req.method !== 'HEAD')
+    ) {
       res.writeHead(404, { 'content-type': 'text/plain' }).end('Not Found');
       return;
     }
@@ -64,7 +82,9 @@ export class MetricsServer implements OnApplicationBootstrap, OnApplicationShutd
       res.end(req.method === 'HEAD' ? undefined : body);
     } catch (err) {
       this.logger.error({ error: toSafeError(err) }, 'metrics: render failed');
-      res.writeHead(500, { 'content-type': 'text/plain' }).end('Internal Server Error');
+      res
+        .writeHead(500, { 'content-type': 'text/plain' })
+        .end('Internal Server Error');
     }
   }
 }

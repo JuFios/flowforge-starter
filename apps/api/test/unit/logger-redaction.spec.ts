@@ -15,7 +15,8 @@ describe('request logging', () => {
     lines = [];
     const sink = new Writable({
       write(chunk, _enc, cb) {
-        for (const line of chunk.toString().split('\n').filter(Boolean)) lines.push(JSON.parse(line));
+        for (const line of chunk.toString().split('\n').filter(Boolean))
+          lines.push(JSON.parse(line));
         cb();
       },
     });
@@ -23,7 +24,10 @@ describe('request logging', () => {
     const middleware = pinoHttp({ ...options, logger: pino(options, sink) });
     server = createServer((req, res) => {
       middleware(req, res);
-      req.log.info({ tenant: { apiKey: 'ff_inner_secret', webhookSecret: 'whsec_inner' } }, 'handler log');
+      req.log.info(
+        { tenant: { apiKey: 'ff_inner_secret', webhookSecret: 'whsec_inner' } },
+        'handler log',
+      );
       res.setHeader('set-cookie', 'ff_api_key=cookie_secret');
       res.end('ok');
     });
@@ -64,6 +68,8 @@ describe('request logging', () => {
   it('tags request log lines with the correlation id', () => {
     const completed = lines.find((l) => l.msg === 'request completed');
     expect(completed).toMatchObject({ correlationId: 'redact-1' });
-    expect(lines.find((l) => l.msg === 'handler log')).toMatchObject({ correlationId: 'redact-1' });
+    expect(lines.find((l) => l.msg === 'handler log')).toMatchObject({
+      correlationId: 'redact-1',
+    });
   });
 });

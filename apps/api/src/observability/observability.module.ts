@@ -25,7 +25,10 @@ import { MetricsService } from './metrics.service';
     TerminusModule,
   ],
   controllers: [HealthController],
-  providers: [MetricsService, { provide: APP_FILTER, useClass: AllExceptionsFilter }],
+  providers: [
+    MetricsService,
+    { provide: APP_FILTER, useClass: AllExceptionsFilter },
+  ],
   exports: [MetricsService],
 })
 export class ObservabilityModule implements NestModule {

@@ -2,11 +2,16 @@ import { getMetadataStorage } from 'class-validator';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseEnv } from 'node:util';
-import { EnvironmentVariables, validateEnv } from '../../src/config/env.validation';
+import {
+  EnvironmentVariables,
+  validateEnv,
+} from '../../src/config/env.validation';
 
 /** .env.example використовується docker-compose як є, тож він мусить бути валідним і повним. */
 describe('apps/api/.env.example', () => {
-  const example = parseEnv(readFileSync(join(__dirname, '../../.env.example'), 'utf8'));
+  const example = parseEnv(
+    readFileSync(join(__dirname, '../../.env.example'), 'utf8'),
+  );
   const declared = new Set(
     getMetadataStorage()
       .getTargetValidationMetadatas(EnvironmentVariables, '', true, false)

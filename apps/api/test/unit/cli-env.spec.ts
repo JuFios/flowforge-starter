@@ -12,11 +12,16 @@ describe('loadDotEnvIfPresent (migration CLI)', () => {
 
   it('loads variables from .env in the given directory', () => {
     const dir = mkdtempSync(join(tmpdir(), 'ff-env-'));
-    writeFileSync(join(dir, '.env'), 'FF_CLI_TEST_URL=postgres://u:p@localhost:5432/db\n');
+    writeFileSync(
+      join(dir, '.env'),
+      'FF_CLI_TEST_URL=postgres://u:p@localhost:5432/db\n',
+    );
     delete process.env.FF_CLI_TEST_URL;
 
     expect(loadDotEnvIfPresent(dir)).toBe(true);
-    expect(process.env.FF_CLI_TEST_URL).toBe('postgres://u:p@localhost:5432/db');
+    expect(process.env.FF_CLI_TEST_URL).toBe(
+      'postgres://u:p@localhost:5432/db',
+    );
   });
 
   it('does not override variables already set in the environment (docker-compose)', () => {

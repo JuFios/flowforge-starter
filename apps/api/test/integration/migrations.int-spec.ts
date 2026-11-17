@@ -23,7 +23,8 @@ describe('database migrations', () => {
 
   it('reverts every migration and re-applies them cleanly', async () => {
     const total = ds.migrations.length;
-    for (let i = 0; i < total; i++) await ds.undoLastMigration({ transaction: 'each' });
+    for (let i = 0; i < total; i++)
+      await ds.undoLastMigration({ transaction: 'each' });
 
     const [{ count }] = await ds.query(
       `SELECT count(*)::int AS count FROM information_schema.tables

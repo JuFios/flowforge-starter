@@ -3,7 +3,10 @@ import { StepDefinition } from '../entities';
 import { renderTemplate, StepContext } from './template';
 
 export class StepError extends Error {
-  constructor(message: string, readonly retryable = true) {
+  constructor(
+    message: string,
+    readonly retryable = true,
+  ) {
     super(message);
   }
 }
@@ -36,12 +39,16 @@ export class StepExecutor {
     }
   }
 
-  private async http(step: Extract<StepDefinition, { type: 'http' }>, ctx: StepContext): Promise<unknown> {
+  private async http(
+    step: Extract<StepDefinition, { type: 'http' }>,
+    ctx: StepContext,
+  ): Promise<unknown> {
     const url = renderTemplate(step.url, ctx);
     const res = await fetch(url, {
       method: step.method ?? 'GET',
       headers: step.headers,
-      body: step.body !== undefined ? renderTemplate(step.body, ctx) : undefined,
+      body:
+        step.body !== undefined ? renderTemplate(step.body, ctx) : undefined,
       signal: AbortSignal.timeout(15_000),
     });
     const text = await res.text();

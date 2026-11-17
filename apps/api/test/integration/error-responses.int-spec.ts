@@ -1,7 +1,12 @@
 import { Controller, Get } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import { RunningApp, startApp } from '../helpers/app';
-import { createTenant, openTestDataSource, TestTenant, truncateAll } from '../helpers/db';
+import {
+  createTenant,
+  openTestDataSource,
+  TestTenant,
+  truncateAll,
+} from '../helpers/db';
 
 @Controller('__test')
 class FailingController {
@@ -19,7 +24,10 @@ describe('error responses and their log records', () => {
 
   beforeAll(async () => {
     ds = await openTestDataSource();
-    running = await startApp(undefined, { controllers: [FailingController], captureLogs: true });
+    running = await startApp(undefined, {
+      controllers: [FailingController],
+      captureLogs: true,
+    });
   });
 
   beforeEach(async () => {
@@ -36,22 +44,36 @@ describe('error responses and their log records', () => {
   const postWorkflow = (body: string, headers: Record<string, string> = {}) =>
     fetch(`${running.baseUrl}/workflows`, {
       method: 'POST',
-      headers: { 'x-api-key': tenant.apiKey, 'content-type': 'application/json', ...headers },
+      headers: {
+        'x-api-key': tenant.apiKey,
+        'content-type': 'application/json',
+        ...headers,
+      },
       body,
     });
 
-  async function expectClientError(res: Response, status: number, message: string) {
+  async function expectClientError(
+    res: Response,
+    status: number,
+    message: string,
+  ) {
     expect(res.status).toBe(status);
     const text = await res.text();
     expect(text).not.toMatch(/node_modules|body-parser|raw-body|at \w+ \(/);
     const body = JSON.parse(text) as { correlationId: string };
-    expect(body).toEqual({ statusCode: status, message, correlationId: expect.any(String) });
+    expect(body).toEqual({
+      statusCode: status,
+      message,
+      correlationId: expect.any(String),
+    });
     expect(res.headers.get('x-request-id')).toBe(body.correlationId);
     return body.correlationId;
   }
 
   it('answers an oversized body with 413', async () => {
-    const res = await postWorkflow(JSON.stringify({ name: 'x'.repeat(200_000) }));
+    const res = await postWorkflow(
+      JSON.stringify({ name: 'x'.repeat(200_000) }),
+    );
     await expectClientError(res, 413, 'Payload Too Large');
   });
 
@@ -61,7 +83,9 @@ describe('error responses and their log records', () => {
   });
 
   it('answers an unsupported charset with 415', async () => {
-    const res = await postWorkflow('{}', { 'content-type': 'application/json; charset=koi8-r' });
+    const res = await postWorkflow('{}', {
+      'content-type': 'application/json; charset=koi8-r',
+    });
     await expectClientError(res, 415, 'Unsupported Media Type');
   });
 
@@ -73,10 +97,17 @@ describe('error responses and their log records', () => {
   });
 
   it('logs a body-parser error as a warning with the correlation id returned to the client', async () => {
-    const res = await postWorkflow(JSON.stringify({ name: 'x'.repeat(200_000) }), { 'x-request-id': 'too-big-1' });
+    const res = await postWorkflow(
+      JSON.stringify({ name: 'x'.repeat(200_000) }),
+      { 'x-request-id': 'too-big-1' },
+    );
     expect(res.status).toBe(413);
     const record = running.logs.find((l) => l.context === 'ExceptionsFilter');
-    expect(record).toMatchObject({ level: 40, correlationId: 'too-big-1', status: 413 });
+    expect(record).toMatchObject({
+      level: 40,
+      correlationId: 'too-big-1',
+      status: 413,
+    });
     expect(record?.error).toMatchObject({ type: 'PayloadTooLargeError' });
   });
 
@@ -84,22 +115,39 @@ describe('error responses and their log records', () => {
     // Тіло workflow може містити секрети (заголовки http-кроку); JSON.parse повторює в тексті
     // помилки ~10 символів навколо місця помилки — тут це початок токена без лапок.
     const secret = 'Sk9xQ2vLp7Rm';
-    const res = await postWorkflow(`{"name":"wf","steps":[{"headers":{"Authorization": ${secret}}}]}`, {
-      'x-request-id': 'bad-json-log-1',
-    });
+    const res = await postWorkflow(
+      `{"name":"wf","steps":[{"headers":{"Authorization": ${secret}}}]}`,
+      {
+        'x-request-id': 'bad-json-log-1',
+      },
+    );
     expect(res.status).toBe(400);
     const record = running.logs.find((l) => l.context === 'ExceptionsFilter');
-    expect(record).toMatchObject({ level: 40, correlationId: 'bad-json-log-1', status: 400 });
-    expect(record?.error).toMatchObject({ type: 'BadRequestException', message: expect.stringContaining('is not valid JSON') });
+    expect(record).toMatchObject({
+      level: 40,
+      correlationId: 'bad-json-log-1',
+      status: 400,
+    });
+    expect(record?.error).toMatchObject({
+      type: 'BadRequestException',
+      message: expect.stringContaining('is not valid JSON'),
+    });
     expect(JSON.stringify(running.logs)).not.toContain(secret.slice(0, 6));
   });
 
   it('logs an unhandled error with its real type, the correlation id and no secrets', async () => {
-    const res = await fetch(`${running.baseUrl}/__test/boom`, { headers: { 'x-request-id': 'boom-log-1' } });
+    const res = await fetch(`${running.baseUrl}/__test/boom`, {
+      headers: { 'x-request-id': 'boom-log-1' },
+    });
     expect(res.status).toBe(500);
-    const records = running.logs.filter((l) => l.context === 'ExceptionsFilter');
+    const records = running.logs.filter(
+      (l) => l.context === 'ExceptionsFilter',
+    );
     expect(records).toHaveLength(1);
-    expect(records[0]).toMatchObject({ level: 50, correlationId: 'boom-log-1' });
+    expect(records[0]).toMatchObject({
+      level: 50,
+      correlationId: 'boom-log-1',
+    });
     expect(records[0].error).toMatchObject({ type: 'Error' });
     // повідомлення помилки лишається в лозі (це наш власний код), але не у відповіді
     expect(JSON.stringify(await res.json())).not.toContain('hunter2');

@@ -32,8 +32,12 @@ const coreImports = [
     useFactory: (config: ConfigService<EnvironmentVariables, true>) =>
       buildDataSourceOptions({
         DATABASE_URL: config.get('DATABASE_URL', { infer: true }),
-        DB_CONNECT_TIMEOUT_MS: config.get('DB_CONNECT_TIMEOUT_MS', { infer: true }),
-        DB_STATEMENT_TIMEOUT_MS: config.get('DB_STATEMENT_TIMEOUT_MS', { infer: true }),
+        DB_CONNECT_TIMEOUT_MS: config.get('DB_CONNECT_TIMEOUT_MS', {
+          infer: true,
+        }),
+        DB_STATEMENT_TIMEOUT_MS: config.get('DB_STATEMENT_TIMEOUT_MS', {
+          infer: true,
+        }),
       }),
   }),
   TypeOrmModule.forFeature(ENTITIES),
@@ -43,8 +47,19 @@ const coreImports = [
 /** HTTP API + планувальник. Метрики — на окремому службовому порту (MetricsServer, METRICS_PORT). */
 @Module({
   imports: coreImports,
-  controllers: [TenantsController, WorkflowsController, ExecutionsController, WebhooksController],
-  providers: [ApiKeyGuard, WorkflowsService, ExecutionsService, SchedulerService, MetricsServer],
+  controllers: [
+    TenantsController,
+    WorkflowsController,
+    ExecutionsController,
+    WebhooksController,
+  ],
+  providers: [
+    ApiKeyGuard,
+    WorkflowsService,
+    ExecutionsService,
+    SchedulerService,
+    MetricsServer,
+  ],
 })
 export class AppModule {}
 

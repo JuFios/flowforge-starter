@@ -8,35 +8,61 @@ import { testDatabaseEnv, testDatabaseUrl } from '../helpers/test-env';
 /** Підключення, сесія якого працює в заданому часовому поясі (як процес/сервер з іншим TimeZone). */
 async function openSessionIn(timeZone: string): Promise<DataSource> {
   const options = buildDataSourceOptions(testDatabaseEnv());
-  return new DataSource({ ...options, extra: { ...(options.extra ?? {}), options: `-c TimeZone=${timeZone}` } }).initialize();
+  return new DataSource({
+    ...options,
+    extra: { ...(options.extra ?? {}), options: `-c TimeZone=${timeZone}` },
+  }).initialize();
 }
 
 /** Кожна колонка «момент створення/старту», яку заповнює DEFAULT now(). */
-const COLUMNS: Array<{ name: string; insert: (ds: DataSource) => Promise<Date> }> = [
+const COLUMNS: Array<{
+  name: string;
+  insert: (ds: DataSource) => Promise<Date>;
+}> = [
   {
     name: 'tenants.createdAt',
     insert: async (ds) =>
-      (await ds.getRepository(Tenant).save({ name: 't', apiKeyHash: randomUUID(), webhookSecret: 's' })).createdAt,
+      (
+        await ds
+          .getRepository(Tenant)
+          .save({ name: 't', apiKeyHash: randomUUID(), webhookSecret: 's' })
+      ).createdAt,
   },
   {
     name: 'workflows.createdAt',
     insert: async (ds) =>
-      (await ds.getRepository(Workflow).save({ tenantId: randomUUID(), name: 'w', steps: [] })).createdAt,
+      (
+        await ds
+          .getRepository(Workflow)
+          .save({ tenantId: randomUUID(), name: 'w', steps: [] })
+      ).createdAt,
   },
   {
     name: 'executions.createdAt',
     insert: async (ds) =>
-      (await ds.getRepository(Execution).save({ tenantId: randomUUID(), workflowId: randomUUID() })).createdAt,
+      (
+        await ds
+          .getRepository(Execution)
+          .save({ tenantId: randomUUID(), workflowId: randomUUID() })
+      ).createdAt,
   },
   {
     name: 'jobs.createdAt',
     insert: async (ds) =>
-      (await ds.getRepository(Job).save({ tenantId: randomUUID(), executionId: randomUUID() })).createdAt,
+      (
+        await ds
+          .getRepository(Job)
+          .save({ tenantId: randomUUID(), executionId: randomUUID() })
+      ).createdAt,
   },
   {
     name: 'step_runs.startedAt',
     insert: async (ds) =>
-      (await ds.getRepository(StepRun).save({ executionId: randomUUID(), stepIndex: 0, stepId: 's' })).startedAt,
+      (
+        await ds
+          .getRepository(StepRun)
+          .save({ executionId: randomUUID(), stepIndex: 0, stepId: 's' })
+      ).startedAt,
   },
 ];
 
@@ -60,20 +86,23 @@ describe('timestamps are absolute moments, independent of the session time zone'
     await Promise.all([reader.destroy(), east.destroy(), west.destroy()]);
   });
 
-  it.each(COLUMNS)('$name written at the same moment from different time zones reads as the same moment', async ({ insert }) => {
-    const before = Date.now();
-    const fromEast = await insert(east);
-    const fromWest = await insert(west);
-    const after = Date.now();
+  it.each(COLUMNS)(
+    '$name written at the same moment from different time zones reads as the same moment',
+    async ({ insert }) => {
+      const before = Date.now();
+      const fromEast = await insert(east);
+      const fromWest = await insert(west);
+      const after = Date.now();
 
-    const drift = Math.abs(fromEast.getTime() - fromWest.getTime());
-    expect(drift / HOUR_MS).toBeLessThan(1 / 60);
-    // І це справжній момент запису (допуск — на розбіжність годинника контейнера БД і хоста).
-    for (const value of [fromEast, fromWest]) {
-      expect(value.getTime()).toBeGreaterThan(before - 60_000);
-      expect(value.getTime()).toBeLessThan(after + 60_000);
-    }
-  });
+      const drift = Math.abs(fromEast.getTime() - fromWest.getTime());
+      expect(drift / HOUR_MS).toBeLessThan(1 / 60);
+      // І це справжній момент запису (допуск — на розбіжність годинника контейнера БД і хоста).
+      for (const value of [fromEast, fromWest]) {
+        expect(value.getTime()).toBeGreaterThan(before - 60_000);
+        expect(value.getTime()).toBeLessThan(after + 60_000);
+      }
+    },
+  );
 });
 
 describe('TimestampsWithTimeZone migration', () => {
@@ -81,13 +110,18 @@ describe('TimestampsWithTimeZone migration', () => {
     const admin = await openTestDataSource();
     const dbName = new URL(testDatabaseUrl()).pathname.slice(1);
     // Новий сеанс успадковує пояс бази — як сервер, налаштований не в UTC.
-    await admin.query(`ALTER DATABASE "${dbName}" SET timezone TO 'Pacific/Kiritimati'`);
+    await admin.query(
+      `ALTER DATABASE "${dbName}" SET timezone TO 'Pacific/Kiritimati'`,
+    );
     const session = await openTestDataSource();
     try {
-      const ours = session.migrations.findIndex((m) => m.name === 'TimestampsWithTimeZone1794920300000');
+      const ours = session.migrations.findIndex(
+        (m) => m.name === 'TimestampsWithTimeZone1794920300000',
+      );
       expect(ours).toBeGreaterThanOrEqual(0);
       const newer = session.migrations.length - ours;
-      for (let i = 0; i < newer; i++) await session.undoLastMigration({ transaction: 'each' });
+      for (let i = 0; i < newer; i++)
+        await session.undoLastMigration({ transaction: 'each' });
       await truncateAll(session);
 
       // Рядок у старій схемі (timestamp without time zone), записаний як у стартовому коді.
@@ -97,8 +131,13 @@ describe('TimestampsWithTimeZone migration', () => {
 
       await session.runMigrations({ transaction: 'each' });
 
-      const [{ createdAt }] = await session.query(`SELECT "createdAt" FROM "tenants" WHERE "id" = $1`, [id]);
-      expect((createdAt as Date).toISOString()).toBe((moment as Date).toISOString());
+      const [{ createdAt }] = await session.query(
+        `SELECT "createdAt" FROM "tenants" WHERE "id" = $1`,
+        [id],
+      );
+      expect((createdAt as Date).toISOString()).toBe(
+        (moment as Date).toISOString(),
+      );
     } finally {
       await admin.query(`ALTER DATABASE "${dbName}" RESET timezone`);
       await truncateAll(admin);

@@ -14,10 +14,16 @@ export interface WorkflowInput {
 
 @Injectable()
 export class WorkflowsService {
-  constructor(@InjectRepository(Workflow) private readonly workflows: Repository<Workflow>) {}
+  constructor(
+    @InjectRepository(Workflow)
+    private readonly workflows: Repository<Workflow>,
+  ) {}
 
   list(tenantId: string): Promise<Workflow[]> {
-    return this.workflows.find({ where: { tenantId }, order: { createdAt: 'DESC' } });
+    return this.workflows.find({
+      where: { tenantId },
+      order: { createdAt: 'DESC' },
+    });
   }
 
   async get(tenantId: string, id: string): Promise<Workflow> {
@@ -39,7 +45,11 @@ export class WorkflowsService {
     );
   }
 
-  async update(tenantId: string, id: string, input: Partial<WorkflowInput>): Promise<Workflow> {
+  async update(
+    tenantId: string,
+    id: string,
+    input: Partial<WorkflowInput>,
+  ): Promise<Workflow> {
     const wf = await this.get(tenantId, id);
     if (input.name !== undefined) wf.name = input.name;
     if (input.steps !== undefined) {

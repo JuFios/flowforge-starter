@@ -1,6 +1,10 @@
 import { Injectable, NestMiddleware } from '@nestjs/common';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { CORRELATION_HEADER, correlationIdForRequest, runWithCorrelationId } from './correlation';
+import {
+  CORRELATION_HEADER,
+  correlationIdForRequest,
+  runWithCorrelationId,
+} from './correlation';
 
 /** Встановлює кореляційний контекст (AsyncLocalStorage) на весь час обробки запиту. */
 @Injectable()

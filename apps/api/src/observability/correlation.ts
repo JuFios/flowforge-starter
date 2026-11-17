@@ -37,11 +37,17 @@ type RequestWithId = IncomingMessage & { [REQUEST_ID]?: string };
  */
 export function correlationIdForRequest(req: IncomingMessage): string {
   const r = req as RequestWithId;
-  r[REQUEST_ID] ??= normalizeCorrelationId(req.headers[CORRELATION_HEADER]) ?? newCorrelationId();
+  r[REQUEST_ID] ??=
+    normalizeCorrelationId(req.headers[CORRELATION_HEADER]) ??
+    newCorrelationId();
   return r[REQUEST_ID];
 }
 
-export function runWithCorrelationId<T>(correlationId: string, source: CorrelationSource, fn: () => T): T {
+export function runWithCorrelationId<T>(
+  correlationId: string,
+  source: CorrelationSource,
+  fn: () => T,
+): T {
   return storage.run({ correlationId, source }, fn);
 }
 

@@ -2,7 +2,11 @@ import type { IncomingMessage } from 'node:http';
 import type { Params } from 'nestjs-pino';
 import type { Options } from 'pino-http';
 import type { LogLevel } from '../config/env.validation';
-import { correlationIdForRequest, getCorrelationId, getCorrelationSource } from './correlation';
+import {
+  correlationIdForRequest,
+  getCorrelationId,
+  getCorrelationSource,
+} from './correlation';
 
 /**
  * Шляхи, значення яких ніколи не потрапляють у логи. Заголовки автентифікації,
@@ -40,10 +44,19 @@ export function buildPinoHttpOptions(level: LogLevel): Options {
     customAttributeKeys: { reqId: 'correlationId' },
     mixin: () => {
       const id = getCorrelationId();
-      return id && getCorrelationSource() !== 'http' ? { correlationId: id } : {};
+      return id && getCorrelationSource() !== 'http'
+        ? { correlationId: id }
+        : {};
     },
-    customLogLevel: (_req, res, err) => (err || res.statusCode >= 500 ? 'error' : res.statusCode >= 400 ? 'warn' : 'info'),
-    autoLogging: { ignore: (req) => QUIET_ROUTES.has((req.url ?? '').split('?')[0]) },
+    customLogLevel: (_req, res, err) =>
+      err || res.statusCode >= 500
+        ? 'error'
+        : res.statusCode >= 400
+          ? 'warn'
+          : 'info',
+    autoLogging: {
+      ignore: (req) => QUIET_ROUTES.has((req.url ?? '').split('?')[0]),
+    },
   };
 }
 

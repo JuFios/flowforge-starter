@@ -11,12 +11,15 @@ export default async function WorkflowsPage() {
   return (
     <>
       <h1>Workflows</h1>
-      {error && <p style={{ color: 'crimson' }}>Не вдалося завантажити: {error}</p>}
+      {error && (
+        <p style={{ color: 'crimson' }}>Не вдалося завантажити: {error}</p>
+      )}
       {!error && workflows.length === 0 && <p>Поки що жодного workflow.</p>}
       <ul>
         {workflows.map((w) => (
           <li key={w.id}>
-            {w.name} · v{w.version} {w.cron ? `· cron ${w.cron}` : ''} {w.enabled ? '' : '(вимкнено)'}
+            {w.name} · v{w.version} {w.cron ? `· cron ${w.cron}` : ''}{' '}
+            {w.enabled ? '' : '(вимкнено)'}
           </li>
         ))}
       </ul>

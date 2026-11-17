@@ -21,7 +21,10 @@ export interface TestTenant {
   apiKey: string;
 }
 
-export async function createTenant(ds: DataSource, name = 'tenant'): Promise<TestTenant> {
+export async function createTenant(
+  ds: DataSource,
+  name = 'tenant',
+): Promise<TestTenant> {
   const apiKey = `ff_test_${randomBytes(12).toString('hex')}`;
   const tenant = await ds.getRepository(Tenant).save({
     name,
@@ -31,7 +34,11 @@ export async function createTenant(ds: DataSource, name = 'tenant'): Promise<Tes
   return { tenant, apiKey };
 }
 
-export async function createWorkflow(ds: DataSource, tenantId: string, name = 'wf'): Promise<Workflow> {
+export async function createWorkflow(
+  ds: DataSource,
+  tenantId: string,
+  name = 'wf',
+): Promise<Workflow> {
   return ds.getRepository(Workflow).save({
     tenantId,
     name,

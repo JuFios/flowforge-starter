@@ -11,8 +11,11 @@ import { parseEnv } from 'node:util';
 export function loadDotEnvIfPresent(dir: string = process.cwd()): boolean {
   const file = join(dir, '.env');
   if (!existsSync(file)) return false;
-  for (const [key, value] of Object.entries(parseEnv(readFileSync(file, 'utf8')))) {
-    if (process.env[key] === undefined && value !== undefined) process.env[key] = value;
+  for (const [key, value] of Object.entries(
+    parseEnv(readFileSync(file, 'utf8')),
+  )) {
+    if (process.env[key] === undefined && value !== undefined)
+      process.env[key] = value;
   }
   return true;
 }

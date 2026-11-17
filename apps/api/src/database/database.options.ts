@@ -29,7 +29,10 @@ export interface DataSourceBuildOptions {
  * запускаються окремим кроком до старту API/воркерів.
  */
 export function buildDataSourceOptions(
-  db: Pick<DatabaseEnvironment, 'DATABASE_URL' | 'DB_CONNECT_TIMEOUT_MS' | 'DB_STATEMENT_TIMEOUT_MS'>,
+  db: Pick<
+    DatabaseEnvironment,
+    'DATABASE_URL' | 'DB_CONNECT_TIMEOUT_MS' | 'DB_STATEMENT_TIMEOUT_MS'
+  >,
   { statementTimeout = true }: DataSourceBuildOptions = {},
 ): DataSourceOptions {
   const statementMs = db.DB_STATEMENT_TIMEOUT_MS;

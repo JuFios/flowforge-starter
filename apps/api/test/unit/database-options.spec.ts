@@ -1,5 +1,8 @@
 import { validateDatabaseEnv } from '../../src/config/env.validation';
-import { buildDataSourceOptions, QUERY_TIMEOUT_GRACE_MS } from '../../src/database/database.options';
+import {
+  buildDataSourceOptions,
+  QUERY_TIMEOUT_GRACE_MS,
+} from '../../src/database/database.options';
 
 describe('buildDataSourceOptions', () => {
   const db = validateDatabaseEnv({

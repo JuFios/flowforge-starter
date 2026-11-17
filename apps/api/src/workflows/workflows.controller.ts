@@ -1,4 +1,15 @@
-import { Body, Controller, Delete, Get, HttpCode, Param, ParseUUIDPipe, Patch, Post, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  HttpCode,
+  Param,
+  ParseUUIDPipe,
+  Patch,
+  Post,
+  UseGuards,
+} from '@nestjs/common';
 import { ApiKeyGuard } from '../auth/api-key.guard';
 import { CurrentTenant } from '../auth/current-tenant.decorator';
 import { Tenant } from '../entities';
@@ -25,7 +36,11 @@ export class WorkflowsController {
   }
 
   @Patch(':id')
-  update(@CurrentTenant() t: Tenant, @Param('id', ParseUUIDPipe) id: string, @Body() body: Partial<WorkflowInput>) {
+  update(
+    @CurrentTenant() t: Tenant,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() body: Partial<WorkflowInput>,
+  ) {
     return this.workflows.update(t.id, id, body);
   }
 

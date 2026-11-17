@@ -24,10 +24,14 @@ describe('validateSteps', () => {
   });
 
   it('rejects an unknown step type', () => {
-    expect(() => validateSteps([{ id: 'a', type: 'shell', cmd: 'ls' }])).toThrow(BadRequestException);
+    expect(() =>
+      validateSteps([{ id: 'a', type: 'shell', cmd: 'ls' }]),
+    ).toThrow(BadRequestException);
   });
 
   it('rejects a negative delay', () => {
-    expect(() => validateSteps([{ id: 'a', type: 'delay', ms: -1 }])).toThrow(BadRequestException);
+    expect(() => validateSteps([{ id: 'a', type: 'delay', ms: -1 }])).toThrow(
+      BadRequestException,
+    );
   });
 });

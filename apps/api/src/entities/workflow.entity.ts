@@ -1,7 +1,20 @@
-import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn } from 'typeorm';
+import {
+  Column,
+  CreateDateColumn,
+  Entity,
+  Index,
+  PrimaryGeneratedColumn,
+} from 'typeorm';
 
 export type StepDefinition =
-  | { id: string; type: 'http'; url: string; method?: string; headers?: Record<string, string>; body?: string }
+  | {
+      id: string;
+      type: 'http';
+      url: string;
+      method?: string;
+      headers?: Record<string, string>;
+      body?: string;
+    }
   | { id: string; type: 'transform'; expr: string }
   | { id: string; type: 'log'; message: string }
   | { id: string; type: 'delay'; ms: number };
