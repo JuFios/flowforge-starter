@@ -15,6 +15,7 @@ import {
   newCorrelationId,
   runWithCorrelationId,
 } from '../observability/correlation';
+import { toSafeError } from '../observability/safe-error';
 
 @Injectable()
 export class SchedulerService
@@ -34,7 +35,13 @@ export class SchedulerService
   onApplicationBootstrap(): void {
     const every = this.config.get('SCHEDULER_TICK_MS', { infer: true });
     this.timer = setInterval(
-      () => void this.tick().catch((e) => this.logger.error(e.message)),
+      () =>
+        void this.tick().catch((err: unknown) =>
+          this.logger.error(
+            { error: toSafeError(err) },
+            'scheduler tick failed',
+          ),
+        ),
       every,
     );
   }
@@ -69,7 +76,8 @@ export class SchedulerService
         }
       } catch (err) {
         this.logger.warn(
-          `workflow ${wf.id}: невалідний cron (${(err as Error).message})`,
+          { workflowId: wf.id, error: toSafeError(err) },
+          'scheduled run not created',
         );
       }
     }

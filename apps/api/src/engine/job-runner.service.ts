@@ -9,6 +9,7 @@ import {
   newCorrelationId,
   runWithCorrelationId,
 } from '../observability/correlation';
+import { toSafeError } from '../observability/safe-error';
 import { JobQueueService } from './job-queue.service';
 import { StepError, StepExecutor } from './step-executor';
 import { StepContext } from './template';
@@ -54,7 +55,7 @@ export class JobRunnerService implements OnApplicationShutdown {
         }
         await this.process(job);
       } catch (err) {
-        this.logger.error(`loop error: ${(err as Error).message}`);
+        this.logger.error({ error: toSafeError(err) }, 'job loop error');
         await sleep(1000);
       }
     }

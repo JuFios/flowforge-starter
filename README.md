@@ -441,6 +441,34 @@ CI (`.github/workflows/ci.yml`):
 - **Альтернативи.** Див. «Конфігурація» → «Адмін-токен і `NODE_ENV`»; ще варіант — генерувати
   токен при першому старті й друкувати в лог: секрет потрапив би в логи.
 
+### 5. Планувальник і воркер писали в лог сирий текст помилок БД
+
+- **Що.** `SchedulerService` (невдалий тік, невдале створення виконання для workflow) і цикл
+  обробки `JobRunnerService` логували `error.message` рядком, в обхід `toSafeError`. Помилка
+  створення виконання до того ж підписувалася як «невалідний cron». Знайдено правилами
+  `recommended-type-checked` (`no-unsafe-member-access` на `e.message`).
+- **Чому небезпечно.** Postgres повторює у тексті помилки вхідне значення
+  (`invalid input syntax for type uuid: "…"`), а маскування значень, тип і код помилки є лише в
+  `toSafeError`. Фонові цикли — саме там, де помилки БД трапляються найчастіше, і в лог ішли
+  дані запиту; а хибний підпис «невалідний cron» відправляв діагностику не туди.
+- **Як відтворити.** `test/unit/background-error-logging.spec.ts`: `QueryFailedError` із
+  вхідним значенням у тексті на кожному з трьох шляхів. До виправлення:
+
+  ```text
+  ✕ scheduler: a failing tick
+  ✕ scheduler: a failing enqueue for one workflow
+  ✕ worker: a failing claim in the processing loop
+  Received string: "[\"loop error: invalid input syntax for type uuid: \\\"tenant-secret-value\\\"\"]"
+  Tests:       3 failed, 3 total
+  ```
+
+- **Як виправлено.** Усі три місця логують `{ error: toSafeError(err) }` із нейтральним
+  повідомленням (`scheduler tick failed`, `scheduled run not created` з `workflowId`,
+  `job loop error`) — як HTTP-фільтр помилок.
+- **Альтернативи.** Редагувати секрети на рівні pino (`redact`) не допомагає: значення всередині
+  рядка повідомлення, а не в окремому полі. Окремий глобальний обробник помилок для фонових задач
+  — зайвий шар, коли таких місць три.
+
 ### Аудит решти наявних тестів
 
 Кожен тест перевірено мутацією коду, поведінку якого він заявляє:
