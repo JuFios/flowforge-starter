@@ -80,6 +80,20 @@ describe('error responses and their log records', () => {
     expect(record?.error).toMatchObject({ type: 'PayloadTooLargeError' });
   });
 
+  it('does not copy fragments of a malformed JSON body into the log', async () => {
+    // Тіло workflow може містити секрети (заголовки http-кроку); JSON.parse повторює в тексті
+    // помилки ~10 символів навколо місця помилки — тут це початок токена без лапок.
+    const secret = 'Sk9xQ2vLp7Rm';
+    const res = await postWorkflow(`{"name":"wf","steps":[{"headers":{"Authorization": ${secret}}}]}`, {
+      'x-request-id': 'bad-json-log-1',
+    });
+    expect(res.status).toBe(400);
+    const record = running.logs.find((l) => l.context === 'ExceptionsFilter');
+    expect(record).toMatchObject({ level: 40, correlationId: 'bad-json-log-1', status: 400 });
+    expect(record?.error).toMatchObject({ type: 'BadRequestException', message: expect.stringContaining('is not valid JSON') });
+    expect(JSON.stringify(running.logs)).not.toContain(secret.slice(0, 6));
+  });
+
   it('logs an unhandled error with its real type, the correlation id and no secrets', async () => {
     const res = await fetch(`${running.baseUrl}/__test/boom`, { headers: { 'x-request-id': 'boom-log-1' } });
     expect(res.status).toBe(500);
