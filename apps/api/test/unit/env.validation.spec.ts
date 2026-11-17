@@ -46,4 +46,10 @@ describe('validateEnv', () => {
       expect((err as Error).message).not.toContain(secret);
     }
   });
+
+  it('rejects timer values Node would silently clamp to 1 ms', () => {
+    // setInterval/setTimeout приймають щонайбільше 2^31-1 мс; більше значення стає 1 мс.
+    expect(() => validateEnv({ ...base, SCHEDULER_TICK_MS: '2147483648' })).toThrow(/SCHEDULER_TICK_MS/);
+    expect(validateEnv({ ...base, SCHEDULER_TICK_MS: '2147483647' }).SCHEDULER_TICK_MS).toBe(2147483647);
+  });
 });
