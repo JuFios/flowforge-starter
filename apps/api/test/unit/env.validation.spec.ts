@@ -101,6 +101,23 @@ describe('validateEnv', () => {
       validateEnv({ ...base, DB_STATEMENT_TIMEOUT_MS: '600001' }),
     ).toThrow(/DB_STATEMENT_TIMEOUT_MS/);
   });
+
+  it('rejects a retry backoff cap below its base', () => {
+    expect(() =>
+      validateEnv({
+        ...base,
+        JOB_BACKOFF_BASE_MS: '5000',
+        JOB_BACKOFF_MAX_MS: '1000',
+      }),
+    ).toThrow(/JOB_BACKOFF_MAX_MS: має бути не менше за JOB_BACKOFF_BASE_MS/);
+    expect(
+      validateEnv({
+        ...base,
+        JOB_BACKOFF_BASE_MS: '5000',
+        JOB_BACKOFF_MAX_MS: '5000',
+      }).JOB_BACKOFF_MAX_MS,
+    ).toBe(5000);
+  });
 });
 
 describe('validateDatabaseEnv (migration CLI)', () => {

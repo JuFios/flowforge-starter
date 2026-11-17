@@ -1,15 +1,7 @@
-import { backoffMs } from '../../src/engine/job-queue.service';
-
-interface BackoffOptions {
-  baseMs: number;
-  maxMs: number;
-  random: () => number;
-}
-// Сигнатура з налаштуваннями й джерелом випадковості (для детермінованої перевірки jitter).
-const backoff = backoffMs as unknown as (
-  attempt: number,
-  options: BackoffOptions,
-) => number;
+import {
+  BackoffOptions,
+  backoffMs as backoff,
+} from '../../src/engine/job-queue.service';
 
 describe('backoffMs', () => {
   const opts = (random: () => number): BackoffOptions => ({

@@ -64,6 +64,28 @@ function IsSecureSecretInProduction(): PropertyDecorator {
     });
 }
 
+/** Значення не менше за значення іншої властивості того самого об'єкта. */
+function IsNotLessThan(other: string): PropertyDecorator {
+  return (target, propertyName) =>
+    registerDecorator({
+      name: 'isNotLessThan',
+      target: target.constructor,
+      propertyName: propertyName as string,
+      constraints: [other],
+      validator: {
+        validate(value: unknown, args: ValidationArguments) {
+          const bound = (args.object as Record<string, unknown>)[other];
+          return (
+            typeof value !== 'number' ||
+            typeof bound !== 'number' ||
+            value >= bound
+          );
+        },
+        defaultMessage: () => `має бути не менше за ${other}`,
+      },
+    });
+}
+
 /**
  * Підключення до Postgres. Окремий клас, бо його валідує й CLI міграцій, якому решта
  * конфігурації застосунку (ADMIN_TOKEN тощо) не потрібна.
@@ -158,6 +180,21 @@ export class EnvironmentVariables extends DatabaseEnvironment {
   @Min(10)
   @Max(60_000)
   WORKER_POLL_INTERVAL_MS = 500;
+
+  /** Нижня межа затримки повтору задачі, мс (і база експоненти). */
+  @Type(() => Number)
+  @IsInt()
+  @Min(10)
+  @Max(3_600_000)
+  JOB_BACKOFF_BASE_MS = 1_000;
+
+  /** Верхня межа затримки повтору задачі, мс. Не менша за JOB_BACKOFF_BASE_MS. */
+  @Type(() => Number)
+  @IsInt()
+  @Min(10)
+  @Max(86_400_000)
+  @IsNotLessThan('JOB_BACKOFF_BASE_MS')
+  JOB_BACKOFF_MAX_MS = 300_000;
 
   /**
    * Скільки воркер під час завершення чекає на задачі в роботі; потім скасовує їх і повертає в

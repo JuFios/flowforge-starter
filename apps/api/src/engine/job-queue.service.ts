@@ -5,8 +5,29 @@ import { DataSource, EntityManager } from 'typeorm';
 import { EnvironmentVariables } from '../config/env.validation';
 import { Job } from '../entities';
 
-export function backoffMs(attempt: number): number {
-  return Math.pow(2, attempt) * 1000;
+export interface BackoffOptions {
+  baseMs: number;
+  maxMs: number;
+  /** Джерело випадковості в [0, 1); у тестах — підставне. */
+  random?: () => number;
+}
+
+/**
+ * Затримка перед повтором після спроби `attempt` (1, 2, …): випадкова в межах
+ * [base, min(max, base·2^attempt)] — експоненційна межа з «повним» jitter і нижньою межею base.
+ * Jitter розносить у часі повтори задач, що впали одночасно (масовий збій отримувача), замість
+ * хвилі повторів в один момент; верхня межа не дає затримці рости без кінця.
+ */
+export function backoffMs(
+  attempt: number,
+  { baseMs, maxMs, random = Math.random }: BackoffOptions,
+): number {
+  // Степінь обмежено: 2^1100 — це Infinity, а межа й так досягається значно раніше.
+  const ceiling = Math.max(
+    baseMs,
+    Math.min(maxMs, baseMs * 2 ** Math.min(attempt, 64)),
+  );
+  return Math.round(baseMs + random() * (ceiling - baseMs));
 }
 
 /** Lease задачі вже забрано (прострочено й повернуто в чергу reaper-ом або захоплено іншим). */
@@ -34,6 +55,16 @@ export class JobQueueService {
     @InjectDataSource() private readonly ds: DataSource,
     private readonly config: ConfigService<EnvironmentVariables, true>,
   ) {}
+
+  /** Затримка перед наступною спробою, у секундах (для make_interval). */
+  private retryDelaySeconds(attempt: number): number {
+    return (
+      backoffMs(attempt, {
+        baseMs: this.config.get('JOB_BACKOFF_BASE_MS', { infer: true }),
+        maxMs: this.config.get('JOB_BACKOFF_MAX_MS', { infer: true }),
+      }) / 1000
+    );
+  }
 
   /** Тривалість lease у секундах (для make_interval). */
   private get leaseSeconds(): number {
@@ -144,7 +175,7 @@ export class JobQueueService {
             SET status = 'queued', "lockedBy" = NULL, "lockedUntil" = NULL, "lockToken" = NULL,
                 "lastError" = $2, "runAt" = now() + make_interval(secs => $3)
           WHERE id = $1`,
-        [job.id, error, backoffMs(current.attempts) / 1000],
+        [job.id, error, this.retryDelaySeconds(current.attempts)],
       );
       return true;
     }
@@ -183,7 +214,7 @@ export class JobQueueService {
                 SET status = 'queued', "lockedBy" = NULL, "lockedUntil" = NULL, "lockToken" = NULL,
                     "lastError" = $2, "runAt" = now() + make_interval(secs => $3)
               WHERE id = $1`,
-            [job.id, error, backoffMs(job.attempts) / 1000],
+            [job.id, error, this.retryDelaySeconds(job.attempts)],
           );
         } else {
           await em.query(
