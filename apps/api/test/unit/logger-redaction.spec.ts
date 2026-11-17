@@ -31,18 +31,26 @@ describe('request logging', () => {
 
   afterAll(() => new Promise((r) => server.close(r)));
 
-  it('redacts credentials and signatures from headers and nested fields', async () => {
-    await fetch(`${baseUrl}/workflows`, {
-      headers: {
-        'x-api-key': 'ff_header_secret',
-        'x-admin-token': 'admin_header_secret',
-        'x-signature': 'sig_header_secret',
-        authorization: 'Bearer bearer_secret',
-        cookie: 'ff_api_key=cookie_secret',
-        'x-request-id': 'redact-1',
-      },
-    });
+  /** Кожен тест робить власний запит і дивиться лише на рядки свого запиту. */
+  beforeEach(() => {
+    lines.length = 0;
+  });
+
+  async function request(headers: Record<string, string>): Promise<void> {
+    await fetch(`${baseUrl}/workflows`, { headers });
+    // рядок «request completed» пишеться після завершення відповіді
     await new Promise((r) => setTimeout(r, 20));
+  }
+
+  it('redacts credentials and signatures from headers and nested fields', async () => {
+    await request({
+      'x-api-key': 'ff_header_secret',
+      'x-admin-token': 'admin_header_secret',
+      'x-signature': 'sig_header_secret',
+      authorization: 'Bearer bearer_secret',
+      cookie: 'ff_api_key=cookie_secret',
+      'x-request-id': 'redact-1',
+    });
 
     const output = JSON.stringify(lines);
     for (const secret of [
@@ -59,11 +67,13 @@ describe('request logging', () => {
     expect(output).toContain('[REDACTED]');
   });
 
-  it('tags request log lines with the correlation id', () => {
+  it('tags request log lines with the correlation id', async () => {
+    await request({ 'x-request-id': 'corr-tag-1' });
+
     const completed = lines.find((l) => l.msg === 'request completed');
-    expect(completed).toMatchObject({ correlationId: 'redact-1' });
+    expect(completed).toMatchObject({ correlationId: 'corr-tag-1' });
     expect(lines.find((l) => l.msg === 'handler log')).toMatchObject({
-      correlationId: 'redact-1',
+      correlationId: 'corr-tag-1',
     });
   });
 });
