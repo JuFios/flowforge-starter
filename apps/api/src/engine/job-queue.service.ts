@@ -54,6 +54,25 @@ export type FailureOutcome = 'retry' | 'failed' | 'dead';
 /** Скільки прострочених задач reaper обробляє за одну транзакцію. */
 const REAP_BATCH = 100;
 
+/**
+ * Найраніша готова задача (індекс IDX_jobs_claim). Винесено в константу, щоб тест плану запиту
+ * перевіряв саме той SQL, що виконується.
+ */
+export const CLAIM_CANDIDATE_SQL = `
+  SELECT id FROM jobs
+   WHERE status = 'queued' AND "runAt" <= now()
+   ORDER BY "runAt"
+   LIMIT 1
+   FOR UPDATE SKIP LOCKED`;
+
+/** Задачі з простроченим lease (індекс IDX_jobs_lease). */
+export const EXPIRED_LEASES_SQL = `
+  SELECT * FROM jobs
+   WHERE status = 'running' AND "lockedUntil" < now()
+   ORDER BY "lockedUntil"
+   LIMIT ${REAP_BATCH}
+   FOR UPDATE SKIP LOCKED`;
+
 @Injectable()
 export class JobQueueService {
   constructor(
@@ -90,13 +109,7 @@ export class JobQueueService {
           SET status = 'running', "lockedBy" = $1, "lockToken" = gen_random_uuid(),
               "lockedUntil" = now() + make_interval(secs => $2),
               attempts = attempts + 1
-        WHERE id = (
-                SELECT id FROM jobs
-                 WHERE status = 'queued' AND "runAt" <= now()
-                 ORDER BY "runAt"
-                 LIMIT 1
-                 FOR UPDATE SKIP LOCKED
-              )
+        WHERE id = (${CLAIM_CANDIDATE_SQL})
         RETURNING *, now() AS "claimedAt"`,
       [workerId, this.leaseSeconds],
     );
@@ -218,13 +231,7 @@ export class JobQueueService {
    */
   async reapExpired(): Promise<ReapedJob[]> {
     return this.ds.transaction(async (em) => {
-      const expired: Job[] = await em.query(
-        `SELECT * FROM jobs
-          WHERE status = 'running' AND "lockedUntil" < now()
-          ORDER BY "lockedUntil"
-          LIMIT ${REAP_BATCH}
-          FOR UPDATE SKIP LOCKED`,
-      );
+      const expired: Job[] = await em.query(EXPIRED_LEASES_SQL);
       const reaped: ReapedJob[] = [];
       for (const job of expired) {
         const error = `lease expired: worker ${job.lockedBy ?? '?'} stopped renewing it`;
