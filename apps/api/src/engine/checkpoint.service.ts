@@ -69,13 +69,43 @@ export class CheckpointService {
     job.attempts = 1;
   }
 
-  async stepFailed(job: Job, run: StepRun, error: string): Promise<void> {
+  /** Виконання успішне: виконання й задача завершуються разом або ніяк. */
+  async finish(job: Job, output: unknown): Promise<void> {
     await this.ds.transaction(async (em) => {
-      await this.queue.assertLease(em, job);
+      await this.queue.completeIn(em, job);
       await em.query(
-        `UPDATE step_runs SET status = 'failed', error = $2, "finishedAt" = now() WHERE id = $1`,
-        [run.id, error],
+        `UPDATE executions SET status = 'succeeded', output = $2, error = NULL, "finishedAt" = now()
+          WHERE id = $1`,
+        [job.executionId, JSON.stringify(output ?? null)],
       );
+    });
+  }
+
+  /**
+   * Спроба провалилась: стан кроку, задачі (повтор із backoff або кінець) і, якщо повторів не
+   * буде, виконання — в одній транзакції. Повертає true, якщо задачу буде повторено.
+   */
+  async fail(
+    job: Job,
+    run: StepRun | undefined,
+    error: string,
+    retryable: boolean,
+  ): Promise<boolean> {
+    return this.ds.transaction(async (em) => {
+      const willRetry = await this.queue.failIn(em, job, error, retryable);
+      if (run) {
+        await em.query(
+          `UPDATE step_runs SET status = 'failed', error = $2, "finishedAt" = now() WHERE id = $1`,
+          [run.id, error],
+        );
+      }
+      if (!willRetry) {
+        await em.query(
+          `UPDATE executions SET status = 'failed', error = $2, "finishedAt" = now() WHERE id = $1`,
+          [job.executionId, error],
+        );
+      }
+      return willRetry;
     });
   }
 

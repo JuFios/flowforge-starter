@@ -97,15 +97,17 @@ export class JobQueueService {
     return rows[0];
   }
 
-  async complete(job: Job): Promise<void> {
-    await this.ds.transaction(async (em) => {
-      await this.assertLease(em, job);
-      await em.query(
-        `UPDATE jobs SET status = 'done', "lockedBy" = NULL, "lockedUntil" = NULL, "lockToken" = NULL
-          WHERE id = $1`,
-        [job.id],
-      );
-    });
+  /**
+   * Позначає задачу виконаною в транзакції `em` викликача (разом із завершенням виконання).
+   * Кидає LeaseLostError, якщо lease уже не наш.
+   */
+  async completeIn(em: EntityManager, job: Job): Promise<void> {
+    await this.assertLease(em, job);
+    await em.query(
+      `UPDATE jobs SET status = 'done', "lockedBy" = NULL, "lockedUntil" = NULL, "lockToken" = NULL
+        WHERE id = $1`,
+      [job.id],
+    );
   }
 
   /**
@@ -125,29 +127,35 @@ export class JobQueueService {
     });
   }
 
-  /** Повертає true, якщо задачу буде повторено, false — якщо вичерпано спроби. */
-  async fail(job: Job, error: string, retryable: boolean): Promise<boolean> {
-    return this.ds.transaction(async (em) => {
-      const current = await this.assertLease(em, job);
-      if (retryable && current.attempts < current.maxAttempts) {
-        await em.query(
-          `UPDATE jobs
-              SET status = 'queued', "lockedBy" = NULL, "lockedUntil" = NULL, "lockToken" = NULL,
-                  "lastError" = $2, "runAt" = now() + make_interval(secs => $3)
-            WHERE id = $1`,
-          [job.id, error, backoffMs(current.attempts) / 1000],
-        );
-        return true;
-      }
+  /**
+   * Провал спроби в транзакції `em` викликача (разом зі станом кроку й виконання). Повертає
+   * true, якщо задачу буде повторено, false — якщо повторів більше не буде.
+   */
+  async failIn(
+    em: EntityManager,
+    job: Job,
+    error: string,
+    retryable: boolean,
+  ): Promise<boolean> {
+    const current = await this.assertLease(em, job);
+    if (retryable && current.attempts < current.maxAttempts) {
       await em.query(
         `UPDATE jobs
-            SET status = 'failed', "lockedBy" = NULL, "lockedUntil" = NULL, "lockToken" = NULL,
-                "lastError" = $2
+            SET status = 'queued', "lockedBy" = NULL, "lockedUntil" = NULL, "lockToken" = NULL,
+                "lastError" = $2, "runAt" = now() + make_interval(secs => $3)
           WHERE id = $1`,
-        [job.id, error],
+        [job.id, error, backoffMs(current.attempts) / 1000],
       );
-      return false;
-    });
+      return true;
+    }
+    await em.query(
+      `UPDATE jobs
+          SET status = 'failed', "lockedBy" = NULL, "lockedUntil" = NULL, "lockToken" = NULL,
+              "lastError" = $2
+        WHERE id = $1`,
+      [job.id, error],
+    );
+    return false;
   }
 
   /**

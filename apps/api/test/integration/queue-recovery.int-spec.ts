@@ -103,7 +103,7 @@ describe('a job whose worker vanished', () => {
     const fresh = (await qb.claimNext('worker-b'))!;
     expect(fresh.id).toBe(stale.id);
 
-    await expect(qa.complete(stale)).rejects.toBeInstanceOf(LeaseLostError);
+    await expect(qa.release(stale)).rejects.toBeInstanceOf(LeaseLostError);
     await expect(qa.heartbeat(stale)).resolves.toBe(false);
 
     const job = await ds

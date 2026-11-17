@@ -5,7 +5,7 @@ import { randomUUID } from 'crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Repository } from 'typeorm';
 import { EnvironmentVariables } from '../config/env.validation';
-import { Execution, Job, WorkflowVersion } from '../entities';
+import { Execution, Job, StepRun, WorkflowVersion } from '../entities';
 import {
   newCorrelationId,
   runWithCorrelationId,
@@ -251,6 +251,8 @@ export class JobRunnerService implements BeforeApplicationShutdown {
       (await this.checkpoints.load(execution.id)).map((r) => [r.stepIndex, r]),
     );
 
+    /** Крок, що виконується зараз (для запису провалу). */
+    let current: StepRun | undefined;
     try {
       for (let i = 0; i < snapshot.steps.length; i++) {
         const step = snapshot.steps[i];
@@ -288,40 +290,23 @@ export class JobRunnerService implements BeforeApplicationShutdown {
           ctx.steps[step.id] = output;
           continue;
         }
-        const run = await this.checkpoints.startStep(job, i, step.id);
-        let output: unknown;
-        try {
-          output = await this.executor.execute(step, ctx, signal);
-        } catch (err) {
-          if (!signal.aborted)
-            await this.checkpoints.stepFailed(job, run, (err as Error).message);
-          throw err;
-        }
-        await this.checkpoints.checkpoint(job, run, output);
+        current = await this.checkpoints.startStep(job, i, step.id);
+        const output = await this.executor.execute(step, ctx, signal);
+        await this.checkpoints.checkpoint(job, current, output);
+        current = undefined;
         ctx.steps[step.id] = output;
       }
       const last = snapshot.steps[snapshot.steps.length - 1];
-      await this.executions.update(execution.id, {
-        status: 'succeeded',
-        output: ctx.steps[last.id] as object,
-        finishedAt: new Date(),
-      });
-      await this.queue.complete(job);
+      await this.checkpoints.finish(job, ctx.steps[last.id]);
     } catch (err) {
       if (err instanceof LeaseLostError || signal.aborted) throw err;
       const retryable = err instanceof StepError ? err.retryable : true;
-      const willRetry = await this.queue.fail(
+      await this.checkpoints.fail(
         job,
+        current,
         (err as Error).message,
         retryable,
       );
-      if (!willRetry) {
-        await this.executions.update(execution.id, {
-          status: 'failed',
-          error: (err as Error).message,
-          finishedAt: new Date(),
-        });
-      }
     }
   }
 }
