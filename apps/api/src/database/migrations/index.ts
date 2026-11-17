@@ -4,6 +4,7 @@ import { TimestampsWithTimeZone1794920300000 } from './1794920300000-TimestampsW
 import { QueueLease1794949287178 } from './1794949287178-QueueLease';
 import { StepCheckpoints1794949553919 } from './1794949553919-StepCheckpoints';
 import { WorkflowVersions1794949818904 } from './1794949818904-WorkflowVersions';
+import { DurableTimers1794950256356 } from './1794950256356-DurableTimers';
 
 /**
  * Явний перелік міграцій у порядку застосування. Без glob-шаблонів, щоб однаково
@@ -17,4 +18,5 @@ export const MIGRATIONS = [
   QueueLease1794949287178,
   StepCheckpoints1794949553919,
   WorkflowVersions1794949818904,
+  DurableTimers1794950256356,
 ];

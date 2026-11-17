@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
-import { DataSource } from 'typeorm';
+import { DataSource, EntityManager } from 'typeorm';
 import { Job, StepRun } from '../entities';
 import { JobQueueService } from './job-queue.service';
 
@@ -77,5 +77,67 @@ export class CheckpointService {
         [run.id, error],
       );
     });
+  }
+
+  /**
+   * Довговічний таймер: фіксує момент пробудження кроку `delay` і повертає задачу в чергу з
+   * `runAt` = цей момент, звільняючи lease. Слот воркера вільний; пробудження переживає будь-який
+   * перезапуск, бо час зберігається в БД. Пауза — не спроба: лічильник спроб обнуляється.
+   */
+  async park(job: Job, run: StepRun, ms: number): Promise<Date> {
+    return this.ds.transaction(async (em) => {
+      await this.queue.assertLease(em, job);
+      const [rows]: [Array<{ wakeAt: Date }>, number] = await em.query(
+        `UPDATE step_runs SET "wakeAt" = now() + make_interval(secs => $2)
+          WHERE id = $1 RETURNING "wakeAt"`,
+        [run.id, ms / 1000],
+      );
+      const { wakeAt } = rows[0];
+      await this.release(em, job, wakeAt);
+      return wakeAt;
+    });
+  }
+
+  /**
+   * Задачу кроку `delay` знову захоплено. Якщо момент пробудження настав — крок завершено
+   * (чекпоінт), інакше (напр., задачу повернув reaper раніше строку) — паркуємо знову до того
+   * самого моменту. true — крок завершено і можна йти далі.
+   */
+  async wakeIfDue(job: Job, run: StepRun, output: unknown): Promise<boolean> {
+    const due = await this.ds.transaction(async (em) => {
+      await this.queue.assertLease(em, job);
+      const [{ due }]: Array<{ due: boolean }> = await em.query(
+        `SELECT "wakeAt" <= now() AS due FROM step_runs WHERE id = $1`,
+        [run.id],
+      );
+      if (!due) {
+        await this.release(em, job, run.wakeAt!);
+        return false;
+      }
+      await em.query(
+        `UPDATE step_runs SET status = 'succeeded', output = $2, error = NULL, "finishedAt" = now()
+          WHERE id = $1`,
+        [run.id, JSON.stringify(output ?? null)],
+      );
+      await em.query(`UPDATE jobs SET attempts = 1 WHERE id = $1`, [job.id]);
+      return true;
+    });
+    if (due) job.attempts = 1;
+    return due;
+  }
+
+  /** Повертає задачу в чергу до `runAt` без lease і без зарахованої спроби. */
+  private async release(
+    em: EntityManager,
+    job: Job,
+    runAt: Date,
+  ): Promise<void> {
+    await em.query(
+      `UPDATE jobs
+          SET status = 'queued', "runAt" = $2, attempts = 0,
+              "lockedBy" = NULL, "lockedUntil" = NULL, "lockToken" = NULL
+        WHERE id = $1`,
+      [job.id, runAt],
+    );
   }
 }

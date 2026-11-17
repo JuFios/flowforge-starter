@@ -100,4 +100,39 @@ describe('delay steps are durable timers', () => {
     expect(waited).toBeGreaterThanOrEqual(2_500);
     expect(waited).toBeLessThan(3_500);
   });
+
+  it('parks the job again when it is picked up before the wake-up time', async () => {
+    const id = await start([
+      { id: 'wait', type: 'delay', ms: 2_000 },
+      { id: 'after', type: 'log', message: 'woke up' },
+    ]);
+    workers.push(await startWorker(1));
+    await waitFor('the delay step to be parked', async () => {
+      const run = await ds
+        .getRepository(StepRun)
+        .findOneBy({ executionId: id, stepId: 'wait' });
+      return run?.wakeAt != null;
+    });
+    const { wakeAt } = await ds
+      .getRepository(StepRun)
+      .findOneByOrFail({ executionId: id, stepId: 'wait' });
+    // Задача стала доступною раніше строку (напр., її повернули вручну).
+    await ds.query(`UPDATE jobs SET "runAt" = now() WHERE "executionId" = $1`, [
+      id,
+    ]);
+
+    await waitFor(
+      'the execution to finish',
+      async () => (await execution(id)).status === 'succeeded',
+    );
+    const { finishedAt } = await execution(id);
+    expect(finishedAt!.getTime()).toBeGreaterThanOrEqual(wakeAt!.getTime());
+    const steps = await ds
+      .getRepository(StepRun)
+      .find({ where: { executionId: id }, order: { stepIndex: 'ASC' } });
+    expect(steps.map((s) => [s.stepId, s.status, s.attempts])).toEqual([
+      ['wait', 'succeeded', 1],
+      ['after', 'succeeded', 1],
+    ]);
+  });
 });

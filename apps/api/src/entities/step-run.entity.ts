@@ -43,6 +43,13 @@ export class StepRun {
   @Column({ type: 'text', nullable: true })
   error: string | null;
 
+  /**
+   * Лише для `delay`: момент пробудження, зафіксований за годинником БД на початку паузи.
+   * Поки він не настав, задача стоїть у черзі з `runAt = wakeAt` і слота воркера не займає.
+   */
+  @Column({ type: 'timestamptz', nullable: true })
+  wakeAt: Date | null;
+
   @CreateDateColumn({ type: 'timestamptz' })
   startedAt: Date;
 

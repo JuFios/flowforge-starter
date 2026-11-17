@@ -25,8 +25,11 @@ export class StepExecutor {
         this.logger.log(renderTemplate(step.message, ctx));
         return { logged: true };
       case 'delay':
-        await abortableSleep(step.ms, signal);
-        return { waitedMs: step.ms };
+        // Пауза — довговічний таймер у черзі (JobRunnerService), а не очікування в процесі.
+        throw new StepError(
+          'delay steps are scheduled by the job runner',
+          false,
+        );
       case 'transform':
         return this.transform(step.expr, ctx);
       case 'http':
@@ -69,18 +72,4 @@ export class StepExecutor {
       return { status: res.status, body: text.slice(0, 10_000) };
     }
   }
-}
-
-function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(resolve, ms);
-    signal?.addEventListener(
-      'abort',
-      () => {
-        clearTimeout(timer);
-        reject(signal.reason as Error);
-      },
-      { once: true },
-    );
-  });
 }

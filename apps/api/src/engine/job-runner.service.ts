@@ -165,22 +165,47 @@ export class JobRunnerService implements OnApplicationShutdown {
     });
 
     const ctx: StepContext = { input: execution.input, steps: {} };
-    const done = new Map(
-      (await this.checkpoints.load(execution.id))
-        .filter((r) => r.status === 'succeeded')
-        .map((r) => [r.stepIndex, r]),
+    const runs = new Map(
+      (await this.checkpoints.load(execution.id)).map((r) => [r.stepIndex, r]),
     );
 
     try {
       for (let i = 0; i < snapshot.steps.length; i++) {
         const step = snapshot.steps[i];
-        const checkpoint = done.get(i);
-        if (checkpoint) {
+        const previous = runs.get(i);
+        if (previous?.status === 'succeeded') {
           // Крок уже завершено в попередній спробі: беремо збережений результат, не виконуємо знову.
-          ctx.steps[step.id] = checkpoint.output;
+          ctx.steps[step.id] = previous.output;
           continue;
         }
         signal.throwIfAborted();
+        if (step.type === 'delay') {
+          const output = { waitedMs: step.ms };
+          if (previous?.wakeAt) {
+            // Пауза вже почалась раніше: завершуємо її, лише коли настав збережений момент.
+            if (!(await this.checkpoints.wakeIfDue(job, previous, output)))
+              return;
+            ctx.steps[step.id] = output;
+            continue;
+          }
+          const run = await this.checkpoints.startStep(job, i, step.id);
+          if (step.ms > 0) {
+            const wakeAt = await this.checkpoints.park(job, run, step.ms);
+            this.logger.log(
+              {
+                jobId: job.id,
+                executionId: job.executionId,
+                stepId: step.id,
+                wakeAt,
+              },
+              'delay step parked until its wake-up time',
+            );
+            return;
+          }
+          await this.checkpoints.checkpoint(job, run, output);
+          ctx.steps[step.id] = output;
+          continue;
+        }
         const run = await this.checkpoints.startStep(job, i, step.id);
         let output: unknown;
         try {
