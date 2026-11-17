@@ -40,6 +40,7 @@ describe('AllExceptionsFilter', () => {
 
   beforeEach(() => {
     logged = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
   });
 
   afterEach(() => jest.restoreAllMocks());
@@ -81,5 +82,33 @@ describe('AllExceptionsFilter', () => {
 
     expect(adapter.reply.mock.calls[0][1]).toMatchObject({ correlationId: 'incoming-1' });
     expect(adapter.setHeader).toHaveBeenCalledWith(response, 'x-request-id', 'incoming-1');
+  });
+
+  it('maps http-errors with a 4xx status to that status and a standard message', () => {
+    const { filter, host, adapter } = setup();
+    const tooLarge = Object.assign(new Error('request entity too large: limit 102400'), { status: 413, type: 'entity.too.large' });
+    filter.catch(tooLarge, host);
+
+    const [, body, status] = adapter.reply.mock.calls[0];
+    expect(status).toBe(413);
+    expect(body).toEqual({ statusCode: 413, message: 'Payload Too Large', correlationId: expect.any(String) });
+  });
+
+  it('does not trust a non-4xx status carried by an arbitrary error', () => {
+    const { filter, host, adapter } = setup();
+    filter.catch(Object.assign(new Error('upstream exploded at 10.0.0.5'), { status: 502 }), host);
+
+    const [, body, status] = adapter.reply.mock.calls[0];
+    expect(status).toBe(500);
+    expect(body).toEqual({ statusCode: 500, message: 'Internal server error', correlationId: expect.any(String) });
+  });
+
+  it('puts the correlation id returned to the client into the log record', () => {
+    const { filter, host, adapter } = setup({ 'x-request-id': 'early-1' });
+    filter.catch(Object.assign(new Error('unsupported charset "KOI8-R"'), { status: 415 }), host);
+
+    expect(adapter.reply.mock.calls[0][1]).toMatchObject({ correlationId: 'early-1' });
+    const warned = jest.mocked(Logger.prototype.warn).mock.calls[0][0];
+    expect(warned).toMatchObject({ correlationId: 'early-1', status: 415, error: { type: 'Error' } });
   });
 });
