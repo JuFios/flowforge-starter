@@ -43,8 +43,10 @@ export interface ReapedJob {
   executionId: string;
   correlationId: string | null;
   attempts: number;
-  status: 'queued' | 'failed';
+  outcome: 'retry' | 'dead';
 }
+
+export type FailureOutcome = 'retry' | 'failed' | 'dead';
 
 /** Скільки прострочених задач reaper обробляє за одну транзакцію. */
 const REAP_BATCH = 100;
@@ -159,34 +161,50 @@ export class JobQueueService {
   }
 
   /**
-   * Провал спроби в транзакції `em` викликача (разом зі станом кроку й виконання). Повертає
-   * true, якщо задачу буде повторено, false — якщо повторів більше не буде.
+   * Провал спроби в транзакції `em` викликача (разом зі станом кроку й виконання):
+   * - `retry` — повторювана помилка, спроби лишились: у черзі з backoff;
+   * - `failed` — неповторювана помилка: повтор нічого не змінить;
+   * - `dead` — повторювана помилка, але ліміт спроб вичерпано (окремий стан для розбору).
    */
   async failIn(
     em: EntityManager,
     job: Job,
     error: string,
     retryable: boolean,
-  ): Promise<boolean> {
+  ): Promise<FailureOutcome> {
     const current = await this.assertLease(em, job);
-    if (retryable && current.attempts < current.maxAttempts) {
+    const outcome: FailureOutcome = !retryable
+      ? 'failed'
+      : current.attempts < current.maxAttempts
+        ? 'retry'
+        : 'dead';
+    await this.applyFailure(em, current, error, outcome);
+    return outcome;
+  }
+
+  private async applyFailure(
+    em: EntityManager,
+    job: Job,
+    error: string,
+    outcome: FailureOutcome,
+  ): Promise<void> {
+    if (outcome === 'retry') {
       await em.query(
         `UPDATE jobs
             SET status = 'queued', "lockedBy" = NULL, "lockedUntil" = NULL, "lockToken" = NULL,
                 "lastError" = $2, "runAt" = now() + make_interval(secs => $3)
           WHERE id = $1`,
-        [job.id, error, this.retryDelaySeconds(current.attempts)],
+        [job.id, error, this.retryDelaySeconds(job.attempts)],
       );
-      return true;
+      return;
     }
     await em.query(
       `UPDATE jobs
-          SET status = 'failed', "lockedBy" = NULL, "lockedUntil" = NULL, "lockToken" = NULL,
+          SET status = $3, "lockedBy" = NULL, "lockedUntil" = NULL, "lockToken" = NULL,
               "lastError" = $2
         WHERE id = $1`,
-      [job.id, error],
+      [job.id, error, outcome],
     );
-    return false;
   }
 
   /**
@@ -207,27 +225,20 @@ export class JobQueueService {
       const reaped: ReapedJob[] = [];
       for (const job of expired) {
         const error = `lease expired: worker ${job.lockedBy ?? '?'} stopped renewing it`;
-        const retry = job.attempts < job.maxAttempts;
-        if (retry) {
+        const outcome: FailureOutcome =
+          job.attempts < job.maxAttempts ? 'retry' : 'dead';
+        await this.applyFailure(em, job, error, outcome);
+        if (outcome === 'dead') {
+          const final = `${error}; no attempts left (${job.attempts}/${job.maxAttempts})`;
           await em.query(
-            `UPDATE jobs
-                SET status = 'queued', "lockedBy" = NULL, "lockedUntil" = NULL, "lockToken" = NULL,
-                    "lastError" = $2, "runAt" = now() + make_interval(secs => $3)
-              WHERE id = $1`,
-            [job.id, error, this.retryDelaySeconds(job.attempts)],
-          );
-        } else {
-          await em.query(
-            `UPDATE jobs
-                SET status = 'failed', "lockedBy" = NULL, "lockedUntil" = NULL, "lockToken" = NULL,
-                    "lastError" = $2
-              WHERE id = $1`,
-            [job.id, error],
+            `UPDATE step_runs SET status = 'failed', error = $2, "finishedAt" = now()
+              WHERE "executionId" = $1 AND status = 'running'`,
+            [job.executionId, final],
           );
           await em.query(
             `UPDATE executions SET status = 'failed', error = $2, "finishedAt" = now()
               WHERE id = $1`,
-            [job.executionId, error],
+            [job.executionId, final],
           );
         }
         reaped.push({
@@ -235,7 +246,7 @@ export class JobQueueService {
           executionId: job.executionId,
           correlationId: job.correlationId,
           attempts: job.attempts,
-          status: retry ? 'queued' : 'failed',
+          outcome,
         });
       }
       return reaped;

@@ -6,7 +6,11 @@ import {
   PrimaryGeneratedColumn,
 } from 'typeorm';
 
-export type JobStatus = 'queued' | 'running' | 'done' | 'failed';
+/**
+ * `failed` — неповторювана помилка; `dead` — повторювані помилки вичерпали ліміт спроб (окремий
+ * стан, щоб такі задачі можна було знайти й розібрати).
+ */
+export type JobStatus = 'queued' | 'running' | 'done' | 'failed' | 'dead';
 
 @Entity('jobs')
 // Захоплення: найраніша готова задача серед queued (часткий індекс не містить завершених задач,

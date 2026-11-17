@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, EntityManager } from 'typeorm';
 import { Job, StepRun } from '../entities';
-import { JobQueueService } from './job-queue.service';
+import { FailureOutcome, JobQueueService } from './job-queue.service';
 
 /**
  * Записи про перебіг кроків. Кожен метод — одна транзакція, що спершу перевіряє lease задачі
@@ -83,29 +83,33 @@ export class CheckpointService {
 
   /**
    * Спроба провалилась: стан кроку, задачі (повтор із backoff або кінець) і, якщо повторів не
-   * буде, виконання — в одній транзакції. Повертає true, якщо задачу буде повторено.
+   * буде, виконання — в одній транзакції.
    */
   async fail(
     job: Job,
     run: StepRun | undefined,
     error: string,
     retryable: boolean,
-  ): Promise<boolean> {
+  ): Promise<FailureOutcome> {
     return this.ds.transaction(async (em) => {
-      const willRetry = await this.queue.failIn(em, job, error, retryable);
+      const outcome = await this.queue.failIn(em, job, error, retryable);
       if (run) {
         await em.query(
           `UPDATE step_runs SET status = 'failed', error = $2, "finishedAt" = now() WHERE id = $1`,
           [run.id, error],
         );
       }
-      if (!willRetry) {
+      if (outcome !== 'retry') {
+        const final =
+          outcome === 'dead'
+            ? `${error}; no attempts left (${job.attempts}/${job.maxAttempts})`
+            : error;
         await em.query(
           `UPDATE executions SET status = 'failed', error = $2, "finishedAt" = now() WHERE id = $1`,
-          [job.executionId, error],
+          [job.executionId, final],
         );
       }
-      return willRetry;
+      return outcome;
     });
   }
 

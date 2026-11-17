@@ -1,5 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
+import { EnvironmentVariables } from '../config/env.validation';
 import { DataSource, Repository } from 'typeorm';
 import {
   Execution,
@@ -20,6 +22,7 @@ export class ExecutionsService {
     @InjectRepository(Execution)
     private readonly executions: Repository<Execution>,
     @InjectRepository(StepRun) private readonly stepRuns: Repository<StepRun>,
+    private readonly config: ConfigService<EnvironmentVariables, true>,
   ) {}
 
   /**
@@ -51,6 +54,7 @@ export class ExecutionsService {
         em.create(Job, {
           tenantId: workflow.tenantId,
           executionId: execution.id,
+          maxAttempts: this.config.get('JOB_MAX_ATTEMPTS', { infer: true }),
           correlationId,
         }),
       );

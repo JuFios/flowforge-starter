@@ -127,9 +127,9 @@ export class JobRunnerService implements BeforeApplicationShutdown {
                 jobId: job.id,
                 executionId: job.executionId,
                 attempt: job.attempts,
-                outcome: job.status,
+                outcome: job.outcome,
               },
-              job.status === 'queued'
+              job.outcome === 'retry'
                 ? 'lease expired, job returned to the queue'
                 : 'lease expired, no attempts left',
             );

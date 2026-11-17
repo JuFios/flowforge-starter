@@ -181,6 +181,16 @@ export class EnvironmentVariables extends DatabaseEnvironment {
   @Max(60_000)
   WORKER_POLL_INTERVAL_MS = 500;
 
+  /**
+   * Скільки спроб має кожен крок виконання (лічильник починається знову після кожного
+   * завершеного кроку). Після вичерпання повторюваних помилок задача переходить у стан `dead`.
+   */
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(100)
+  JOB_MAX_ATTEMPTS = 5;
+
   /** Нижня межа затримки повтору задачі, мс (і база експоненти). */
   @Type(() => Number)
   @IsInt()
