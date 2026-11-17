@@ -39,6 +39,14 @@ const VALUE_PATTERNS: Array<[RegExp, string]> = [
   [/(: )0x[0-9a-f]{2}(?: 0x[0-9a-f]{2})*/gi, `$1${REDACTED}`],
 ];
 
+/**
+ * V8 у тексті помилки JSON.parse повторює ~10 символів вхідного рядка навколо місця помилки:
+ * `Unexpected token 'S', ..."ization": Sk9xQ2vLp7"... is not valid JSON`. Так body-parser (і
+ * BadRequestException, у яку його загортає Nest) переносять у лог шматок тіла запиту, а там
+ * можуть бути секрети (заголовки http-кроків). Стосується будь-якого типу помилки.
+ */
+const JSON_SNIPPET: [RegExp, string] = [/(, )(?:\.\.\.)?"[\s\S]*"(?:\.\.\.)?( is not valid JSON)/, `$1"${REDACTED}"$2`];
+
 function isDatabaseError(err: Error, code: string | undefined): boolean {
   return err.name === 'QueryFailedError' || 'driverError' in err || (code !== undefined && SQLSTATE.test(code));
 }
@@ -51,7 +59,7 @@ export function maskDatabaseMessage(message: string): string {
 
 /** Перший рядок стеку — `${name}: ${message}`; його теж треба замаскувати. */
 function maskStack(err: Error, masked: string): string | undefined {
-  if (!err.stack) return undefined;
+  if (!err.stack || masked === err.message) return err.stack;
   const header = `${err.name}: ${err.message}`;
   if (err.stack.startsWith(header)) return `${err.name}: ${masked}${err.stack.slice(header.length)}`;
   // Нестандартний стек: лишаємо тільки кадри викликів, без тексту повідомлення.
@@ -65,15 +73,16 @@ function maskStack(err: Error, masked: string): string | undefined {
  * деталі драйвера (там можуть бути JSON кроків із заголовками авторизації), у HttpException —
  * `cause`. Редакція pino працює за шляхами полів і не бачить секретів усередині рядків.
  * У повідомленнях помилок БД вхідні значення маскуються (Postgres повторює їх у тексті,
- * напр. `invalid input syntax for type uuid: "…"`) — і в `message`, і в першому рядку стеку.
+ * напр. `invalid input syntax for type uuid: "…"`), у помилках JSON.parse — шматок вхідного
+ * рядка; і в `message`, і в першому рядку стеку.
  */
 export function toSafeError(err: unknown): SafeError {
   if (!(err instanceof Error)) {
     return { type: typeof err, message: 'Non-Error value thrown' };
   }
   const code = errorCode(err);
-  const database = isDatabaseError(err, code);
-  const message = database ? maskDatabaseMessage(err.message) : err.message;
-  const stack = database ? maskStack(err, message) : err.stack;
+  const masked = err.message.replace(...JSON_SNIPPET);
+  const message = isDatabaseError(err, code) ? maskDatabaseMessage(masked) : masked;
+  const stack = maskStack(err, message);
   return { type: err.name, message, ...(code !== undefined && { code }), stack };
 }

@@ -295,7 +295,10 @@ CI (`.github/workflows/ci.yml`):
   Postgres повторює в тексті (`invalid input syntax for type uuid: "…"`, `value "…" is out of
   range`, `at or near "…"`, байтові послідовності), замінюються на `[redacted]` — і в `message`, і
   в першому рядку стеку; ідентифікатори (таблиця, колонка, обмеження) і SQLSTATE лишаються, а
-  повідомлення довші за 300 символів обрізаються (`src/observability/safe-error.ts`).
+  повідомлення довші за 300 символів обрізаються (`src/observability/safe-error.ts`). Так само
+  маскується шматок вхідного рядка, який V8 повторює в помилці `JSON.parse`
+  (`Unexpected token 'S', ..."ization": Sk9xQ2vLp7"... is not valid JSON`): інакше невалідне
+  JSON-тіло запиту (наприклад, workflow із заголовком `Authorization`) частково потрапляло в лог.
   `/ready` при недоступній БД віддає лише `database: down`, причина — у лог.
 
 ## Знайдені проблеми

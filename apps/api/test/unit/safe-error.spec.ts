@@ -51,3 +51,22 @@ describe('toSafeError with database errors', () => {
     expect(toSafeError(node).message).toBe('write EPIPE: "pipe"');
   });
 });
+
+describe('toSafeError with JSON parse errors', () => {
+  it('drops the fragment of the input that V8 repeats in the message and stack', () => {
+    let parseError: Error | undefined;
+    try {
+      JSON.parse('{"headers":{"Authorization": Sk9xQ2vLp7Rm}}');
+    } catch (err) {
+      parseError = err as Error;
+    }
+    const safe = toSafeError(parseError);
+    expect(JSON.stringify(safe)).not.toContain('Sk9xQ2');
+    expect(safe.message).toBe(`Unexpected token 'S', "[redacted]" is not valid JSON`);
+    expect(safe.stack).toMatch(/^SyntaxError: Unexpected token 'S', "\[redacted\]" is not valid JSON\n/);
+  });
+
+  it('leaves JSON errors without a fragment unchanged', () => {
+    expect(toSafeError(new SyntaxError('Unexpected end of JSON input')).message).toBe('Unexpected end of JSON input');
+  });
+});
