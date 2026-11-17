@@ -5,6 +5,9 @@ import { IsIn, IsInt, IsString, Matches, Max, Min, MinLength, validateSync } fro
 export const LOG_LEVELS = ['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent'] as const;
 export type LogLevel = (typeof LOG_LEVELS)[number];
 
+/** Найбільша затримка, яку приймають setTimeout/setInterval (2^31 - 1 мс). */
+export const MAX_TIMER_MS = 2_147_483_647;
+
 /**
  * Схема змінних оточення. Процес не стартує, якщо конфігурація невалідна:
  * краще впасти одразу з зрозумілим повідомленням, ніж працювати з undefined.
@@ -43,9 +46,11 @@ export class EnvironmentVariables {
   @Max(65535)
   WORKER_HTTP_PORT = 3100;
 
+  /** Іде в setInterval: більше за MAX_TIMER_MS Node мовчки перетворює на 1 мс. */
   @Type(() => Number)
   @IsInt()
   @Min(100)
+  @Max(MAX_TIMER_MS)
   SCHEDULER_TICK_MS = 30_000;
 }
 
