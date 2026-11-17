@@ -484,8 +484,11 @@ npm run lint           # ESLint, 0 попереджень
   ```
 
 - **Як виправлено.** Усі три місця логують `{ error: toSafeError(err) }` із нейтральним
-  повідомленням (`scheduler tick failed`, `scheduled run not created` з `workflowId`,
-  `job loop error`) — як HTTP-фільтр помилок.
+  повідомленням (`scheduler tick failed`, `job claim failed`) — як HTTP-фільтр помилок. Помилки,
+  що стосуються конкретної задачі чи спрацювання, логуються всередині їхнього кореляційного
+  контексту, тож мають той самий `correlationId`, що й решта логів цього ланцюжка:
+  `job processing failed` — з `jobId` і `executionId`, `scheduled run not created` — з
+  `workflowId` і `scheduledAt` (`test/unit/background-error-context.spec.ts`).
 - **Альтернативи.** Редагувати секрети на рівні pino (`redact`) не допомагає: значення всередині
   рядка повідомлення, а не в окремому полі. Окремий глобальний обробник помилок для фонових задач
   — зайвий шар, коли таких місць три.

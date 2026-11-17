@@ -68,20 +68,42 @@ export class SchedulerService
           next <= now;
           next = it.next().toDate()
         ) {
-          // Кожне спрацювання — окремий ланцюжок, тож і власний кореляційний ID.
-          await runWithCorrelationId(newCorrelationId(), 'cron', () =>
-            this.executions.enqueue(wf, {}, 'cron'),
-          );
+          // Як і раніше: після невдалого спрацювання решту спрацювань цього workflow
+          // у цьому тіку не створюємо.
+          if (!(await this.fire(wf, next))) break;
           fired++;
         }
       } catch (err) {
         this.logger.warn(
           { workflowId: wf.id, error: toSafeError(err) },
-          'scheduled run not created',
+          'cron schedule could not be evaluated',
         );
       }
     }
     this.lastTick = now;
     return fired;
+  }
+
+  /**
+   * Одне спрацювання — окремий ланцюжок із власним кореляційним ID. Помилка логується
+   * всередині цього контексту, з workflowId і запланованим часом.
+   */
+  private fire(wf: Workflow, scheduledAt: Date): Promise<boolean> {
+    return runWithCorrelationId(newCorrelationId(), 'cron', async () => {
+      try {
+        await this.executions.enqueue(wf, {}, 'cron');
+        return true;
+      } catch (err) {
+        this.logger.warn(
+          {
+            workflowId: wf.id,
+            scheduledAt: scheduledAt.toISOString(),
+            error: toSafeError(err),
+          },
+          'scheduled run not created',
+        );
+        return false;
+      }
+    });
   }
 }

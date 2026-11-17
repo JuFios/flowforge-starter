@@ -47,26 +47,52 @@ export class JobRunnerService implements OnApplicationShutdown {
 
   private async loop(): Promise<void> {
     while (this.running) {
+      let job: Job | null;
       try {
-        const job = await this.queue.claimNext(this.workerId);
-        if (!job) {
-          await sleep(250);
-          continue;
-        }
-        await this.process(job);
+        job = await this.queue.claimNext(this.workerId);
       } catch (err) {
-        this.logger.error({ error: toSafeError(err) }, 'job loop error');
+        // Задачі ще немає, тож і кореляційного контексту теж.
+        this.logger.error({ error: toSafeError(err) }, 'job claim failed');
+        await sleep(1000);
+        continue;
+      }
+      if (!job) {
+        await sleep(250);
+        continue;
+      }
+      try {
+        await this.process(job);
+      } catch {
+        // Уже залоговано в process() — у контексті задачі; лише пауза перед наступною.
         await sleep(1000);
       }
     }
   }
 
-  /** Обробляє задачу в кореляційному контексті запиту/спрацювання, що її створило. */
+  /**
+   * Обробляє задачу в кореляційному контексті запиту/спрацювання, що її створило.
+   * Непередбачена помилка логується тут же, всередині контексту (той самий correlationId,
+   * jobId, executionId), і передається далі.
+   */
   process(job: Job): Promise<void> {
     return runWithCorrelationId(
       job.correlationId ?? newCorrelationId(),
       'job',
-      () => this.processInContext(job),
+      async () => {
+        try {
+          await this.processInContext(job);
+        } catch (err) {
+          this.logger.error(
+            {
+              jobId: job.id,
+              executionId: job.executionId,
+              error: toSafeError(err),
+            },
+            'job processing failed',
+          );
+          throw err;
+        }
+      },
     );
   }
 
