@@ -13,27 +13,30 @@ export function backoffMs(attempt: number): number {
 export class JobQueueService {
   constructor(@InjectDataSource() private readonly ds: DataSource) {}
 
-  /** Бере наступну готову до виконання задачу, або null. */
+  /**
+   * Атомарно захоплює наступну готову задачу, або повертає null.
+   *
+   * Вибір і захоплення — один оператор: `FOR UPDATE SKIP LOCKED` блокує вибраний рядок до кінця
+   * оператора, а конкурентні воркери пропускають заблоковані рядки й беруть наступні, тож одну
+   * задачу не може отримати двоє. `RETURNING *` повертає вже оновлений рядок.
+   */
   async claimNext(workerId: string): Promise<Job | null> {
-    const rows: Array<{ id: string }> = await this.ds.query(
-      `SELECT id FROM jobs WHERE status = 'queued' AND "runAt" <= now() ORDER BY "runAt" LIMIT 1`,
-    );
-    if (rows.length === 0) return null;
-
-    const id = rows[0].id;
-    await this.ds.query(
+    const [rows]: [Job[], number] = await this.ds.query(
       `UPDATE jobs
           SET status = 'running', "lockedBy" = $1,
               "lockedUntil" = now() + make_interval(secs => $2),
               attempts = attempts + 1
-        WHERE id = $3`,
-      [workerId, LEASE_SECONDS, id],
+        WHERE id = (
+                SELECT id FROM jobs
+                 WHERE status = 'queued' AND "runAt" <= now()
+                 ORDER BY "runAt"
+                 LIMIT 1
+                 FOR UPDATE SKIP LOCKED
+              )
+        RETURNING *`,
+      [workerId, LEASE_SECONDS],
     );
-    const [job]: Job[] = await this.ds.query(
-      `SELECT * FROM jobs WHERE id = $1`,
-      [id],
-    );
-    return job;
+    return rows[0] ?? null;
   }
 
   async complete(jobId: string): Promise<void> {
