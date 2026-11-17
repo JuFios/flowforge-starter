@@ -32,6 +32,7 @@ export class StepExecutor {
 
   private transform(expr: string, ctx: StepContext): unknown {
     try {
+      // eslint-disable-next-line @typescript-eslint/no-implied-eval -- відомий дефект: transform виконує довільний код хоста; виправлення — PR 4 (пісочниця JSONata)
       const fn = new Function('ctx', `return (${expr});`);
       return fn(ctx);
     } catch (err) {
