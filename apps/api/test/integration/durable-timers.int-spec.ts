@@ -151,4 +151,35 @@ describe('delay steps are durable timers', () => {
       ['after', 'succeeded', 1],
     ]);
   });
+
+  it('shows the wake-up time of a parked pause in GET /executions/:id', async () => {
+    const id = await start([
+      { id: 'wait', type: 'delay', ms: 60_000 },
+      { id: 'after', type: 'log', message: 'woke up' },
+    ]);
+    workers.push(await startWorker(1));
+    await waitFor('the delay step to be parked', async () => {
+      const run = await ds
+        .getRepository(StepRun)
+        .findOneBy({ executionId: id, stepId: 'wait' });
+      return run?.wakeAt != null;
+    });
+    const { wakeAt } = await ds
+      .getRepository(StepRun)
+      .findOneByOrFail({ executionId: id, stepId: 'wait' });
+
+    const res = await api<{
+      status: string;
+      steps: Array<{ stepId: string; status: string; wakeAt: string | null }>;
+    }>(apiApp.baseUrl, apiKey, 'GET', `/executions/${id}`);
+
+    expect(res.body.status).toBe('running');
+    expect(res.body.steps).toEqual([
+      expect.objectContaining({
+        stepId: 'wait',
+        status: 'running',
+        wakeAt: wakeAt!.toISOString(),
+      }),
+    ]);
+  });
 });
