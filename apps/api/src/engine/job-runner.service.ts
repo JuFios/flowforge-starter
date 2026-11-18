@@ -102,6 +102,7 @@ export class JobRunnerService implements BeforeApplicationShutdown {
     const days = this.config.get('JOB_RETENTION_DAYS', { infer: true });
     try {
       const deleted = await this.queue.purgeFinished(days);
+      this.metrics.jobsPurged.inc(deleted);
       if (deleted > 0)
         this.logger.log(
           { deleted, retentionDays: days },
@@ -245,6 +246,7 @@ export class JobRunnerService implements BeforeApplicationShutdown {
       }
       return job;
     } catch (err) {
+      this.metrics.claimFailures.inc();
       // Збій під час уже запланованого відступу — той самий збій, що його спричинив (цикли
       // почали захоплення одночасно): не рахуємо й не логуємо вдруге.
       if (probe || Date.now() >= this.claimRetryAt) {

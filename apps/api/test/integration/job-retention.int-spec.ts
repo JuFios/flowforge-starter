@@ -118,6 +118,10 @@ describe('finished jobs are deleted after the retention period', () => {
     );
     expect(passes).toHaveLength(1);
     expect(passes[0]).toMatchObject({ deleted: OLD_BULK + expired.length });
+    const metrics = await (await fetch(`${worker.baseUrl}/metrics`)).text();
+    expect(metrics).toContain(
+      `flowforge_jobs_purged_total ${OLD_BULK + expired.length}`,
+    );
     // Історія тенанта лишається: виконання та їхні кроки не видаляються.
     expect(await ds.getRepository(Execution).count()).toBe(6);
     expect(

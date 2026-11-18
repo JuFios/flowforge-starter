@@ -38,7 +38,14 @@ describe('worker backs off when claiming jobs fails', () => {
     jest.restoreAllMocks();
   });
 
+  const metrics = {
+    observeClaim: jest.fn(),
+    claimFailures: { inc: jest.fn() },
+    jobsPurged: { inc: jest.fn() },
+  };
+
   function startRunner(claimNext: jest.Mock): void {
+    metrics.claimFailures.inc.mockClear();
     const values: Partial<EnvironmentVariables> = {
       WORKER_CONCURRENCY: CONCURRENCY,
       JOB_LEASE_MS: 600_000,
@@ -58,7 +65,7 @@ describe('worker backs off when claiming jobs fails', () => {
       {
         get: (key: keyof EnvironmentVariables) => values[key],
       } as unknown as ConfigService<EnvironmentVariables, true>,
-      { observeClaim: jest.fn() } as unknown as QueueMetrics,
+      metrics as unknown as QueueMetrics,
     );
     runner.start(CONCURRENCY);
   }
@@ -86,6 +93,10 @@ describe('worker backs off when claiming jobs fails', () => {
     expect(claimNext.mock.calls.length).toBeLessThanOrEqual(CONCURRENCY + 3);
     expect(failures.length).toBeGreaterThanOrEqual(1);
     expect(failures.length).toBeLessThanOrEqual(3);
+    // Метрика рахує кожну невдалу спробу, хоча лог стримано.
+    expect(metrics.claimFailures.inc).toHaveBeenCalledTimes(
+      claimNext.mock.calls.length,
+    );
   });
 
   it('resumes claiming in every loop once the database is back', async () => {

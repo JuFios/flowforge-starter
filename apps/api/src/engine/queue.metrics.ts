@@ -21,6 +21,10 @@ export class QueueMetrics {
   readonly dead: Counter<'reason'>;
   /** Lease-и, повернуті reaper-ом (воркер зник посеред задачі). */
   readonly leasesExpired: Counter;
+  /** Невдалі спроби захоплення (БД недоступна): видно збій, навіть коли лог стримує backoff. */
+  readonly claimFailures: Counter;
+  /** Завершені задачі, видалені після JOB_RETENTION_DAYS. */
+  readonly jobsPurged: Counter;
 
   constructor(metrics: MetricsService) {
     const registers = [metrics.registry];
@@ -52,6 +56,16 @@ export class QueueMetrics {
     this.leasesExpired = new Counter({
       name: 'flowforge_job_leases_expired_total',
       help: 'Job leases reclaimed by the reaper after a worker stopped renewing them',
+      registers,
+    });
+    this.claimFailures = new Counter({
+      name: 'flowforge_job_claim_failures_total',
+      help: 'Failed attempts to claim a job (database unavailable or failing)',
+      registers,
+    });
+    this.jobsPurged = new Counter({
+      name: 'flowforge_jobs_purged_total',
+      help: 'Finished jobs deleted after the retention period',
       registers,
     });
     // Нульові значення відомих міток: ряд є з самого старту, rate()/increase() коректні.

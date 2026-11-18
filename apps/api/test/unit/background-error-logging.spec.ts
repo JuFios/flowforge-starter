@@ -110,7 +110,7 @@ describe('background loops log errors without input values', () => {
         JOB_LEASE_MS: 60_000,
         JOB_CLEANUP_INTERVAL_MS: 600_000,
       }),
-      {} as QueueMetrics,
+      { claimFailures: { inc: jest.fn() } } as unknown as QueueMetrics,
     );
 
     runner.start(1);
