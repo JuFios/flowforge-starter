@@ -89,4 +89,16 @@ describe('http step error classification', () => {
       retryable: false,
     });
   });
+
+  it('does not retry a request to a port that fetch blocks', async () => {
+    // Порт 9 (discard) — у списку заборонених портів специфікації fetch: відмова детермінована.
+    const failure = executor.execute(
+      { id: 'call', type: 'http', url: 'http://127.0.0.1:9/' },
+      ctx,
+    );
+    await expect(failure).rejects.toMatchObject({
+      message: 'http request is invalid: the port is not allowed',
+      retryable: false,
+    });
+  });
 });
