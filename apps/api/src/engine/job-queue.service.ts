@@ -104,8 +104,12 @@ export const FINISHED_JOBS_SQL = `
    LIMIT ${PURGE_BATCH}
    FOR UPDATE SKIP LOCKED`;
 
-/** Видалення однієї пачки завершених задач (FINISHED_JOBS_SQL), $1 — днів зберігання. */
-export const PURGE_FINISHED_SQL = `DELETE FROM jobs WHERE id IN (${FINISHED_JOBS_SQL})`;
+/**
+ * Видалення однієї пачки завершених задач (FINISHED_JOBS_SQL), $1 — днів зберігання. Саме
+ * `= ANY (ARRAY(...))`, а не `IN (...)`: для `IN` планувальник обирає hash semi join із
+ * послідовним читанням усієї таблиці на кожну пачку, а масив id дає пошук за первинним ключем.
+ */
+export const PURGE_FINISHED_SQL = `DELETE FROM jobs WHERE id = ANY (ARRAY(${FINISHED_JOBS_SQL}))`;
 
 @Injectable()
 export class JobQueueService {
