@@ -72,4 +72,37 @@ describe('LeaseKeeper', () => {
     expect(keeper.signal.aborted).toBe(true);
     keeper.stop();
   });
+
+  it('gives the job up before the lease runs out even when a renewal hangs', async () => {
+    // Запит до БД завис (до query_timeout, що довший за lease): відповіді немає взагалі.
+    const heartbeat = jest.fn(() => new Promise<boolean>(() => undefined));
+    const keeper = keeperWith(heartbeat);
+
+    // Запас 20% lease: до 80% задача ще наша.
+    await jest.advanceTimersByTimeAsync(LEASE_MS * 0.8 - 10);
+    expect(keeper.signal.aborted).toBe(false);
+    // Далі інший воркер може отримати її від reaper-а — крок треба зупинити, не чекаючи запиту.
+    await jest.advanceTimersByTimeAsync(20);
+    expect(keeper.signal.aborted).toBe(true);
+    expect(heartbeat).toHaveBeenCalledTimes(1);
+    keeper.stop();
+  });
+
+  it('moves the deadline forward after every successful renewal', async () => {
+    let calls = 0;
+    // Перші два продовження вдалі, третє зависає.
+    const heartbeat = jest.fn(() =>
+      ++calls <= 2
+        ? Promise.resolve(true)
+        : new Promise<boolean>(() => undefined),
+    );
+    const keeper = keeperWith(heartbeat);
+
+    // Друге продовження — на 2/3 lease; дедлайн тепер 2/3 + 0,8 lease.
+    await jest.advanceTimersByTimeAsync(LEASE_MS * (2 / 3 + 0.8) - 10);
+    expect(keeper.signal.aborted).toBe(false);
+    await jest.advanceTimersByTimeAsync(20);
+    expect(keeper.signal.aborted).toBe(true);
+    keeper.stop();
+  });
 });
