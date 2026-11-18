@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { StepDefinition } from '../entities';
+import { MAX_URL_LENGTH } from '../workflows/definition';
 import { renderTemplate, StepContext } from './template';
 
 /**
@@ -69,6 +70,13 @@ export class StepExecutor {
     idempotencyKey?: string,
   ): Promise<unknown> {
     const url = renderTemplate(step.url, ctx);
+    // Підстановка значень із input/steps може зробити URL невалідним (пробіл, задовгий, інша
+    // схема). Це помилка даних, а не мережі: повтор дасть той самий URL.
+    if (!isValidHttpUrl(url))
+      throw new StepError(
+        'http url is invalid after template substitution',
+        false,
+      );
     let res: Response;
     try {
       res = await fetch(url, {
@@ -107,6 +115,13 @@ export class StepExecutor {
       return { status: res.status, body: text.slice(0, 10_000) };
     }
   }
+}
+
+/** Абсолютний http(s)-URL у межах довжини, яку дозволяє визначення кроку. */
+function isValidHttpUrl(url: string): boolean {
+  if (url.length > MAX_URL_LENGTH || !URL.canParse(url)) return false;
+  const { protocol } = new URL(url);
+  return protocol === 'http:' || protocol === 'https:';
 }
 
 /**
