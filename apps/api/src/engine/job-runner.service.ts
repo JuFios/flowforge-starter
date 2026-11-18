@@ -2,9 +2,10 @@ import { BeforeApplicationShutdown, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'crypto';
+import { setMaxListeners } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Repository } from 'typeorm';
-import { EnvironmentVariables } from '../config/env.validation';
+import { EnvironmentVariables, MAX_TIMER_MS } from '../config/env.validation';
 import { Execution, Job, StepRun, WorkflowVersion } from '../entities';
 import {
   newCorrelationId,
@@ -53,8 +54,8 @@ export class JobRunnerService implements BeforeApplicationShutdown {
     string,
     { keeper: LeaseKeeper; done: Promise<void> }
   >();
-  private reaper?: NodeJS.Timeout;
-  private cleanup?: NodeJS.Timeout;
+  private readonly maintenanceTimers = new Set<NodeJS.Timeout>();
+  private readonly maintenanceRuns = new Set<Promise<void>>();
   /** Невдалі захоплення поспіль (спільно для всіх циклів); 0 — захоплення працює. */
   private claimFailures = 0;
   /** До цього моменту (Date.now()) цикли не захоплюють задач після невдалого захоплення. */
@@ -78,23 +79,46 @@ export class JobRunnerService implements BeforeApplicationShutdown {
     concurrency = this.config.get('WORKER_CONCURRENCY', { infer: true }),
   ): void {
     this.stopping = new AbortController();
+    // Кожен цикл може одночасно чекати зі своїм слухачем abort.
+    if (concurrency > 0) setMaxListeners(concurrency, this.stopping.signal);
     this.logger.log(`${this.workerId} started, concurrency=${concurrency}`);
     for (let i = 0; i < concurrency; i++) this.loops.push(this.loop());
     const leaseMs = this.config.get('JOB_LEASE_MS', { infer: true });
-    this.reaper = setInterval(() => void this.reap(), leaseMs / 2);
-    this.scheduleCleanup();
-  }
-
-  /** Наступне очищення через інтервал ±50%: воркери, що стартували разом, не чистять одночасно. */
-  private scheduleCleanup(): void {
-    if (this.stopping.signal.aborted) return;
-    const interval = this.config.get('JOB_CLEANUP_INTERVAL_MS', {
+    const cleanupMs = this.config.get('JOB_CLEANUP_INTERVAL_MS', {
       infer: true,
     });
-    this.cleanup = setTimeout(
-      () => void this.purgeFinished().finally(() => this.scheduleCleanup()),
-      interval * (0.5 + Math.random()),
+    this.scheduleMaintenance(
+      () => this.reap(),
+      () => leaseMs / 2,
     );
+    this.scheduleMaintenance(
+      () => this.purgeFinished(),
+      () => Math.min(MAX_TIMER_MS, cleanupMs * (0.5 + Math.random())),
+    );
+  }
+
+  /** Кожен прохід має один таймер або один активний запит. Завершення чекає на активні проходи. */
+  private scheduleMaintenance(
+    run: () => Promise<void>,
+    interval: () => number,
+  ): void {
+    if (this.stopping.signal.aborted) return;
+    const timer = setTimeout(() => {
+      this.maintenanceTimers.delete(timer);
+      const active = run()
+        .catch((err: unknown) => {
+          this.logger.error(
+            { error: toSafeError(err) },
+            'worker maintenance failed',
+          );
+        })
+        .finally(() => {
+          this.maintenanceRuns.delete(active);
+          this.scheduleMaintenance(run, interval);
+        });
+      this.maintenanceRuns.add(active);
+    }, interval());
+    this.maintenanceTimers.add(timer);
   }
 
   /**
@@ -104,7 +128,10 @@ export class JobRunnerService implements BeforeApplicationShutdown {
   private async purgeFinished(): Promise<void> {
     const days = this.config.get('JOB_RETENTION_DAYS', { infer: true });
     try {
-      const deleted = await this.queue.purgeFinished(days);
+      const deleted = await this.queue.purgeFinished(
+        days,
+        this.stopping.signal,
+      );
       this.metrics.jobsPurged.inc(deleted);
       if (deleted > 0)
         this.logger.log(
@@ -119,7 +146,10 @@ export class JobRunnerService implements BeforeApplicationShutdown {
     });
     if (!historyDays) return;
     try {
-      const deleted = await this.queue.purgeExecutions(historyDays);
+      const deleted = await this.queue.purgeExecutions(
+        historyDays,
+        this.stopping.signal,
+      );
       this.metrics.executionsPurged.inc(deleted);
       if (deleted > 0)
         this.logger.log(
@@ -143,8 +173,8 @@ export class JobRunnerService implements BeforeApplicationShutdown {
   async beforeApplicationShutdown(): Promise<void> {
     if (this.stopping.signal.aborted) return;
     this.stopping.abort();
-    clearInterval(this.reaper);
-    clearTimeout(this.cleanup);
+    for (const timer of this.maintenanceTimers) clearTimeout(timer);
+    this.maintenanceTimers.clear();
     const grace = this.config.get('WORKER_SHUTDOWN_GRACE_MS', { infer: true });
     const pending = () => [...this.inFlight.values()].map((j) => j.done);
     if (this.inFlight.size > 0) {
@@ -154,7 +184,7 @@ export class JobRunnerService implements BeforeApplicationShutdown {
       );
       const finished = await Promise.race([
         Promise.allSettled(pending()).then(() => true),
-        delay(grace, false),
+        delay(grace, false, { ref: false }),
       ]);
       if (!finished) {
         this.logger.warn(
@@ -165,11 +195,11 @@ export class JobRunnerService implements BeforeApplicationShutdown {
           keeper.abort(new ShutdownAbort());
         await Promise.race([
           Promise.allSettled(pending()),
-          delay(RELEASE_WAIT_MS),
+          delay(RELEASE_WAIT_MS, undefined, { ref: false }),
         ]);
       }
     }
-    await Promise.allSettled(this.loops);
+    await Promise.allSettled([...this.loops, ...this.maintenanceRuns]);
     this.loops = [];
   }
 
@@ -191,7 +221,7 @@ export class JobRunnerService implements BeforeApplicationShutdown {
   /** Повертає в чергу задачі зниклих воркерів. Помилка не зупиняє воркер — наступний прохід повторить. */
   private async reap(): Promise<void> {
     try {
-      for (const job of await this.queue.reapExpired()) {
+      for (const job of await this.queue.reapExpired(this.stopping.signal)) {
         this.metrics.leasesExpired.inc();
         this.metrics.observeFailure(job.outcome, 'lease_expired');
         await runWithCorrelationId(
@@ -221,6 +251,10 @@ export class JobRunnerService implements BeforeApplicationShutdown {
   private async loop(): Promise<void> {
     while (!this.stopping.signal.aborted) {
       const job = await this.claim();
+      if (this.stopping.signal.aborted) {
+        if (job) await this.releaseOnShutdown(job);
+        return;
+      }
       if (job === undefined) continue;
       if (!job) {
         await this.idle();
@@ -400,8 +434,10 @@ export class JobRunnerService implements BeforeApplicationShutdown {
           const output = { waitedMs: step.ms };
           if (previous?.wakeAt) {
             // Пауза вже почалась раніше: завершуємо її, лише коли настав збережений момент.
+            current = previous;
             if (!(await this.checkpoints.wakeIfDue(job, previous, output)))
               return;
+            current = undefined;
             ctx.steps[step.id] = output;
             continue;
           }
@@ -419,7 +455,9 @@ export class JobRunnerService implements BeforeApplicationShutdown {
             );
             return;
           }
+          current = run;
           await this.checkpoints.checkpoint(job, run, output);
+          current = undefined;
           ctx.steps[step.id] = output;
           continue;
         }
@@ -458,6 +496,13 @@ export class JobRunnerService implements BeforeApplicationShutdown {
         stepError ? err.retryable : true,
         stepError ? err.retryAfterMs : undefined,
       );
+      if (outcome === 'checkpointed') {
+        this.logger.warn(
+          { jobId: job.id, stepId: current?.stepId, error: toSafeError(err) },
+          'checkpoint already committed, resuming from the next step',
+        );
+        return;
+      }
       this.metrics.observeFailure(outcome, 'step_error');
       this.logger.warn(
         {

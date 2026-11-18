@@ -5,6 +5,7 @@ import {
   IsString,
   Length,
   MaxLength,
+  ValidateIf,
 } from 'class-validator';
 import { IsStorableText } from '../../common/storable-text';
 
@@ -42,7 +43,7 @@ export class CreateWorkflowDto {
 
 /** Часткова зміна workflow: ті самі правила, усі поля необов'язкові. */
 export class UpdateWorkflowDto {
-  @IsOptional()
+  @ValidateIf((_dto, value: unknown) => value !== undefined)
   @IsString()
   @IsStorableText()
   @Length(1, MAX_WORKFLOW_NAME_LENGTH)
@@ -57,13 +58,13 @@ export class UpdateWorkflowDto {
   @MaxLength(MAX_CRON_LENGTH)
   cron?: string | null;
 
-  @IsOptional()
+  @ValidateIf((_dto, value: unknown) => value !== undefined)
   @IsString()
   @IsStorableText()
   @Length(1, MAX_TIMEZONE_LENGTH)
   timezone?: string;
 
-  @IsOptional()
+  @ValidateIf((_dto, value: unknown) => value !== undefined)
   @IsBoolean()
   enabled?: boolean;
 }

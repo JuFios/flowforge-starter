@@ -39,7 +39,7 @@ const STEP_FIELDS: Record<StepType, readonly string[]> = {
 /** Ім'я заголовка — token за RFC 9110. */
 const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 /** Значення без керівних символів (CR/LF дали б змогу вставити власні заголовки). */
-const HEADER_VALUE = /^[\t\x20-\x7e\x80-￿]*$/;
+const HEADER_VALUE = /^[\t\x20-\x7e\x80-\xff]*$/;
 /**
  * Заголовки, які тенант не задає: `Idempotency-Key` ставить платформа (стабільний для всіх спроб
  * кроку), а службові заголовки з'єднання визначає HTTP-клієнт.
@@ -102,7 +102,7 @@ function validateHttp(
     const entries = Object.entries(raw as Record<string, unknown>);
     if (entries.length > MAX_HEADERS)
       fail(`${where}.headers: не більше ${MAX_HEADERS} заголовків`);
-    headers = {};
+    headers = Object.create(null) as Record<string, string>;
     for (const [name, value] of entries) {
       if (name.length > MAX_HEADER_NAME_LENGTH || !HEADER_NAME.test(name))
         fail(`${where}.headers: невалідне ім'я заголовка`);
@@ -114,7 +114,7 @@ function validateHttp(
         !HEADER_VALUE.test(value)
       ) {
         fail(
-          `${where}.headers.${name}: значення має бути рядком без керівних символів`,
+          `${where}.headers.${name}: значення має бути рядком HTTP (байти до 0xFF, без керівних символів, крім табуляції)`,
         );
       }
       headers[name] = value;

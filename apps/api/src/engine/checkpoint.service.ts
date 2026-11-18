@@ -112,10 +112,25 @@ export class CheckpointService {
     error: string,
     retryable: boolean,
     retryAfterMs?: number,
-  ): Promise<FailureOutcome> {
+  ): Promise<FailureOutcome | 'checkpointed'> {
     // Текст помилки кроку може містити дані тенанта чи отримувача (напр., U+0000).
     error = toStorableText(error);
     return this.ds.transaction(async (em) => {
+      if (run) {
+        // COMMIT чекпоінта міг відбутися, хоча драйвер отримав помилку. Блокування задачі
+        // чекає на результат попередньої транзакції і перевіряє, що lease досі наш.
+        await this.queue.assertLease(em, job);
+        const persisted = await em.findOneByOrFail(StepRun, { id: run.id });
+        if (persisted.status === 'succeeded') {
+          await this.release(em, job);
+          return 'checkpointed';
+        }
+        await em.query(
+          `UPDATE step_runs SET status = 'failed', error = $2, "finishedAt" = now()
+            WHERE id = $1 AND status = 'running'`,
+          [run.id, error],
+        );
+      }
       const outcome = await this.queue.failIn(
         em,
         job,
@@ -123,12 +138,6 @@ export class CheckpointService {
         retryable,
         retryAfterMs,
       );
-      if (run) {
-        await em.query(
-          `UPDATE step_runs SET status = 'failed', error = $2, "finishedAt" = now() WHERE id = $1`,
-          [run.id, error],
-        );
-      }
       if (outcome !== 'retry') {
         const final =
           outcome === 'dead'
@@ -194,14 +203,14 @@ export class CheckpointService {
   private async release(
     em: EntityManager,
     job: Job,
-    runAt: Date,
+    runAt?: Date,
   ): Promise<void> {
     await em.query(
       `UPDATE jobs
-          SET status = 'queued', "runAt" = $2, attempts = 0,
+          SET status = 'queued', "runAt" = COALESCE($2, now()), attempts = 0,
               "lockedBy" = NULL, "lockedUntil" = NULL, "lockToken" = NULL
         WHERE id = $1`,
-      [job.id, runAt],
+      [job.id, runAt ?? null],
     );
   }
 }

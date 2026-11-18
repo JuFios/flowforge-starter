@@ -85,12 +85,12 @@ export class StepExecutor {
       );
     let res: Response;
     try {
+      const headers = new Headers(Object.entries(step.headers ?? {}));
+      if (idempotencyKey) headers.set('Idempotency-Key', idempotencyKey);
       res = await fetch(url, {
         method: step.method ?? 'GET',
         // Ключ однаковий для всіх спроб кроку: отримувач, що його враховує, виконає ефект один раз.
-        headers: idempotencyKey
-          ? { ...step.headers, 'Idempotency-Key': idempotencyKey }
-          : step.headers,
+        headers,
         body:
           step.body !== undefined ? renderTemplate(step.body, ctx) : undefined,
         signal: signal

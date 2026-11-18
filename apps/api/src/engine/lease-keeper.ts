@@ -80,7 +80,9 @@ export class LeaseKeeper {
     if (this.stopped) return;
     const startedAt = Date.now();
     try {
-      if (await this.queue.heartbeat(this.job)) {
+      const renewed = await this.queue.heartbeat(this.job);
+      if (this.stopped || this.signal.aborted) return;
+      if (renewed) {
         // БД продовжила lease від моменту, не ранішого за надсилання запиту: рахуємо від
         // надсилання — із запасом.
         this.validUntil = startedAt + this.leaseMs;

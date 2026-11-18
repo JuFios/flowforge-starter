@@ -302,13 +302,14 @@ export class JobQueueService {
    * Пачки по REAP_BATCH (кожна — окрема коротка транзакція) — доки пачка неповна: після масового
    * падіння воркерів усі їхні задачі повертаються за один прохід, а не по 100 раз на `lease/2`.
    */
-  async reapExpired(): Promise<ReapedJob[]> {
+  async reapExpired(signal?: AbortSignal): Promise<ReapedJob[]> {
     const reaped: ReapedJob[] = [];
-    for (;;) {
+    while (!signal?.aborted) {
       const batch = await this.reapBatch();
       reaped.push(...batch);
-      if (batch.length < REAP_BATCH) return reaped;
+      if (batch.length < REAP_BATCH) break;
     }
+    return reaped;
   }
 
   private async reapBatch(): Promise<ReapedJob[]> {
@@ -355,27 +356,35 @@ export class JobQueueService {
    * HISTORY_PURGE_BATCH, кожна — один оператор (кроки, задачі й виконання разом або ніяк).
    * Повертає кількість видалених виконань.
    */
-  async purgeExecutions(retentionDays: number): Promise<number> {
+  async purgeExecutions(
+    retentionDays: number,
+    signal?: AbortSignal,
+  ): Promise<number> {
     let total = 0;
-    for (;;) {
+    while (!signal?.aborted) {
       const [, deleted]: [unknown[], number] = await this.ds.query(
         PURGE_EXECUTIONS_SQL,
         [retentionDays],
       );
       total += deleted;
-      if (deleted < HISTORY_PURGE_BATCH) return total;
+      if (deleted < HISTORY_PURGE_BATCH) break;
     }
+    return total;
   }
 
-  async purgeFinished(retentionDays: number): Promise<number> {
+  async purgeFinished(
+    retentionDays: number,
+    signal?: AbortSignal,
+  ): Promise<number> {
     let total = 0;
-    for (;;) {
+    while (!signal?.aborted) {
       const [, deleted]: [unknown[], number] = await this.ds.query(
         PURGE_FINISHED_SQL,
         [retentionDays],
       );
       total += deleted;
-      if (deleted < PURGE_BATCH) return total;
+      if (deleted < PURGE_BATCH) break;
     }
+    return total;
   }
 }
