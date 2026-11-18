@@ -14,6 +14,10 @@ export type ExecutionStatus = 'pending' | 'running' | 'succeeded' | 'failed';
 
 @Entity('executions')
 @Index(['tenantId', 'createdAt'])
+// Очищення історії: завершені виконання, старші за EXECUTION_RETENTION_DAYS.
+@Index('IDX_executions_finished', ['finishedAt'], {
+  where: `"status" IN ('succeeded', 'failed')`,
+})
 // Ключ ідемпотентності запуску (заголовок Idempotency-Key): одне виконання на ключ у тенанті.
 @Index('UQ_executions_idempotency_key', ['tenantId', 'idempotencyKey'], {
   unique: true,

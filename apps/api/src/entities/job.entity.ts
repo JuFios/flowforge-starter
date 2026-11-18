@@ -18,6 +18,8 @@ export type JobStatus = 'queued' | 'running' | 'done' | 'failed' | 'dead';
 @Index('IDX_jobs_claim', ['runAt'], { where: `"status" = 'queued'` })
 // Reaper: задачі в роботі з простроченим lease.
 @Index('IDX_jobs_lease', ['lockedUntil'], { where: `"status" = 'running'` })
+// Задача виконання: повтор виконання (POST /executions/:id/retry), видалення історії.
+@Index('IDX_jobs_execution', ['executionId'])
 // Очищення: завершені задачі, старші за термін зберігання (FINISHED_JOBS_SQL).
 @Index('IDX_jobs_finished', ['finishedAt'], {
   where: `"status" IN ('done', 'failed', 'dead')`,

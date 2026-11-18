@@ -8,6 +8,7 @@ import { DurableTimers1794950256356 } from './1794950256356-DurableTimers';
 import { StepIdempotencyKey1794950965096 } from './1794950965096-StepIdempotencyKey';
 import { JobFinishedAt1794989523846 } from './1794989523846-JobFinishedAt';
 import { RunIdempotencyKey1794993774584 } from './1794993774584-RunIdempotencyKey';
+import { HistoryIndexes1794993930872 } from './1794993930872-HistoryIndexes';
 
 /**
  * Явний перелік міграцій у порядку застосування. Без glob-шаблонів, щоб однаково
@@ -25,4 +26,5 @@ export const MIGRATIONS = [
   StepIdempotencyKey1794950965096,
   JobFinishedAt1794989523846,
   RunIdempotencyKey1794993774584,
+  HistoryIndexes1794993930872,
 ];

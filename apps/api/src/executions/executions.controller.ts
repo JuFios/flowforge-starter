@@ -3,6 +3,7 @@ import {
   Controller,
   Get,
   Headers,
+  HttpCode,
   Param,
   ParseUUIDPipe,
   Post,
@@ -58,6 +59,17 @@ export class ExecutionsController {
   @Get('executions')
   list(@CurrentTenant() t: Tenant, @Query('limit') limit?: string) {
     return this.executions.list(t.id, limit ? Number(limit) : undefined);
+  }
+
+  /** Повтор виконання, що завершилось failed: продовження з першого незавершеного кроку. */
+  @Post('executions/:id/retry')
+  @HttpCode(202)
+  async retry(
+    @CurrentTenant() t: Tenant,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    const execution = await this.executions.retry(t.id, id);
+    return { executionId: execution.id };
   }
 
   @Get('executions/:id')

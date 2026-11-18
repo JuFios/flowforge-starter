@@ -1,9 +1,11 @@
 import {
   ConflictException,
   Injectable,
+  Logger,
   NotFoundException,
   UnprocessableEntityException,
 } from '@nestjs/common';
+import { Counter } from 'prom-client';
 import { ConfigService } from '@nestjs/config';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { EnvironmentVariables } from '../config/env.validation';
@@ -19,16 +21,27 @@ import {
   getCorrelationId,
   newCorrelationId,
 } from '../observability/correlation';
+import { MetricsService } from '../observability/metrics.service';
 
 @Injectable()
 export class ExecutionsService {
+  private readonly logger = new Logger(ExecutionsService.name);
+  private readonly retried: Counter;
+
   constructor(
     @InjectDataSource() private readonly ds: DataSource,
     @InjectRepository(Execution)
     private readonly executions: Repository<Execution>,
     @InjectRepository(StepRun) private readonly stepRuns: Repository<StepRun>,
     private readonly config: ConfigService<EnvironmentVariables, true>,
-  ) {}
+    metrics: MetricsService,
+  ) {
+    this.retried = new Counter({
+      name: 'flowforge_executions_retried_total',
+      help: 'Failed executions queued again through POST /executions/:id/retry',
+      registers: [metrics.registry],
+    });
+  }
 
   /**
    * Створює execution і job в одній транзакції; обидва несуть кореляційний ID поточного контексту.
@@ -147,6 +160,67 @@ export class ExecutionsService {
     // Службове поле порівняння у відповідь не потрапляє.
     delete (row as Partial<typeof row>).sameRequest;
     return row;
+  }
+
+  /**
+   * Повтор виконання, що завершилось `failed` (зокрема задача `dead`), — лише свого тенанта.
+   * Виконання продовжується з першого незавершеного кроку з новим бюджетом спроб: завершені кроки
+   * не повторюються, а повторений крок `http` надсилає той самий `Idempotency-Key`, що й раніше.
+   * Виконання й задача змінюються в одній транзакції; рядок виконання блокується, тож із двох
+   * одночасних повторів пройде один.
+   */
+  async retry(tenantId: string, id: string): Promise<Execution> {
+    const correlationId = getCorrelationId() ?? newCorrelationId();
+    const execution = await this.ds.transaction(async (em) => {
+      const [row]: Execution[] = await em.query(
+        `SELECT * FROM executions WHERE id = $1 AND "tenantId" = $2 FOR UPDATE`,
+        [id, tenantId],
+      );
+      if (!row) throw new NotFoundException('Execution не знайдено');
+      if (row.status !== 'failed')
+        throw new ConflictException(
+          `повторити можна лише виконання зі статусом failed (зараз: ${row.status})`,
+        );
+      if (!row.workflowVersionId)
+        throw new ConflictException(
+          'виконання створене до появи знімків версій workflow і не може бути повторене',
+        );
+      const [{ started }]: Array<{ started: boolean }> = await em.query(
+        `SELECT EXISTS (SELECT 1 FROM step_runs WHERE "executionId" = $1) AS started`,
+        [id],
+      );
+      const [updated]: [Execution[], number] = await em.query(
+        `UPDATE executions SET status = $2, error = NULL, output = NULL, "finishedAt" = NULL
+          WHERE id = $1 RETURNING *`,
+        [id, started ? 'running' : 'pending'],
+      );
+      const maxAttempts = this.config.get('JOB_MAX_ATTEMPTS', { infer: true });
+      // Задача — та сама (завершена), або нова, якщо її вже видалило очищення (JOB_RETENTION_DAYS).
+      const [, requeued]: [unknown[], number] = await em.query(
+        `UPDATE jobs
+            SET status = 'queued', attempts = 0, "maxAttempts" = $2, "runAt" = now(),
+                "lastError" = NULL, "finishedAt" = NULL, "correlationId" = $3,
+                "lockedBy" = NULL, "lockedUntil" = NULL, "lockToken" = NULL
+          WHERE "executionId" = $1 AND status IN ('done', 'failed', 'dead')`,
+        [id, maxAttempts, correlationId],
+      );
+      if (requeued === 0)
+        await em.save(
+          em.create(Job, {
+            tenantId,
+            executionId: id,
+            maxAttempts,
+            correlationId,
+          }),
+        );
+      return updated[0];
+    });
+    this.retried.inc();
+    this.logger.log(
+      { executionId: id, originalCorrelationId: execution.correlationId },
+      'failed execution queued again',
+    );
+    return execution;
   }
 
   list(tenantId: string, limit = 50): Promise<Execution[]> {
