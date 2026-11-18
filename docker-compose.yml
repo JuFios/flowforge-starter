@@ -1,36 +1,48 @@
+# Секрети — лише з .env у корені репозиторію (README, «Запуск»), кожен сервіс отримує тільки свої:
+# власник схеми (POSTGRES_PASSWORD) — лише postgres і migrate, ADMIN_TOKEN — лише api, паролі
+# runtime-ролей БД — migrate (створює ролі) і процес, якому роль належить.
 x-api-image: &api-image
   build: ./apps/api
+  # Лише несекретні налаштування; секрети в цьому файлі закоментовані.
   env_file: ./apps/api/.env.example
-  # Поверх прикладу: compose — це production-збірка, а адмін-токен задає користувач
-  # (файл .env у корені, див. README «Запуск»); без нього compose не стартує.
-  environment:
-    NODE_ENV: production
-    ADMIN_TOKEN: ${ADMIN_TOKEN:?задайте ADMIN_TOKEN у .env у корені репозиторію (див. README, розділ «Запуск»)}
 
 services:
   postgres:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: flowforge
-      POSTGRES_PASSWORD: flowforge
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?задайте POSTGRES_PASSWORD у .env у корені репозиторію (див. README, розділ «Запуск»)}
       POSTGRES_DB: flowforge
-    ports: ['5432:5432']
+    # Лише для хоста розробника (локальний запуск і тести поза docker); назовні порт не відкритий.
+    ports: ['127.0.0.1:5432:5432']
     volumes: [pgdata:/var/lib/postgresql/data]
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -U flowforge -d flowforge']
       interval: 3s
       retries: 20
 
-  # Одноразовий крок: застосовує міграції до старту API й воркерів.
+  # Одноразовий крок: міграції (власником схеми) і створення/оновлення runtime-ролей БД.
   migrate:
     <<: *api-image
-    command: ['npm', 'run', 'migration:run']
+    command: ['sh', '-c', 'npm run migration:run && npm run db:provision']
+    environment:
+      NODE_ENV: production
+      MIGRATION_DATABASE_URL: postgres://flowforge:${POSTGRES_PASSWORD:?задайте POSTGRES_PASSWORD у .env}@postgres:5432/flowforge
+      API_DB_USER: flowforge_api
+      API_DB_PASSWORD: ${API_DB_PASSWORD:?задайте API_DB_PASSWORD у .env у корені репозиторію (див. README, розділ «Запуск»)}
+      WORKER_DB_USER: flowforge_worker
+      WORKER_DB_PASSWORD: ${WORKER_DB_PASSWORD:?задайте WORKER_DB_PASSWORD у .env у корені репозиторію (див. README, розділ «Запуск»)}
     depends_on:
       postgres: { condition: service_healthy }
     restart: 'no'
 
   api:
     <<: *api-image
+    environment:
+      NODE_ENV: production
+      ADMIN_TOKEN: ${ADMIN_TOKEN:?задайте ADMIN_TOKEN у .env у корені репозиторію (див. README, розділ «Запуск»)}
+      # Роль API без BYPASSRLS (flowforge_api_role); пароль — лише символи [A-Za-z0-9].
+      DATABASE_URL: postgres://flowforge_api:${API_DB_PASSWORD:?задайте API_DB_PASSWORD у .env}@postgres:5432/flowforge
     depends_on:
       postgres: { condition: service_healthy }
       migrate: { condition: service_completed_successfully }
@@ -44,6 +56,10 @@ services:
   worker:
     <<: *api-image
     command: ['node', 'dist/worker']
+    environment:
+      NODE_ENV: production
+      # Роль воркера без BYPASSRLS (flowforge_worker_role). ADMIN_TOKEN воркер не отримує.
+      DATABASE_URL: postgres://flowforge_worker:${WORKER_DB_PASSWORD:?задайте WORKER_DB_PASSWORD у .env}@postgres:5432/flowforge
     # Час між SIGTERM і SIGKILL: воркер чекає на задачі WORKER_SHUTDOWN_GRACE_MS (20 с), решту
     # повертає в чергу — тому запас тут більший.
     stop_grace_period: 30s

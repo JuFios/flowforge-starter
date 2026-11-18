@@ -9,17 +9,18 @@ describe('ADMIN_TOKEN in production', () => {
     NODE_ENV: 'production',
     DATABASE_URL: 'postgres://u:p@localhost:5432/db',
   };
-  const example = parseEnv(
-    readFileSync(join(__dirname, '../../.env.example'), 'utf8'),
-  );
+  const text = readFileSync(join(__dirname, '../../.env.example'), 'utf8');
+  const example = parseEnv(text);
 
-  it('refuses the value from apps/api/.env.example', () => {
+  it('keeps no ADMIN_TOKEN value in apps/api/.env.example (compose gives it only to the API)', () => {
+    expect(example).not.toHaveProperty('ADMIN_TOKEN');
+  });
+
+  it('refuses the local development value suggested in apps/api/.env.example', () => {
+    const suggested = /change-me-admin/.exec(text)?.[0];
+    expect(suggested).toBe('change-me-admin');
     expect(() =>
-      validateEnv({
-        ...example,
-        ...production,
-        ADMIN_TOKEN: example.ADMIN_TOKEN,
-      }),
+      validateEnv({ ...example, ...production, ADMIN_TOKEN: suggested }),
     ).toThrow(/ADMIN_TOKEN/);
   });
 

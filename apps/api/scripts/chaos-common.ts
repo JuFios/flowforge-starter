@@ -4,7 +4,7 @@
  * лічильниками отримувача.
  *
  * Налаштування: CHAOS_EXECUTIONS (200), API_URL (http://localhost:3000),
- * DATABASE_URL (postgres://flowforge:flowforge@localhost:5432/flowforge),
+ * DATABASE_URL (власник схеми; інакше postgres://flowforge:<POSTGRES_PASSWORD із .env>@localhost:5432/flowforge),
  * SINK_STATS_URL (http://localhost:8080/stats), ADMIN_TOKEN (інакше — з .env у корені репозиторію).
  */
 import { execFileSync } from 'node:child_process';
@@ -25,9 +25,23 @@ const LOG_SINCE = new Date().toISOString();
 const API_URL = process.env.API_URL ?? 'http://localhost:3000';
 const SINK_STATS_URL =
   process.env.SINK_STATS_URL ?? 'http://localhost:8080/stats';
-const DATABASE_URL =
+/** Змінна з .env у корені репозиторію (як docker-compose), якщо її немає в оточенні. */
+export function rootEnv(name: string): string {
+  const fromProcess = process.env[name];
+  if (fromProcess) return fromProcess;
+  const env = parseEnv(readFileSync(join(ROOT, '.env'), 'utf8'));
+  const value = env[name];
+  if (!value) throw new Error(`${name} is not set (environment or .env)`);
+  return value;
+}
+
+/**
+ * Перевірки сценаріїв читають БД власником схеми (повз RLS): пароль суперкористувача Postgres —
+ * той самий POSTGRES_PASSWORD, що й у compose.
+ */
+const databaseUrl = (): string =>
   process.env.DATABASE_URL ??
-  'postgres://flowforge:flowforge@localhost:5432/flowforge';
+  `postgres://flowforge:${encodeURIComponent(rootEnv('POSTGRES_PASSWORD'))}@localhost:5432/flowforge`;
 export const EXECUTIONS = Number(process.env.CHAOS_EXECUTIONS ?? 200);
 /** Кроків у workflow сценарію: рядків step_runs має бути рівно стільки на виконання. */
 export const STEPS = 4;
@@ -37,10 +51,7 @@ export const log = (msg: string) =>
   console.log(`[${new Date().toISOString().slice(11, 19)}] ${msg}`);
 
 function adminToken(): string {
-  if (process.env.ADMIN_TOKEN) return process.env.ADMIN_TOKEN;
-  const env = parseEnv(readFileSync(join(ROOT, '.env'), 'utf8'));
-  if (!env.ADMIN_TOKEN) throw new Error('ADMIN_TOKEN is not set');
-  return env.ADMIN_TOKEN;
+  return rootEnv('ADMIN_TOKEN');
 }
 
 export function docker(args: string[]): string {
@@ -130,7 +141,7 @@ export async function enqueueRound(
 }
 
 export function openDatabase(): Promise<DataSource> {
-  return new DataSource({ type: 'postgres', url: DATABASE_URL }).initialize();
+  return new DataSource({ type: 'postgres', url: databaseUrl() }).initialize();
 }
 
 /** Чекає, поки всі виконання стануть succeeded/failed. */
