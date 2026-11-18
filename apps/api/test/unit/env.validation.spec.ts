@@ -135,6 +135,21 @@ describe('validateEnv', () => {
       /HTTP_BODY_LIMIT/,
     );
   });
+
+  it('requires a connection pool large enough for every worker loop', () => {
+    expect(validateEnv(base)).toMatchObject({ DB_POOL_SIZE: 10 });
+    expect(
+      validateEnv({ ...base, WORKER_CONCURRENCY: '64', DB_POOL_SIZE: '68' })
+        .DB_POOL_SIZE,
+    ).toBe(68);
+    expect(() =>
+      validateEnv({ ...base, WORKER_CONCURRENCY: '64', DB_POOL_SIZE: '67' }),
+    ).toThrow(/DB_POOL_SIZE: має бути не менше за WORKER_CONCURRENCY \+ 4/);
+    // Значення за замовчуванням (10) не вміщає 64 цикли — конфігурацію треба задати явно.
+    expect(() => validateEnv({ ...base, WORKER_CONCURRENCY: '64' })).toThrow(
+      /DB_POOL_SIZE/,
+    );
+  });
 });
 
 describe('validateDatabaseEnv (migration CLI)', () => {

@@ -27,6 +27,8 @@ export const ENTITIES = [
 export const QUERY_TIMEOUT_GRACE_MS = 5_000;
 
 export interface DataSourceBuildOptions {
+  /** Розмір пулу з'єднань (DB_POOL_SIZE); без нього — значення pg за замовчуванням (10). */
+  poolSize?: number;
   /**
    * Обмежувати тривалість запитів (statement_timeout, idle_in_transaction_session_timeout,
    * клієнтський query_timeout). Вимикається лише для CLI міграцій: зміна схеми великої таблиці
@@ -47,7 +49,7 @@ export function buildDataSourceOptions(
     DatabaseEnvironment,
     'DATABASE_URL' | 'DB_CONNECT_TIMEOUT_MS' | 'DB_STATEMENT_TIMEOUT_MS'
   >,
-  { statementTimeout = true }: DataSourceBuildOptions = {},
+  { statementTimeout = true, poolSize }: DataSourceBuildOptions = {},
 ): DataSourceOptions {
   const statementMs = db.DB_STATEMENT_TIMEOUT_MS;
   return {
@@ -55,6 +57,7 @@ export function buildDataSourceOptions(
     url: db.DATABASE_URL,
     // Без нього pg чекає встановлення з'єднання необмежено (сервер прийняв TCP і мовчить).
     connectTimeoutMS: db.DB_CONNECT_TIMEOUT_MS,
+    ...(poolSize !== undefined && { poolSize }),
     extra: statementTimeout
       ? {
           statement_timeout: statementMs,

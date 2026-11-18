@@ -32,15 +32,18 @@ const coreImports = [
   TypeOrmModule.forRootAsync({
     inject: [ConfigService],
     useFactory: (config: ConfigService<EnvironmentVariables, true>) =>
-      buildDataSourceOptions({
-        DATABASE_URL: config.get('DATABASE_URL', { infer: true }),
-        DB_CONNECT_TIMEOUT_MS: config.get('DB_CONNECT_TIMEOUT_MS', {
-          infer: true,
-        }),
-        DB_STATEMENT_TIMEOUT_MS: config.get('DB_STATEMENT_TIMEOUT_MS', {
-          infer: true,
-        }),
-      }),
+      buildDataSourceOptions(
+        {
+          DATABASE_URL: config.get('DATABASE_URL', { infer: true }),
+          DB_CONNECT_TIMEOUT_MS: config.get('DB_CONNECT_TIMEOUT_MS', {
+            infer: true,
+          }),
+          DB_STATEMENT_TIMEOUT_MS: config.get('DB_STATEMENT_TIMEOUT_MS', {
+            infer: true,
+          }),
+        },
+        { poolSize: config.get('DB_POOL_SIZE', { infer: true }) },
+      ),
   }),
   TypeOrmModule.forFeature(ENTITIES),
   ObservabilityModule,

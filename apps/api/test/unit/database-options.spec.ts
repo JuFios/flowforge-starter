@@ -27,4 +27,11 @@ describe('buildDataSourceOptions', () => {
     expect(options).toMatchObject({ connectTimeoutMS: 1500, extra: {} });
     expect(options.extra).not.toHaveProperty('statement_timeout');
   });
+
+  it('sizes the connection pool from the configuration', () => {
+    expect(buildDataSourceOptions(db, { poolSize: 68 })).toMatchObject({
+      poolSize: 68,
+    });
+    expect(buildDataSourceOptions(db)).not.toHaveProperty('poolSize');
+  });
 });

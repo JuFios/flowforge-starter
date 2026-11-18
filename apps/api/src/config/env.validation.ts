@@ -68,27 +68,34 @@ function IsSecureSecretInProduction(): PropertyDecorator {
     });
 }
 
-/** Значення не менше за значення іншої властивості того самого об'єкта. */
-function IsNotLessThan(other: string): PropertyDecorator {
+/** Значення не менше за значення іншої властивості того самого об'єкта (плюс `extra`). */
+function IsNotLessThan(other: string, extra = 0): PropertyDecorator {
   return (target, propertyName) =>
     registerDecorator({
       name: 'isNotLessThan',
       target: target.constructor,
       propertyName: propertyName as string,
-      constraints: [other],
+      constraints: [other, extra],
       validator: {
         validate(value: unknown, args: ValidationArguments) {
           const bound = (args.object as Record<string, unknown>)[other];
           return (
             typeof value !== 'number' ||
             typeof bound !== 'number' ||
-            value >= bound
+            value >= bound + extra
           );
         },
-        defaultMessage: () => `має бути не менше за ${other}`,
+        defaultMessage: () =>
+          `має бути не менше за ${other}${extra ? ` + ${extra}` : ''}`,
       },
     });
 }
+
+/**
+ * Запас пулу понад WORKER_CONCURRENCY: heartbeat-и задач у роботі (паралельно з записами
+ * циклів), reaper, очищення старих задач і перевірка /ready.
+ */
+export const DB_POOL_HEADROOM = 4;
 
 /**
  * Підключення до Postgres. Окремий клас, бо його валідує й CLI міграцій, якому решта
@@ -167,6 +174,18 @@ export class EnvironmentVariables extends DatabaseEnvironment {
   @Min(1)
   @Max(64)
   WORKER_CONCURRENCY = 4;
+
+  /**
+   * Найбільша кількість з'єднань із Postgres в одному процесі (пул pg). Не менша за
+   * WORKER_CONCURRENCY + запас: інакше при повільній БД heartbeat-и стоять у черзі пулу позаду
+   * опитувань черги, і lease-и минають. Сума пулів усіх процесів має вміщатися в max_connections.
+   */
+  @Type(() => Number)
+  @IsInt()
+  @Min(1 + DB_POOL_HEADROOM)
+  @Max(1000)
+  @IsNotLessThan('WORKER_CONCURRENCY', DB_POOL_HEADROOM)
+  DB_POOL_SIZE = 10;
 
   /** Порт службового HTTP воркера (/health, /ready, /metrics). */
   @Type(() => Number)
