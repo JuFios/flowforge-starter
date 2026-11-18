@@ -273,8 +273,19 @@ export class JobQueueService {
    * Прострочений lease рахується як спроба: задача, що раз у раз валить воркер («отруйна»),
    * вичерпає спроби, а не крутитиметься вічно; повтор — із тим самим backoff, що й після помилки.
    * Рядки беруться через SKIP LOCKED: кілька reaper-ів і захоплення не заважають одне одному.
+   * Пачки по REAP_BATCH (кожна — окрема коротка транзакція) — доки пачка неповна: після масового
+   * падіння воркерів усі їхні задачі повертаються за один прохід, а не по 100 раз на `lease/2`.
    */
   async reapExpired(): Promise<ReapedJob[]> {
+    const reaped: ReapedJob[] = [];
+    for (;;) {
+      const batch = await this.reapBatch();
+      reaped.push(...batch);
+      if (batch.length < REAP_BATCH) return reaped;
+    }
+  }
+
+  private async reapBatch(): Promise<ReapedJob[]> {
     return this.ds.transaction(async (em) => {
       const expired: Job[] = await em.query(EXPIRED_LEASES_SQL);
       const reaped: ReapedJob[] = [];
