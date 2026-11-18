@@ -1,4 +1,5 @@
 import { Controller, Get } from '@nestjs/common';
+import { deflateSync, gzipSync } from 'node:zlib';
 import { DataSource } from 'typeorm';
 import { RunningApp, startApp } from '../helpers/app';
 import {
@@ -81,6 +82,27 @@ describe('error responses and their log records', () => {
     const res = await postWorkflow('{}', { 'content-encoding': 'x-unknown' });
     await expectClientError(res, 415, 'Unsupported Media Type');
   });
+
+  it.each([
+    ['gzip', gzipSync],
+    ['deflate', deflateSync],
+  ])(
+    'refuses a %s-compressed body with 415 before decompressing it',
+    async (encoding, compress) => {
+      // Стиснені тіла API не потрібні, а їх розпакування — це код body-parser, досяжний до
+      // автентифікації (GHSA-27r3-jxmh-p828). Відповідь — 415 ще до guard-а (а не 401).
+      const res = await fetch(`${running.baseUrl}/workflows`, {
+        method: 'POST',
+        headers: {
+          'x-api-key': 'ff_unknown',
+          'content-type': 'application/json',
+          'content-encoding': encoding,
+        },
+        body: compress(Buffer.from(JSON.stringify({ name: 'wf' }))),
+      });
+      await expectClientError(res, 415, 'Unsupported Media Type');
+    },
+  );
 
   it('answers an unsupported charset with 415', async () => {
     const res = await postWorkflow('{}', {
