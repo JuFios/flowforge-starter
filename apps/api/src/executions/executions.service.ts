@@ -231,11 +231,17 @@ export class ExecutionsService {
     });
   }
 
-  async get(id: string): Promise<Execution & { steps: StepRun[] }> {
-    const execution = await this.executions.findOne({ where: { id } });
+  /** Виконання тенанта разом із кроками; чуже виконання — 404, як неіснуюче. */
+  async get(
+    tenantId: string,
+    id: string,
+  ): Promise<Execution & { steps: StepRun[] }> {
+    const execution = await this.executions.findOne({
+      where: { id, tenantId },
+    });
     if (!execution) throw new NotFoundException('Execution не знайдено');
     const steps = await this.stepRuns.find({
-      where: { executionId: id },
+      where: { executionId: execution.id },
       order: { stepIndex: 'ASC', startedAt: 'ASC' },
     });
     return { ...execution, steps };
