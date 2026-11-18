@@ -47,6 +47,13 @@ describe('query plans of the queue use their indexes', () => {
     await ds.query(`
       INSERT INTO step_runs ("executionId", "stepIndex", "stepId", status)
       SELECT gen_random_uuid(), 0, 'call', 'succeeded' FROM generate_series(1, 20000)`);
+    // Виконання: завершені, з ключем запуску в кожного десятого.
+    await ds.query(`
+      INSERT INTO executions ("tenantId", "workflowId", status, "idempotencyKey")
+      SELECT gen_random_uuid(), gen_random_uuid(), 'succeeded',
+             CASE WHEN g % 10 = 0 THEN 'key-' || g END
+        FROM generate_series(1, 20000) g`);
+    await ds.query(`ANALYZE executions`);
     await ds.query(`ANALYZE jobs`);
     await ds.query(`ANALYZE step_runs`);
   });
@@ -78,6 +85,12 @@ describe('query plans of the queue use their indexes', () => {
       PURGE_FINISHED_SQL,
       [7],
       'IDX_jobs_finished',
+    ],
+    [
+      'looking a run up by the Idempotency-Key of its tenant',
+      `SELECT * FROM executions WHERE "tenantId" = $1 AND "idempotencyKey" = $2`,
+      ['00000000-0000-4000-8000-000000000000', 'key-10'],
+      'UQ_executions_idempotency_key',
     ],
     [
       'looking a step up by its idempotency key',
