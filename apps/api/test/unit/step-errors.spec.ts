@@ -71,4 +71,22 @@ describe('http step error classification', () => {
       });
     },
   );
+
+  it('does not retry a request that fetch refuses to send (GET with a body)', async () => {
+    // Такий крок відхиляє валідація, але знімок версії міг бути збережений раніше.
+    const failure = executor.execute(
+      {
+        id: 'call',
+        type: 'http',
+        method: 'GET',
+        url: 'https://receiver.example/hook',
+        body: 'x',
+      },
+      ctx,
+    );
+    await expect(failure).rejects.toMatchObject({
+      message: 'http request is invalid',
+      retryable: false,
+    });
+  });
 });

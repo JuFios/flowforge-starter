@@ -79,6 +79,9 @@ describe('validateSteps', () => {
       http({ method: 'POST', body: 'x'.repeat(32 * 1024 + 1) }),
     ],
     ['a non-string body', http({ method: 'POST', body: { a: 1 } })],
+    ['a body on a GET request', http({ method: 'GET', body: 'x' })],
+    ['a body on a HEAD request', http({ method: 'head', body: 'x' })],
+    ['a body without a method (GET by default)', http({ body: 'x' })],
     ['an unknown field', http({ timeoutMs: 1 })],
     [
       'an overly long transform expression',
@@ -104,6 +107,15 @@ describe('validateSteps', () => {
   ])('rejects %s', (_case, steps) => {
     expect(() => validateSteps(steps)).toThrow(BadRequestException);
   });
+
+  it.each(['POST', 'PUT', 'PATCH', 'DELETE'])(
+    'accepts a body on a %s request',
+    (method) => {
+      expect(validateSteps(http({ method, body: '{"a":1}' }))).toEqual([
+        expect.objectContaining({ method, body: '{"a":1}' }),
+      ]);
+    },
+  );
 
   it('accepts a long durable delay and well-formed http options', () => {
     expect(
