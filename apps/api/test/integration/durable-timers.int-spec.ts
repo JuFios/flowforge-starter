@@ -138,6 +138,11 @@ describe('delay steps are durable timers', () => {
     );
     const { finishedAt } = await execution(id);
     expect(finishedAt!.getTime()).toBeGreaterThanOrEqual(wakeAt!.getTime());
+    // Пауза не почалась заново: момент пробудження той самий, що зафіксовано на її початку.
+    const step = await ds
+      .getRepository(StepRun)
+      .findOneByOrFail({ executionId: id, stepId: 'wait' });
+    expect(step.wakeAt).toEqual(wakeAt);
     const steps = await ds
       .getRepository(StepRun)
       .find({ where: { executionId: id }, order: { stepIndex: 'ASC' } });

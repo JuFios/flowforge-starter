@@ -63,11 +63,20 @@ describe('worker backs off when claiming jobs fails', () => {
     runner.start(CONCURRENCY);
   }
 
+  /** Збій, як у справжньої спроби з'єднання з недоступною БД: не миттєвий. */
   const outage = () =>
-    new QueryFailedError('UPDATE jobs', [], new Error('connection refused'));
+    sleep(100).then(() =>
+      Promise.reject(
+        new QueryFailedError(
+          'UPDATE jobs',
+          [],
+          new Error('connection refused'),
+        ),
+      ),
+    );
 
   it('probes the database with one loop at a growing interval and logs once per probe', async () => {
-    const claimNext = jest.fn().mockRejectedValue(outage());
+    const claimNext = jest.fn(outage);
     startRunner(claimNext);
     await sleep(3_500);
 
@@ -81,9 +90,7 @@ describe('worker backs off when claiming jobs fails', () => {
 
   it('resumes claiming in every loop once the database is back', async () => {
     let down = true;
-    const claimNext = jest.fn(() =>
-      down ? Promise.reject(outage()) : Promise.resolve(null),
-    );
+    const claimNext = jest.fn(() => (down ? outage() : Promise.resolve(null)));
     startRunner(claimNext);
     await sleep(500);
     down = false;

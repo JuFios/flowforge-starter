@@ -57,10 +57,17 @@ describe('finished jobs are deleted after the retention period', () => {
       finishedDaysAgo: number | null,
       executionId: string,
     ): Promise<string> => {
+      // Незавершені — такі, яких воркер у тесті не чіпатиме: у черзі на завтра (як пауза
+      // delay) або в роботі з чинним lease іншого воркера.
       const [row]: Array<{ id: string }> = await ds.query(
-        `INSERT INTO jobs ("tenantId", "executionId", status, "createdAt", "finishedAt")
-         VALUES ($1, $2, $3, now() - interval '40 days',
-                 now() - make_interval(days => $4::int))
+        `INSERT INTO jobs ("tenantId", "executionId", status, "createdAt", "finishedAt",
+                           "runAt", "lockedBy", "lockedUntil", "lockToken")
+         VALUES ($1, $2, $3::varchar, now() - interval '40 days',
+                 now() - make_interval(days => $4::int),
+                 now() + interval '1 day',
+                 CASE WHEN $3::varchar = 'running' THEN 'other-worker' END,
+                 CASE WHEN $3::varchar = 'running' THEN now() + interval '1 hour' END,
+                 CASE WHEN $3::varchar = 'running' THEN gen_random_uuid() END)
          RETURNING id`,
         [tenant.id, executionId, status, finishedDaysAgo],
       );
@@ -80,7 +87,8 @@ describe('finished jobs are deleted after the retention period', () => {
     const kept = [
       await job('done', 29, await execution('succeeded')),
       // Незавершені задачі (навіть давно створені) не чіпаються.
-      await job('queued', null, await execution('pending')),
+      await job('queued', null, await execution('running')),
+      await job('running', null, await execution('running')),
     ];
     await ds.query(
       `INSERT INTO jobs ("tenantId", "executionId", status, "createdAt", "finishedAt")
@@ -89,7 +97,12 @@ describe('finished jobs are deleted after the retention period', () => {
       [tenant.id],
     );
 
-    worker = await q.startWorker(1);
+    const { startApp } = await import('../helpers/app');
+    const { WorkerModule } = await import('../../src/app.module');
+    const { JobRunnerService } =
+      await import('../../src/engine/job-runner.service');
+    worker = await startApp(WorkerModule, { captureLogs: true });
+    worker.app.get(JobRunnerService).start(1);
     await q.waitFor(
       'old finished jobs to be deleted',
       async () => (await ds.getRepository(Job).count()) === kept.length,
@@ -99,8 +112,14 @@ describe('finished jobs are deleted after the retention period', () => {
     const remaining = (await ds.getRepository(Job).find()).map((j) => j.id);
     expect(remaining.sort()).toEqual([...kept].sort());
     expect(remaining).not.toEqual(expect.arrayContaining(expired));
+    // Один прохід очищення видалив усе, пачка за пачкою (більше за одну пачку).
+    const passes = worker.logs.filter(
+      (l) => l.msg === 'deleted finished jobs past their retention period',
+    );
+    expect(passes).toHaveLength(1);
+    expect(passes[0]).toMatchObject({ deleted: OLD_BULK + expired.length });
     // Історія тенанта лишається: виконання та їхні кроки не видаляються.
-    expect(await ds.getRepository(Execution).count()).toBe(5);
+    expect(await ds.getRepository(Execution).count()).toBe(6);
     expect(
       await ds.getRepository(StepRun).countBy({ executionId: oldDone }),
     ).toBe(1);
