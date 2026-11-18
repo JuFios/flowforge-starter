@@ -60,6 +60,47 @@ describe('workflow and run input is validated at the API boundary', () => {
     expect(row.name).toBe('w');
   });
 
+  it.each(['name', 'timezone', 'enabled', 'steps'])(
+    'rejects a null %s on PATCH and allows clearing cron',
+    async (field) => {
+      const created = await api<{ id: string }>(
+        app.baseUrl,
+        apiKey,
+        'POST',
+        '/workflows',
+        { name: 'w', steps, cron: '0 * * * *' },
+      );
+      const path = `/workflows/${created.body.id}`;
+      expect((await call('PATCH', path, { [field]: null })).status).toBe(400);
+      const cleared = await call('PATCH', path, { cron: null });
+      expect(cleared.status).toBe(200);
+      expect(cleared.body).toMatchObject({ name: 'w', steps, cron: null });
+    },
+  );
+
+  it('preserves valid header names in the workflow and its version', async () => {
+    const headers = Object.fromEntries([
+      ['__proto__', 'tenant'],
+      ['constructor', 'custom'],
+    ]);
+    const steps = [
+      { id: 'call', type: 'http', url: 'https://example.com', headers },
+    ];
+    const wf = await api<{ id: string }>(
+      app.baseUrl,
+      apiKey,
+      'POST',
+      '/workflows',
+      { name: 'headers', steps },
+    );
+    expect(wf.status).toBe(201);
+    const rows: { steps: unknown }[] = await ds.query(
+      'SELECT steps FROM workflow_versions WHERE "workflowId" = $1 UNION ALL SELECT steps FROM workflows WHERE id = $1',
+      [wf.body.id],
+    );
+    expect(rows).toEqual([{ steps }, { steps }]);
+  });
+
   it.each([
     ['an array', [1, 2]],
     ['a string', 'text'],

@@ -104,6 +104,18 @@ describe('error responses and their log records', () => {
     },
   );
 
+  it('refuses compressed URL-encoded forms before authentication', async () => {
+    const res = await fetch(`${running.baseUrl}/workflows`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/x-www-form-urlencoded',
+        'content-encoding': 'gzip',
+      },
+      body: gzipSync('name=workflow'),
+    });
+    await expectClientError(res, 415, 'Unsupported Media Type');
+  });
+
   it('answers an unsupported charset with 415', async () => {
     const res = await postWorkflow('{}', {
       'content-type': 'application/json; charset=koi8-r',

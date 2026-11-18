@@ -36,6 +36,23 @@ describe('LeaseKeeper', () => {
     expect(keeper.signal.aborted).toBe(false);
   });
 
+  it('leaves no timer when a pending renewal succeeds after stop', async () => {
+    let complete!: (ok: boolean) => void;
+    const keeper = keeperWith(
+      jest.fn(
+        () =>
+          new Promise<boolean>((resolve) => {
+            complete = resolve;
+          }),
+      ),
+    );
+    await jest.advanceTimersByTimeAsync(LEASE_MS / 3);
+    keeper.stop();
+    complete(true);
+    await Promise.resolve();
+    expect(jest.getTimerCount()).toBe(0);
+  });
+
   it('aborts at once when the lease was taken over', async () => {
     const heartbeat = jest.fn().mockResolvedValue(false);
     const keeper = keeperWith(heartbeat);

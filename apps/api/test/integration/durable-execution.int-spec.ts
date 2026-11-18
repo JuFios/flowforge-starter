@@ -1,5 +1,8 @@
 import { DataSource } from 'typeorm';
-import { AppModule } from '../../src/app.module';
+import { CheckpointService } from '../../src/engine/checkpoint.service';
+import { JobRunnerService } from '../../src/engine/job-runner.service';
+import { Job } from '../../src/entities';
+import { AppModule, WorkerModule } from '../../src/app.module';
 import { Execution, StepRun } from '../../src/entities';
 import { RunningApp, startApp } from '../helpers/app';
 import { createTenant, openTestDataSource, truncateAll } from '../helpers/db';
@@ -109,6 +112,40 @@ describe('durable execution', () => {
       ['charge', 'succeeded'],
       ['notify', 'succeeded'],
     ]);
+  });
+
+  it('keeps a committed checkpoint when its acknowledgement is lost on the last attempt', async () => {
+    const wf = await createWorkflow([
+      { id: 'charge', type: 'http', url: receiver.url('/charge') },
+      { id: 'next', type: 'log', message: 'done' },
+    ]);
+    const id = await run(wf);
+    await ds.getRepository(Job).update({ executionId: id }, { maxAttempts: 1 });
+    worker = await startApp(WorkerModule);
+    const checkpoints = worker.app.get(CheckpointService);
+    const commit = checkpoints.checkpoint.bind(checkpoints);
+    jest
+      .spyOn(checkpoints, 'checkpoint')
+      .mockImplementationOnce(async (...args) => {
+        await commit(...args);
+        throw new Error('connection lost after COMMIT');
+      });
+    worker.app.get(JobRunnerService).start(1);
+    await finished(id);
+    expect(
+      await ds.getRepository(Execution).findOneByOrFail({ id }),
+    ).toMatchObject({ status: 'succeeded' });
+    expect(receiver.hits('/charge')).toHaveLength(1);
+    expect(
+      await ds
+        .getRepository(StepRun)
+        .findOneByOrFail({ executionId: id, stepIndex: 0 }),
+    ).toMatchObject({
+      status: 'succeeded',
+      attempts: 1,
+      output: { status: 200, body: { ok: true } },
+      error: null,
+    });
   });
 
   it('runs the workflow version that was current when the execution started', async () => {

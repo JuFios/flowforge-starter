@@ -1,5 +1,7 @@
 import { DataSource } from 'typeorm';
-import { AppModule } from '../../src/app.module';
+import { JobQueueService } from '../../src/engine/job-queue.service';
+import { JobRunnerService } from '../../src/engine/job-runner.service';
+import { AppModule, WorkerModule } from '../../src/app.module';
 import { Execution, Job } from '../../src/entities';
 import { RunningApp, startApp } from '../helpers/app';
 import { createTenant, openTestDataSource, truncateAll } from '../helpers/db';
@@ -69,6 +71,33 @@ describe('worker graceful shutdown', () => {
       res.end('{}');
     };
   }
+
+  it('returns a claim that completes during shutdown without executing the job', async () => {
+    const id = await run();
+    worker = await startApp(WorkerModule);
+    const queue = worker.app.get(JobQueueService);
+    const job = await queue.claimNext('pending-claim');
+    expect(job).toBeTruthy();
+    let resolveClaim!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      resolveClaim = resolve;
+    });
+    jest.spyOn(queue, 'claimNext').mockImplementationOnce(async () => {
+      await pending;
+      return job;
+    });
+    const runner = worker.app.get(JobRunnerService);
+    runner.start(1);
+    const stopped = runner.beforeApplicationShutdown();
+    resolveClaim();
+    await stopped;
+    expect(receiver.hits('/slow')).toHaveLength(0);
+    expect(await jobOf(id)).toMatchObject({
+      status: 'queued',
+      attempts: 0,
+      lockToken: null,
+    });
+  });
 
   it('finishes the job in progress and takes no new ones while stopping', async () => {
     respondAfter(1_000);

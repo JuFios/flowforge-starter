@@ -1,10 +1,12 @@
 import { DataSource } from 'typeorm';
 import { AppModule, WorkerModule } from '../../src/app.module';
 import { JobQueueService } from '../../src/engine/job-queue.service';
+import { StepExecutor } from '../../src/engine/step-executor';
+import { JobRunnerService } from '../../src/engine/job-runner.service';
 import { Execution, StepRun } from '../../src/entities';
 import { RunningApp, startApp } from '../helpers/app';
 import { createTenant, openTestDataSource, truncateAll } from '../helpers/db';
-import { api, startWorker, waitFor } from '../helpers/queue';
+import { api, waitFor } from '../helpers/queue';
 
 const WORKERS = 3;
 const JOBS = 40;
@@ -83,7 +85,13 @@ describe('job queue with several workers', () => {
 
   it('runs each step of each execution exactly once with several workers', async () => {
     const ids = await enqueue(JOBS);
-    for (let i = 0; i < WORKERS; i++) workers.push(await startWorker(4));
+    const calls = [];
+    for (let i = 0; i < WORKERS; i++) {
+      const worker = await startApp(WorkerModule);
+      workers.push(worker);
+      calls.push(jest.spyOn(worker.app.get(StepExecutor), 'execute'));
+      worker.app.get(JobRunnerService).start(4);
+    }
 
     await waitFor('all executions to finish', async () => {
       const done = await ds
@@ -95,11 +103,15 @@ describe('job queue with several workers', () => {
     await Promise.all(workers.map((w) => w.close()));
     workers = [];
 
-    const rows: Array<{ executionId: string; runs: number }> = await ds.query(
-      `SELECT "executionId", count(*)::int AS runs FROM step_runs GROUP BY "executionId"`,
+    const runs = await ds
+      .getRepository(StepRun)
+      .findBy(ids.map((executionId) => ({ executionId })));
+    expect(runs.map((run) => run.executionId).sort()).toEqual(ids.sort());
+    const invoked = calls.flatMap((spy) =>
+      spy.mock.calls.map(([, , options]) => options?.idempotencyKey),
     );
-    expect(rows).toHaveLength(JOBS);
-    expect(rows.filter((r) => r.runs !== 1)).toEqual([]);
-    expect(await ds.getRepository(StepRun).count()).toBe(JOBS);
+    expect(invoked.sort()).toEqual(
+      runs.map((run) => run.idempotencyKey).sort(),
+    );
   });
 });

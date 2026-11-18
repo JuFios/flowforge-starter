@@ -40,6 +40,10 @@ describe('validateSteps', () => {
   ];
 
   it.each([
+    [
+      'a header value outside the fetch ByteString range',
+      http({ headers: { 'x-name': 'Привіт' } }),
+    ],
     ['a non-string header value', http({ headers: { 'x-n': 1 } })],
     ['headers that are not an object', http({ headers: ['x'] })],
     [
