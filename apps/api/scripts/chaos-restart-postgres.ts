@@ -114,6 +114,16 @@ async function main(): Promise<void> {
       (n, id) => n + countLogLines(id, since, 'lease renewal failed'),
       0,
     );
+    // Задача, що саме записувала результат кроку, коли БД зникла: запис не вдався, задачу поверне
+    // reaper. Якщо перезапуск застав усі цикли за роботою, це єдиний слід збою в логах.
+    const processingFailures = workers.reduce(
+      (n, id) => n + countLogLines(id, since, 'job processing failed'),
+      0,
+    );
+    // Будь-який слід недоступності БД доводить, що сценарій справді перевірив відновлення.
+    const outageSeen =
+      claimFailures + renewalFailures + processingFailures + outcome.reclaimed >
+      0;
 
     finish(
       [
@@ -121,6 +131,7 @@ async function main(): Promise<void> {
         `| Процесів воркерів і API, що перезапустились | ${restarted.length} з ${services.length} |`,
         `| Невдалих захоплень у логах воркерів (з backoff) | ${claimFailures} |`,
         `| Невдалих продовжень lease у логах воркерів | ${renewalFailures} |`,
+        `| Задач, чий запис обірвався (job processing failed) | ${processingFailures} |`,
         ...outcomeRows(outcome, elapsed),
       ],
       [
@@ -129,7 +140,7 @@ async function main(): Promise<void> {
           (id) =>
             `container ${id.slice(0, 12)} was restarted: ${processes.get(id)} → ${processState(id)}`,
         ),
-        ...(claimFailures + renewalFailures === 0
+        ...(!outageSeen
           ? [
               'workers never saw the database outage: the scenario proved nothing, run it again',
             ]
