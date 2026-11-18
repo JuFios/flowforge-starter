@@ -209,6 +209,43 @@ describe('durable execution', () => {
     ).toMatchObject({ status: 'succeeded' });
   });
 
+  it.each([
+    ['an http step', { id: 'call', type: 'http', url: 'http://127.0.0.1:1/' }],
+    ['a delay step', { id: 'wait', type: 'delay', ms: 10 }],
+  ])(
+    'marks %s failed when the acknowledgement of its start is lost on the last attempt',
+    async (_case, step) => {
+      const id = await run(await createWorkflow([step]));
+      await ds
+        .getRepository(Job)
+        .update({ executionId: id }, { maxAttempts: 1 });
+      worker = await startApp(WorkerModule);
+      const checkpoints = worker.app.get(CheckpointService);
+      const start = checkpoints.startStep.bind(checkpoints);
+      jest
+        .spyOn(checkpoints, 'startStep')
+        .mockImplementationOnce(async (...args) => {
+          await start(...args);
+          throw new Error('connection lost after COMMIT');
+        });
+      worker.app.get(JobRunnerService).start(1);
+      await finished(id);
+      expect(
+        await ds.getRepository(Job).findOneByOrFail({ executionId: id }),
+      ).toMatchObject({ status: 'dead', attempts: 1 });
+      const execution = await ds
+        .getRepository(Execution)
+        .findOneByOrFail({ id });
+      expect(execution.status).toBe('failed');
+      expect(execution.error).toMatch(/no attempts left \(1\/1\)/);
+      const stepRun = await ds
+        .getRepository(StepRun)
+        .findOneByOrFail({ executionId: id });
+      expect(stepRun).toMatchObject({ status: 'failed', attempts: 1 });
+      expect(stepRun.finishedAt).not.toBeNull();
+    },
+  );
+
   it('marks a delay step failed when parking rolls back on the last attempt', async () => {
     const id = await run(
       await createWorkflow([{ id: 'wait', type: 'delay', ms: 10 }]),
