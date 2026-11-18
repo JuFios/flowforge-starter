@@ -14,7 +14,7 @@ import { createHmac } from 'crypto';
 import { Repository } from 'typeorm';
 import { Tenant, Workflow } from '../entities';
 import { ExecutionsService } from '../executions/executions.service';
-import { RunInputPipe } from '../executions/run-input.pipe';
+import { parseRunInput } from '../executions/run-input.pipe';
 
 /**
  * Вхідні webhook-и. Підпис: hex HMAC-SHA256 від тіла запиту
@@ -33,7 +33,9 @@ export class WebhooksController {
   @HttpCode(202)
   async receive(
     @Param('workflowId', ParseUUIDPipe) workflowId: string,
-    @Body(RunInputPipe) body: Record<string, unknown>,
+    // Без пайпа: вхід перевіряється лише після підпису, інакше неавтентифікований запит
+    // отримав би 400 з поясненням формату замість 401.
+    @Body() body: unknown,
     @Headers('x-signature') signature?: string,
   ) {
     const workflow = await this.workflows.findOne({
@@ -51,7 +53,8 @@ export class WebhooksController {
       throw new UnauthorizedException('Невірний підпис');
     }
 
-    const execution = await this.executions.enqueue(workflow, body, 'webhook');
+    const input = parseRunInput(body);
+    const execution = await this.executions.enqueue(workflow, input, 'webhook');
     return { executionId: execution.id };
   }
 }
