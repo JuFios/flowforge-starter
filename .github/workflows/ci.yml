@@ -138,6 +138,9 @@ jobs:
       - name: Kill workers under load and verify exactly-once effects
         working-directory: apps/api
         run: npm run chaos
+      - name: Restart Postgres under load and verify workers survive with exactly-once effects
+        working-directory: apps/api
+        run: npm run chaos:postgres
       - name: Logs on failure
         if: failure()
         run: docker compose -f docker-compose.yml -f docker-compose.chaos.yml logs --no-color
