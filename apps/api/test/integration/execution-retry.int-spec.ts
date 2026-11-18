@@ -170,10 +170,24 @@ describe('POST /executions/:id/retry', () => {
     await worker!.close();
     worker = undefined;
 
-    const results = await Promise.all([
-      call('POST', `/executions/${id}/retry`),
-      call('POST', `/executions/${id}/retry`),
-    ]);
+    // Перша транзакція тримає зміну виконання 300 мс: друга встигає прочитати його, поки перша
+    // не закомітила, — тож гонка справжня, а не «послідовна».
+    await ds.query(`
+      CREATE OR REPLACE FUNCTION test_slow_retry() RETURNS trigger AS $$
+      BEGIN PERFORM pg_sleep(0.3); RETURN NEW; END $$ LANGUAGE plpgsql;
+      CREATE TRIGGER test_slow_retry BEFORE UPDATE ON executions
+        FOR EACH ROW WHEN (OLD.status = 'failed') EXECUTE FUNCTION test_slow_retry();`);
+    let results: Array<{ status: number }>;
+    try {
+      results = await Promise.all([
+        call('POST', `/executions/${id}/retry`),
+        call('POST', `/executions/${id}/retry`),
+      ]);
+    } finally {
+      await ds.query(`
+        DROP TRIGGER IF EXISTS test_slow_retry ON executions;
+        DROP FUNCTION IF EXISTS test_slow_retry();`);
+    }
 
     expect(results.map((r) => r.status).sort()).toEqual([202, 409]);
     expect(await ds.getRepository(Job).countBy({ executionId: id })).toBe(1);
