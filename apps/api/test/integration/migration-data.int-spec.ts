@@ -1,3 +1,5 @@
+import { ConfigService } from '@nestjs/config';
+import { JobQueueService } from '../../src/engine/job-queue.service';
 import { DataSource } from 'typeorm';
 import { openTestDataSource, truncateAll } from '../helpers/db';
 
@@ -71,6 +73,80 @@ describe('data migrations', () => {
       [1, 'failed', 2, '2026-01-01T00:00:04.000Z'],
     ]);
   });
+
+  it('recovers an expired legacy job with no token without rolling back its neighbors', async () => {
+    await truncateAll(ds);
+    await revertThrough('QueueLease');
+    const [wf]: { id: string; tenantId: string }[] =
+      await ds.query(`INSERT INTO workflows ("tenantId",name,steps)
+      VALUES (gen_random_uuid(),'old','[{"id":"a","type":"log","message":"x"}]') RETURNING *`);
+    const execs: { id: string }[] = await ds.query(
+      `INSERT INTO executions ("tenantId","workflowId",status)
+      SELECT $1,$2,'running' FROM generate_series(1,2) RETURNING id`,
+      [wf.tenantId, wf.id],
+    );
+    for (const e of execs)
+      await ds.query(
+        `INSERT INTO jobs ("tenantId","executionId",status,attempts,"lockedUntil")
+      VALUES ($1,$2,'running',1,now()-interval '1 second')`,
+        [wf.tenantId, e.id],
+      );
+    await ds.query(
+      `INSERT INTO step_runs ("executionId","stepIndex","stepId",status,output)
+      VALUES ($1,0,'a','succeeded','42')`,
+      [execs[0].id],
+    );
+    await ds.runMigrations({ transaction: 'each' });
+    const queue = new JobQueueService(
+      ds,
+      new ConfigService({ JOB_BACKOFF_BASE_MS: 10, JOB_BACKOFF_MAX_MS: 100 }),
+    );
+    const recovered = await queue.reapExpired();
+    expect(recovered.map((r) => r.outcome).sort()).toEqual(['done', 'retry']);
+    expect(
+      await ds.query('SELECT status,output FROM executions WHERE id=$1', [
+        execs[0].id,
+      ]),
+    ).toEqual([{ status: 'succeeded', output: 42 }]);
+  });
+
+  it.each(['old', 'replacement'])(
+    'stops an ambiguous migrated checkpoint with step id %s and preserves the recorded effect',
+    async (stepId) => {
+      await truncateAll(ds);
+      await revertThrough('QueueLease');
+      const [wf]: { id: string; tenantId: string }[] =
+        await ds.query(`INSERT INTO workflows ("tenantId",name,steps,version)
+      VALUES (gen_random_uuid(),'edited','[{"id":"replacement","type":"http","url":"https://example.org"}]',2) RETURNING *`);
+      const [e]: { id: string }[] = await ds.query(
+        `INSERT INTO executions ("tenantId","workflowId",status) VALUES($1,$2,'running') RETURNING id`,
+        [wf.tenantId, wf.id],
+      );
+      await ds.query(
+        `INSERT INTO jobs ("tenantId","executionId") VALUES($1,$2)`,
+        [wf.tenantId, e.id],
+      );
+      await ds.query(
+        `INSERT INTO step_runs ("executionId","stepIndex","stepId",status,output) VALUES($1,0,$2,'succeeded','42')`,
+        [e.id, stepId],
+      );
+      await ds.runMigrations({ transaction: 'each' });
+      expect(
+        await ds.query(
+          `SELECT e.status,e."workflowVersionId",j.status AS job,s.output FROM executions e JOIN jobs j
+      ON j."executionId"=e.id JOIN step_runs s ON s."executionId"=e.id WHERE e.id=$1`,
+          [e.id],
+        ),
+      ).toEqual([
+        {
+          status: 'failed',
+          workflowVersionId: null,
+          job: 'failed',
+          output: 42,
+        },
+      ]);
+    },
+  );
 
   it('WorkflowVersions snapshots existing workflows and finishes runs of deleted ones', async () => {
     await truncateAll(ds);

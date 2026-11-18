@@ -62,6 +62,10 @@ describe('queue metrics on the worker /metrics endpoint', () => {
     const ok = await start([
       { id: 'call', type: 'http', url: receiver.url('/ok') },
     ]);
+    const timers = await start([
+      { id: 'zero', type: 'delay', ms: 0 },
+      { id: 'pause', type: 'delay', ms: 150 },
+    ]);
     const down = await start([
       { id: 'call', type: 'http', url: receiver.url('/down') },
     ]);
@@ -78,7 +82,7 @@ describe('queue metrics on the worker /metrics endpoint', () => {
     await waitFor('all executions to finish', async () => {
       const rows = await ds
         .getRepository(Execution)
-        .findBy([{ id: ok }, { id: down }, { id: lost }]);
+        .findBy([{ id: ok }, { id: down }, { id: lost }, { id: timers }]);
       return rows.every((r) => ['succeeded', 'failed'].includes(r.status));
     });
 
@@ -101,6 +105,18 @@ describe('queue metrics on the worker /metrics endpoint', () => {
       );
     });
     const text = await metrics();
+    expect(
+      sample(
+        text,
+        'flowforge_step_duration_seconds_count{type="delay",outcome="succeeded"}',
+      ),
+    ).toBe(2);
+    expect(
+      sample(
+        text,
+        'flowforge_step_duration_seconds_sum{type="delay",outcome="succeeded"}',
+      ),
+    ).toBeGreaterThanOrEqual(0.15);
     expect(
       sample(text, 'flowforge_job_claim_latency_seconds_count'),
     ).toBeGreaterThanOrEqual(3);

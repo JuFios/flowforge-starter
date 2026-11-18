@@ -1,6 +1,7 @@
 import { DataSource } from 'typeorm';
 import { CheckpointService } from '../../src/engine/checkpoint.service';
 import { JobRunnerService } from '../../src/engine/job-runner.service';
+import { JobQueueService } from '../../src/engine/job-queue.service';
 import { Job } from '../../src/entities';
 import { AppModule, WorkerModule } from '../../src/app.module';
 import { Execution, StepRun } from '../../src/entities';
@@ -146,6 +147,85 @@ describe('durable execution', () => {
       output: { status: 200, body: { ok: true } },
       error: null,
     });
+  });
+
+  it('keeps the HTTP request body byte-identical when rebuilding context from a checkpoint', async () => {
+    let calls = 0;
+    receiver.respond = (req, res) => {
+      if (req.path === '/fetch') {
+        res
+          .writeHead(200, { 'content-type': 'application/json' })
+          .end('{"z":1,"a":2}');
+        return;
+      }
+      res.writeHead(++calls === 1 ? 503 : 200).end('{}');
+    };
+    const id = await run(
+      await createWorkflow([
+        { id: 'fetch', type: 'http', url: receiver.url('/fetch') },
+        {
+          id: 'pay',
+          type: 'http',
+          method: 'POST',
+          url: receiver.url('/pay'),
+          body: '{{ steps.fetch.body }}',
+        },
+      ]),
+    );
+    worker = await startWorker(1);
+    await finished(id);
+    const hits = receiver.hits('/pay');
+    expect(hits).toHaveLength(2);
+    expect(JSON.parse(hits[0].body)).toEqual({ z: 1, a: 2 });
+    expect(hits[1].body).toBe(hits[0].body);
+    expect(hits[1].headers['idempotency-key']).toBe(
+      hits[0].headers['idempotency-key'],
+    );
+  });
+
+  it('preserves the only attempt of the next step when the worker vanishes between steps', async () => {
+    const id = await run(
+      await createWorkflow([
+        { id: 'a', type: 'log', message: 'first' },
+        { id: 'b', type: 'http', url: receiver.url('/next') },
+      ]),
+    );
+    await ds.getRepository(Job).update({ executionId: id }, { maxAttempts: 1 });
+    worker = await startApp(WorkerModule);
+    const queue = worker.app.get(JobQueueService);
+    const cp = worker.app.get(CheckpointService);
+    const job = (await queue.claimNext('gone'))!;
+    await cp.checkpoint(job, await cp.startStep(job, 0, 'a'), { logged: true });
+    await ds.query(
+      `UPDATE jobs SET "lockedUntil"=now()-interval '1 second' WHERE id=$1`,
+      [job.id],
+    );
+    await queue.reapExpired();
+    worker.app.get(JobRunnerService).start(1);
+    await finished(id);
+    expect(receiver.hits('/next')).toHaveLength(1);
+    expect(
+      await ds.getRepository(Execution).findOneByOrFail({ id }),
+    ).toMatchObject({ status: 'succeeded' });
+  });
+
+  it('marks a delay step failed when parking rolls back on the last attempt', async () => {
+    const id = await run(
+      await createWorkflow([{ id: 'wait', type: 'delay', ms: 10 }]),
+    );
+    await ds.getRepository(Job).update({ executionId: id }, { maxAttempts: 1 });
+    worker = await startApp(WorkerModule);
+    jest
+      .spyOn(worker.app.get(CheckpointService), 'park')
+      .mockRejectedValueOnce(new Error('park rolled back'));
+    worker.app.get(JobRunnerService).start(1);
+    await finished(id);
+    expect(
+      await ds.getRepository(Job).findOneByOrFail({ executionId: id }),
+    ).toMatchObject({ status: 'dead' });
+    expect(
+      await ds.getRepository(StepRun).findOneByOrFail({ executionId: id }),
+    ).toMatchObject({ status: 'failed' });
   });
 
   it('runs the workflow version that was current when the execution started', async () => {

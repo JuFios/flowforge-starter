@@ -155,6 +155,32 @@ describe('http step error classification', () => {
     },
   );
 
+  it.each([403, 429, 503])(
+    'classifies HTTP %i even when its body has already failed',
+    async (status) => {
+      const body = new ReadableStream({
+        start(controller) {
+          controller.error(new Error('body disconnected'));
+        },
+      });
+      jest
+        .spyOn(globalThis, 'fetch')
+        .mockResolvedValue(
+          new Response(body, { status, headers: { 'retry-after': '7' } }),
+        );
+      await expect(
+        executor.execute(
+          { id: 'call', type: 'http', url: 'https://receiver.example' },
+          ctx,
+        ),
+      ).rejects.toMatchObject({
+        message: `http ${status}`,
+        retryable: status !== 403,
+        retryAfterMs: status === 403 ? undefined : 7000,
+      });
+    },
+  );
+
   /** Відповідь, заголовки якої прийшли, а читання тіла обривається помилкою `error`. */
   function failingBody(error: unknown): Response {
     return new Response(
