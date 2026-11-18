@@ -3,6 +3,7 @@ import {
   CLAIM_CANDIDATE_SQL,
   EXPIRED_LEASES_SQL,
   FINISHED_JOBS_SQL,
+  PURGE_EXECUTIONS_SQL,
   PURGE_FINISHED_SQL,
 } from '../../src/engine/job-queue.service';
 import { openTestDataSource, truncateAll } from '../helpers/db';
@@ -49,9 +50,10 @@ describe('query plans of the queue use their indexes', () => {
       SELECT gen_random_uuid(), 0, 'call', 'succeeded' FROM generate_series(1, 20000)`);
     // Виконання: завершені, з ключем запуску в кожного десятого.
     await ds.query(`
-      INSERT INTO executions ("tenantId", "workflowId", status, "idempotencyKey")
+      INSERT INTO executions ("tenantId", "workflowId", status, "idempotencyKey", "finishedAt")
       SELECT gen_random_uuid(), gen_random_uuid(), 'succeeded',
-             CASE WHEN g % 10 = 0 THEN 'key-' || g END
+             CASE WHEN g % 10 = 0 THEN 'key-' || g END,
+             now() - (g || ' minutes')::interval
         FROM generate_series(1, 20000) g`);
     await ds.query(`ANALYZE executions`);
     await ds.query(`ANALYZE jobs`);
@@ -85,6 +87,20 @@ describe('query plans of the queue use their indexes', () => {
       PURGE_FINISHED_SQL,
       [7],
       'IDX_jobs_finished',
+    ],
+    [
+      // Пачка історії: вибір — індексом завершених виконань, видалення кроків, задач і виконань —
+      // за ключами (без Seq Scan жодної з трьох таблиць).
+      'deleting one batch of execution history',
+      PURGE_EXECUTIONS_SQL,
+      [7],
+      'IDX_executions_finished',
+    ],
+    [
+      'finding the job of an execution (retry, history cleanup)',
+      `SELECT * FROM jobs WHERE "executionId" = $1`,
+      ['00000000-0000-4000-8000-000000000000'],
+      'IDX_jobs_execution',
     ],
     [
       'looking a run up by the Idempotency-Key of its tenant',

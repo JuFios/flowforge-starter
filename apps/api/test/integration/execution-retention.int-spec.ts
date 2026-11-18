@@ -112,16 +112,12 @@ describe('execution history is deleted after EXECUTION_RETENTION_DAYS when enabl
     );
     expect(remaining.sort()).toEqual([...kept].sort());
     // Кроки й задачі видалених виконань теж видалено; у збережених — на місці.
-    const owners = async (repo: 'step_runs' | 'jobs') =>
-      (
-        (await ds.query(
-          `SELECT DISTINCT "executionId" AS id FROM ${repo}`,
-        )) as Array<{
-          id: string;
-        }>
-      )
-        .map((r) => r.id)
-        .sort();
+    const owners = async (table: 'step_runs' | 'jobs') => {
+      const rows: Array<{ id: string }> = await ds.query(
+        `SELECT DISTINCT "executionId" AS id FROM ${table}`,
+      );
+      return rows.map((r) => r.id).sort();
+    };
     expect(await owners('step_runs')).toEqual([...kept].sort());
     expect(await owners('jobs')).toEqual([...kept].sort());
     expect(

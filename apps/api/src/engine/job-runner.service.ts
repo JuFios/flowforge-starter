@@ -97,7 +97,10 @@ export class JobRunnerService implements BeforeApplicationShutdown {
     );
   }
 
-  /** Видаляє старі завершені задачі. Помилка не зупиняє воркер — наступне очищення повторить. */
+  /**
+   * Видаляє старі завершені задачі, а якщо увімкнено (EXECUTION_RETENTION_DAYS > 0), — і стару
+   * історію виконань. Помилка не зупиняє воркер — наступне очищення повторить.
+   */
   private async purgeFinished(): Promise<void> {
     const days = this.config.get('JOB_RETENTION_DAYS', { infer: true });
     try {
@@ -110,6 +113,24 @@ export class JobRunnerService implements BeforeApplicationShutdown {
         );
     } catch (err) {
       this.logger.error({ error: toSafeError(err) }, 'job cleanup failed');
+    }
+    const historyDays = this.config.get('EXECUTION_RETENTION_DAYS', {
+      infer: true,
+    });
+    if (!historyDays) return;
+    try {
+      const deleted = await this.queue.purgeExecutions(historyDays);
+      this.metrics.executionsPurged.inc(deleted);
+      if (deleted > 0)
+        this.logger.log(
+          { deleted, retentionDays: historyDays },
+          'deleted finished executions past their retention period',
+        );
+    } catch (err) {
+      this.logger.error(
+        { error: toSafeError(err) },
+        'execution history cleanup failed',
+      );
     }
   }
 

@@ -25,6 +25,8 @@ export class QueueMetrics {
   readonly claimFailures: Counter;
   /** Завершені задачі, видалені після JOB_RETENTION_DAYS. */
   readonly jobsPurged: Counter;
+  /** Завершені виконання (з кроками й задачами), видалені після EXECUTION_RETENTION_DAYS. */
+  readonly executionsPurged: Counter;
 
   constructor(metrics: MetricsService) {
     const registers = [metrics.registry];
@@ -66,6 +68,11 @@ export class QueueMetrics {
     this.jobsPurged = new Counter({
       name: 'flowforge_jobs_purged_total',
       help: 'Finished jobs deleted after the retention period',
+      registers,
+    });
+    this.executionsPurged = new Counter({
+      name: 'flowforge_executions_purged_total',
+      help: 'Finished executions deleted with their steps and jobs after the history retention period',
       registers,
     });
     // Нульові значення відомих міток: ряд є з самого старту, rate()/increase() коректні.

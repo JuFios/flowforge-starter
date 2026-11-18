@@ -261,6 +261,17 @@ export class EnvironmentVariables extends DatabaseEnvironment {
   @Max(3650)
   JOB_RETENTION_DAYS = 30;
 
+  /**
+   * Скільки днів зберігається історія виконань (`executions` разом із `step_runs` і `jobs`) після
+   * завершення. 0 — зберігати завжди (за замовчуванням): історію тенанта, яку показує API,
+   * платформа без явного рішення оператора не видаляє.
+   */
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(3650)
+  EXECUTION_RETENTION_DAYS = 0;
+
   /** Як часто кожен воркер видаляє завершені задачі, старші за JOB_RETENTION_DAYS (з jitter). */
   @Type(() => Number)
   @IsInt()

@@ -111,6 +111,32 @@ export const FINISHED_JOBS_SQL = `
  */
 export const PURGE_FINISHED_SQL = `DELETE FROM jobs WHERE id = ANY (ARRAY(${FINISHED_JOBS_SQL}))`;
 
+/** Скільки завершених виконань (з кроками й задачами) видаляє одна транзакція очищення історії. */
+export const HISTORY_PURGE_BATCH = 500;
+
+/**
+ * Пачка завершених виконань, старших за термін зберігання історії ($1 — днів), найстаріші першими
+ * (індекс IDX_executions_finished). Повтор виконання (`retry`) блокує рядок — SKIP LOCKED його
+ * пропустить, а після коміту воно вже не завершене.
+ */
+export const FINISHED_EXECUTIONS_SQL = `
+  SELECT id FROM executions
+   WHERE status IN ('succeeded', 'failed')
+     AND "finishedAt" < now() - make_interval(days => $1)
+   ORDER BY "finishedAt"
+   LIMIT ${HISTORY_PURGE_BATCH}
+   FOR UPDATE SKIP LOCKED`;
+
+/**
+ * Одна пачка історії одним оператором (атомарно): кроки, задачі й самі виконання. Видалення —
+ * за ключами (`= ANY`), без читання таблиць повністю.
+ */
+export const PURGE_EXECUTIONS_SQL = `
+  WITH batch AS (SELECT ARRAY(${FINISHED_EXECUTIONS_SQL}) AS ids),
+       steps AS (DELETE FROM step_runs s USING batch b WHERE s."executionId" = ANY (b.ids)),
+       queue AS (DELETE FROM jobs j USING batch b WHERE j."executionId" = ANY (b.ids))
+  DELETE FROM executions e USING batch b WHERE e.id = ANY (b.ids)`;
+
 @Injectable()
 export class JobQueueService {
   constructor(
@@ -324,6 +350,23 @@ export class JobQueueService {
    * тому, пачками по PURGE_BATCH — кожна пачка окремою короткою транзакцією, без довгих блокувань.
    * Виконання й кроки не видаляються: це історія тенанта, яку показує API. Повертає кількість.
    */
+  /**
+   * Видаляє історію виконань, завершених понад `retentionDays` днів тому: пачками по
+   * HISTORY_PURGE_BATCH, кожна — один оператор (кроки, задачі й виконання разом або ніяк).
+   * Повертає кількість видалених виконань.
+   */
+  async purgeExecutions(retentionDays: number): Promise<number> {
+    let total = 0;
+    for (;;) {
+      const [, deleted]: [unknown[], number] = await this.ds.query(
+        PURGE_EXECUTIONS_SQL,
+        [retentionDays],
+      );
+      total += deleted;
+      if (deleted < HISTORY_PURGE_BATCH) return total;
+    }
+  }
+
   async purgeFinished(retentionDays: number): Promise<number> {
     let total = 0;
     for (;;) {
