@@ -120,4 +120,23 @@ describe('execution errors shown to the tenant', () => {
     expect(body.error).toMatch(/^http request failed: connection refused/);
     expect(JSON.stringify(body)).not.toContain('ECONNREFUSED 127.0.0.1');
   });
+
+  it('reports a connection dropped in the middle of the response body as a network failure', async () => {
+    receiver.respond = (_req, res) => {
+      res.writeHead(200, {
+        'content-type': 'application/json',
+        'content-length': '100',
+      });
+      res.write('{"partial":');
+      setTimeout(() => res.socket?.destroy(), 20);
+    };
+    const body = await runToFailure([
+      { id: 'call', type: 'http', url: receiver.url('/drop') },
+    ]);
+    expect(body.error).toBe(
+      'http request failed: connection reset; no attempts left (3/3)',
+    );
+    // Повторювана мережева помилка: використано всі спроби.
+    expect(receiver.hits('/drop')).toHaveLength(3);
+  });
 });

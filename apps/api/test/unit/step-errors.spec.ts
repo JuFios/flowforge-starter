@@ -154,4 +154,45 @@ describe('http step error classification', () => {
       ).rejects.toMatchObject({ retryable: true, retryAfterMs: 7_000 });
     },
   );
+
+  /** Відповідь, заголовки якої прийшли, а читання тіла обривається помилкою `error`. */
+  function failingBody(error: unknown): Response {
+    return new Response(
+      new ReadableStream({
+        pull(controller) {
+          controller.error(error);
+        },
+      }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    );
+  }
+
+  it.each([
+    [
+      'times out',
+      new DOMException('The operation timed out', 'TimeoutError'),
+      'timed out',
+    ],
+    [
+      'loses the connection',
+      Object.assign(new TypeError('terminated'), {
+        cause: { code: 'UND_ERR_SOCKET', remoteAddress: '10.0.0.7' },
+      }),
+      'connection reset',
+    ],
+  ])(
+    'retries a step whose response body %s while being read',
+    async (_case, error, reason) => {
+      jest.spyOn(globalThis, 'fetch').mockResolvedValue(failingBody(error));
+      await expect(
+        executor.execute(
+          { id: 'call', type: 'http', url: 'https://receiver.example/hook' },
+          ctx,
+        ),
+      ).rejects.toMatchObject({
+        message: `http request failed: ${reason}`,
+        retryable: true,
+      });
+    },
+  );
 });
