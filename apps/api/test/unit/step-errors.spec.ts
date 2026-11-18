@@ -136,4 +136,24 @@ describe('http step error classification', () => {
       retryable: false,
     });
   });
+
+  it.each([429, 503])(
+    'passes the Retry-After of HTTP %i on to the retry',
+    async (status) => {
+      jest
+        .spyOn(globalThis, 'fetch')
+        .mockResolvedValue(
+          new Response('slow down', {
+            status,
+            headers: { 'retry-after': '7' },
+          }),
+        );
+      await expect(
+        executor.execute(
+          { id: 'call', type: 'http', url: 'https://receiver.example/hook' },
+          ctx,
+        ),
+      ).rejects.toMatchObject({ retryable: true, retryAfterMs: 7_000 });
+    },
+  );
 });
