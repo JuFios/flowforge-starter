@@ -111,11 +111,18 @@ export class CheckpointService {
     run: StepRun | undefined,
     error: string,
     retryable: boolean,
+    retryAfterMs?: number,
   ): Promise<FailureOutcome> {
     // Текст помилки кроку може містити дані тенанта чи отримувача (напр., U+0000).
     error = toStorableText(error);
     return this.ds.transaction(async (em) => {
-      const outcome = await this.queue.failIn(em, job, error, retryable);
+      const outcome = await this.queue.failIn(
+        em,
+        job,
+        error,
+        retryable,
+        retryAfterMs,
+      );
       if (run) {
         await em.query(
           `UPDATE step_runs SET status = 'failed', error = $2, "finishedAt" = now() WHERE id = $1`,

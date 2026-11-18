@@ -30,6 +30,22 @@ export function backoffMs(
   return Math.round(baseMs + random() * (ceiling - baseMs));
 }
 
+/**
+ * Затримка повтору з урахуванням побажання отримувача (`Retry-After`): не раніше, ніж він просить,
+ * не коротша за звичайний backoff (його нижня межа і jitter лишаються) і не довша за `maxMs` —
+ * отримувач не може відкласти задачу довше, ніж дозволяє конфігурація.
+ */
+export function retryDelayMs(
+  attempt: number,
+  options: BackoffOptions,
+  notBeforeMs?: number,
+): number {
+  return Math.min(
+    options.maxMs,
+    Math.max(notBeforeMs ?? 0, backoffMs(attempt, options)),
+  );
+}
+
 /** Lease задачі вже забрано (прострочено й повернуто в чергу reaper-ом або захоплено іншим). */
 export class LeaseLostError extends Error {
   constructor(jobId: string) {
@@ -81,12 +97,16 @@ export class JobQueueService {
   ) {}
 
   /** Затримка перед наступною спробою, у секундах (для make_interval). */
-  private retryDelaySeconds(attempt: number): number {
+  private retryDelaySeconds(attempt: number, notBeforeMs?: number): number {
     return (
-      backoffMs(attempt, {
-        baseMs: this.config.get('JOB_BACKOFF_BASE_MS', { infer: true }),
-        maxMs: this.config.get('JOB_BACKOFF_MAX_MS', { infer: true }),
-      }) / 1000
+      retryDelayMs(
+        attempt,
+        {
+          baseMs: this.config.get('JOB_BACKOFF_BASE_MS', { infer: true }),
+          maxMs: this.config.get('JOB_BACKOFF_MAX_MS', { infer: true }),
+        },
+        notBeforeMs,
+      ) / 1000
     );
   }
 
@@ -187,6 +207,7 @@ export class JobQueueService {
     job: Job,
     error: string,
     retryable: boolean,
+    retryAfterMs?: number,
   ): Promise<FailureOutcome> {
     const current = await this.assertLease(em, job);
     const outcome: FailureOutcome = !retryable
@@ -194,7 +215,7 @@ export class JobQueueService {
       : current.attempts < current.maxAttempts
         ? 'retry'
         : 'dead';
-    await this.applyFailure(em, current, error, outcome);
+    await this.applyFailure(em, current, error, outcome, retryAfterMs);
     return outcome;
   }
 
@@ -203,6 +224,7 @@ export class JobQueueService {
     job: Job,
     error: string,
     outcome: FailureOutcome,
+    retryAfterMs?: number,
   ): Promise<void> {
     if (outcome === 'retry') {
       await em.query(
@@ -210,7 +232,7 @@ export class JobQueueService {
             SET status = 'queued', "lockedBy" = NULL, "lockedUntil" = NULL, "lockToken" = NULL,
                 "lastError" = $2, "runAt" = now() + make_interval(secs => $3)
           WHERE id = $1`,
-        [job.id, error, this.retryDelaySeconds(job.attempts)],
+        [job.id, error, this.retryDelaySeconds(job.attempts, retryAfterMs)],
       );
       return;
     }

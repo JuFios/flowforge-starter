@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { StepDefinition } from '../entities';
 import { MAX_URL_LENGTH } from '../workflows/definition';
+import { parseRetryAfter } from './retry-after';
 import { renderTemplate, StepContext } from './template';
 
 /**
@@ -11,10 +12,15 @@ export function isRetryableStatus(status: number): boolean {
   return status === 408 || status === 425 || status === 429 || status >= 500;
 }
 
+/** Статуси, для яких отримувач може вказати, коли повторювати (`Retry-After`). */
+const RETRY_AFTER_STATUSES = new Set([429, 503]);
+
 export class StepError extends Error {
   constructor(
     message: string,
     readonly retryable = true,
+    /** Не повторювати раніше, ніж через стільки мс (з `Retry-After` отримувача). */
+    readonly retryAfterMs?: number,
   ) {
     super(message);
   }
@@ -107,7 +113,13 @@ export class StepExecutor {
     }
     const text = await res.text();
     if (!res.ok) {
-      throw new StepError(`http ${res.status}`, isRetryableStatus(res.status));
+      throw new StepError(
+        `http ${res.status}`,
+        isRetryableStatus(res.status),
+        RETRY_AFTER_STATUSES.has(res.status)
+          ? parseRetryAfter(res.headers.get('retry-after'))
+          : undefined,
+      );
     }
     try {
       return { status: res.status, body: JSON.parse(text) as unknown };

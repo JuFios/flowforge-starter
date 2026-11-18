@@ -335,6 +335,7 @@ export class JobRunnerService implements BeforeApplicationShutdown {
         current,
         stepError ? err.message : INTERNAL_STEP_ERROR,
         stepError ? err.retryable : true,
+        stepError ? err.retryAfterMs : undefined,
       );
       this.metrics.observeFailure(outcome, 'step_error');
       this.logger.warn(
