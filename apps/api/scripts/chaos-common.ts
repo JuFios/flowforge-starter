@@ -85,7 +85,14 @@ export async function sinkStats(): Promise<SinkStats> {
 }
 
 /** Тенант, workflow сценарію і EXECUTIONS виконань (пачками по 20). Повертає ID виконань. */
-export async function enqueueWorkload(): Promise<string[]> {
+export async function enqueueRound(
+  round: number,
+  rounds: number,
+): Promise<string[]> {
+  const count =
+    Math.floor((EXECUTIONS * (round + 1)) / rounds) -
+    Math.floor((EXECUTIONS * round) / rounds);
+  if (!count) throw new Error('each fault round requires its own workload');
   const { apiKey } = await call<{ apiKey: string }>(
     'POST',
     '/tenants',
@@ -107,11 +114,11 @@ export async function enqueueWorkload(): Promise<string[]> {
       { id: 'finish', type: 'log', message: 'done {{ input.n }}' },
     ],
   });
-  log(`enqueueing ${EXECUTIONS} executions`);
+  log(`enqueueing ${count} executions for round ${round + 1}`);
   const ids: string[] = [];
-  for (let n = 0; n < EXECUTIONS; n += 20) {
+  for (let n = 0; n < count; n += 20) {
     const batch = await Promise.all(
-      Array.from({ length: Math.min(20, EXECUTIONS - n) }, (_, i) =>
+      Array.from({ length: Math.min(20, count - n) }, (_, i) =>
         call<{ id: string }>('POST', `/workflows/${wf.id}/run`, auth, {
           n: n + i,
         }),
@@ -145,6 +152,27 @@ export async function waitUntilFinished(
         `${rows[0].pending} executions still unfinished after ${timeoutMs} ms`,
       );
     await sleep(1_000);
+  }
+}
+
+/** Кожна аварія має окрему групу задач. Лічильники з першої аварії не можуть
+ * підтвердити другу. Після рестарту БД з'єднуємось новим пулом. */
+export async function finishRound(
+  ids: string[],
+  timeoutMs: number,
+): Promise<number> {
+  const db = await openDatabase();
+  try {
+    await waitUntilFinished(db, ids, timeoutMs);
+    const [row]: { interrupted: number }[] = await db.query(
+      `SELECT count(*)::int AS interrupted FROM jobs j WHERE j."executionId"=ANY($1)
+        AND (j."lastError" LIKE 'lease expired%' OR EXISTS (
+          SELECT FROM step_runs s WHERE s."executionId"=j."executionId" AND s.attempts>1))`,
+      [ids],
+    );
+    return row.interrupted;
+  } finally {
+    await db.destroy();
   }
 }
 

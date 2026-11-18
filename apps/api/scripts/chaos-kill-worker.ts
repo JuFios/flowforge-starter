@@ -13,7 +13,8 @@ import {
   collectOutcome,
   containers,
   docker,
-  enqueueWorkload,
+  enqueueRound,
+  finishRound,
   finish,
   guaranteeProblems,
   log,
@@ -21,7 +22,6 @@ import {
   outcomeRows,
   sinkStats,
   sleep,
-  waitUntilFinished,
 } from './chaos-common';
 
 const TIMEOUT_MS = 240_000;
@@ -34,39 +34,41 @@ async function main(): Promise<void> {
     throw new Error(`need at least 2 running workers, found ${workers.length}`);
 
   const started = Date.now();
-  const ids = await enqueueWorkload();
+  const ids: string[] = [];
+  const interrupted: number[] = [];
   const observed = new Map<string, CheckpointObservation>();
 
   // Два раунди: вбити воркер посеред роботи, дати іншим працювати, підняти його знову.
   const kills: string[] = [];
   for (const [round, victim] of workers.slice(0, 2).entries()) {
-    await sleep(round === 0 ? 2_000 : 4_000);
-    await captureCheckpoints(ids, observed);
+    const batch = await enqueueRound(round, 2);
+    ids.push(...batch);
+    await sleep(750);
+    await captureCheckpoints(batch, observed);
     log(`SIGKILL worker ${victim.slice(0, 12)}`);
     docker(['kill', '--signal', 'KILL', victim]);
     kills.push(victim.slice(0, 12));
     await sleep(3_000);
     log(`restarting worker ${victim.slice(0, 12)}`);
     docker(['start', victim]);
+    interrupted.push(await finishRound(batch, TIMEOUT_MS));
   }
 
   const db = await openDatabase();
   try {
-    await waitUntilFinished(db, ids, TIMEOUT_MS);
     const elapsed = ((Date.now() - started) / 1000).toFixed(1);
     const outcome = await collectOutcome(db, ids, before, observed);
     finish(
       [
         `| Убито воркерів (SIGKILL) | ${kills.length} (${kills.join(', ')}) |`,
+        `| Перерваних задач у кожному раунді | ${interrupted.join(' / ')} |`,
         ...outcomeRows(outcome, elapsed),
       ],
       [
         ...guaranteeProblems(outcome),
-        ...(outcome.reclaimed === 0
-          ? [
-              'no job was interrupted by the kills: the scenario proved nothing, run it again',
-            ]
-          : []),
+        ...interrupted.flatMap((count, round) =>
+          count ? [] : [`round ${round + 1} did not interrupt a job`],
+        ),
       ],
       'every execution succeeded, no completed step re-ran, one effect per http step',
     );

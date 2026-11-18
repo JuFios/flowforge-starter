@@ -16,7 +16,8 @@ import {
   COMPOSE,
   containers,
   docker,
-  enqueueWorkload,
+  enqueueRound,
+  finishRound,
   finish,
   guaranteeProblems,
   log,
@@ -24,7 +25,6 @@ import {
   outcomeRows,
   sinkStats,
   sleep,
-  waitUntilFinished,
 } from './chaos-common';
 
 const TIMEOUT_MS = 240_000;
@@ -85,24 +85,27 @@ async function main(): Promise<void> {
   const since = new Date().toISOString();
 
   const started = Date.now();
-  const ids = await enqueueWorkload();
+  const ids: string[] = [];
+  const interrupted: number[] = [];
   const observed = new Map<string, CheckpointObservation>();
 
   let downtimeMs = 0;
   for (let round = 0; round < RESTARTS; round++) {
-    await sleep(round === 0 ? 2_000 : 4_000);
-    await captureCheckpoints(ids, observed);
+    const batch = await enqueueRound(round, RESTARTS);
+    ids.push(...batch);
+    await sleep(750);
+    await captureCheckpoints(batch, observed);
     log('restarting postgres');
     const t0 = Date.now();
     docker([...COMPOSE, 'restart', 'postgres']);
     await waitHealthy([postgres], 60_000);
     downtimeMs += Date.now() - t0;
     log(`postgres is healthy again after ${Date.now() - t0} ms`);
+    interrupted.push(await finishRound(batch, TIMEOUT_MS));
   }
 
   const db = await openDatabase();
   try {
-    await waitUntilFinished(db, ids, TIMEOUT_MS);
     const elapsed = ((Date.now() - started) / 1000).toFixed(1);
     const outcome = await collectOutcome(db, ids, before, observed);
     // Readiness воркерів і API залежить від БД: після відновлення вони мають знову бути healthy.
@@ -124,11 +127,6 @@ async function main(): Promise<void> {
       (n, id) => n + countLogLines(id, since, 'job processing failed'),
       0,
     );
-    // Будь-який слід недоступності БД доводить, що сценарій справді перевірив відновлення.
-    const outageSeen =
-      claimFailures + renewalFailures + processingFailures + outcome.reclaimed >
-      0;
-
     finish(
       [
         `| Перезапусків Postgres | ${RESTARTS} (разом ${(downtimeMs / 1000).toFixed(1)} с до healthy) |`,
@@ -136,19 +134,18 @@ async function main(): Promise<void> {
         `| Невдалих захоплень у логах воркерів (з backoff) | ${claimFailures} |`,
         `| Невдалих продовжень lease у логах воркерів | ${renewalFailures} |`,
         `| Задач, чий запис обірвався (job processing failed) | ${processingFailures} |`,
+        `| Перерваних задач у кожному раунді | ${interrupted.join(' / ')} |`,
         ...outcomeRows(outcome, elapsed),
       ],
       [
         ...guaranteeProblems(outcome),
+        ...interrupted.flatMap((count, round) =>
+          count ? [] : [`round ${round + 1} did not interrupt a job`],
+        ),
         ...restarted.map(
           (id) =>
             `container ${id.slice(0, 12)} was restarted: ${processes.get(id)} → ${processState(id)}`,
         ),
-        ...(!outageSeen
-          ? [
-              'workers never saw the database outage: the scenario proved nothing, run it again',
-            ]
-          : []),
       ],
       'workers and API survived, every execution succeeded, one effect per Idempotency-Key',
     );
