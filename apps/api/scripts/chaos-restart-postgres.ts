@@ -10,6 +10,8 @@
  */
 import { spawnSync } from 'node:child_process';
 import {
+  captureCheckpoints,
+  CheckpointObservation,
   collectOutcome,
   COMPOSE,
   containers,
@@ -84,10 +86,12 @@ async function main(): Promise<void> {
 
   const started = Date.now();
   const ids = await enqueueWorkload();
+  const observed = new Map<string, CheckpointObservation>();
 
   let downtimeMs = 0;
   for (let round = 0; round < RESTARTS; round++) {
     await sleep(round === 0 ? 2_000 : 4_000);
+    await captureCheckpoints(ids, observed);
     log('restarting postgres');
     const t0 = Date.now();
     docker([...COMPOSE, 'restart', 'postgres']);
@@ -100,7 +104,7 @@ async function main(): Promise<void> {
   try {
     await waitUntilFinished(db, ids, TIMEOUT_MS);
     const elapsed = ((Date.now() - started) / 1000).toFixed(1);
-    const outcome = await collectOutcome(db, ids, before);
+    const outcome = await collectOutcome(db, ids, before, observed);
     // Readiness воркерів і API залежить від БД: після відновлення вони мають знову бути healthy.
     await waitHealthy(services, 60_000);
     const restarted = services.filter(

@@ -18,6 +18,11 @@ let missingKey = 0;
 
 createServer((req, res) => {
   const path = (req.url ?? '').split('?')[0];
+  if (req.method === 'GET' && path === '/counts') {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify(Object.fromEntries(effects)));
+    return;
+  }
   if (req.method === 'GET' && path === '/stats') {
     const repeatedKeys = [...effects.values()].filter((n) => n > 1).length;
     res.writeHead(200, { 'content-type': 'application/json' });

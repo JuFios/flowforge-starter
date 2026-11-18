@@ -8,6 +8,8 @@
  * Налаштування — див. chaos-common.ts.
  */
 import {
+  captureCheckpoints,
+  CheckpointObservation,
   collectOutcome,
   containers,
   docker,
@@ -33,11 +35,13 @@ async function main(): Promise<void> {
 
   const started = Date.now();
   const ids = await enqueueWorkload();
+  const observed = new Map<string, CheckpointObservation>();
 
   // Два раунди: вбити воркер посеред роботи, дати іншим працювати, підняти його знову.
   const kills: string[] = [];
   for (const [round, victim] of workers.slice(0, 2).entries()) {
     await sleep(round === 0 ? 2_000 : 4_000);
+    await captureCheckpoints(ids, observed);
     log(`SIGKILL worker ${victim.slice(0, 12)}`);
     docker(['kill', '--signal', 'KILL', victim]);
     kills.push(victim.slice(0, 12));
@@ -50,7 +54,7 @@ async function main(): Promise<void> {
   try {
     await waitUntilFinished(db, ids, TIMEOUT_MS);
     const elapsed = ((Date.now() - started) / 1000).toFixed(1);
-    const outcome = await collectOutcome(db, ids, before);
+    const outcome = await collectOutcome(db, ids, before, observed);
     finish(
       [
         `| Убито воркерів (SIGKILL) | ${kills.length} (${kills.join(', ')}) |`,

@@ -21,6 +21,7 @@ export const COMPOSE = [
   '-f',
   join(ROOT, 'docker-compose.chaos.yml'),
 ];
+const LOG_SINCE = new Date().toISOString();
 const API_URL = process.env.API_URL ?? 'http://localhost:3000';
 const SINK_STATS_URL =
   process.env.SINK_STATS_URL ?? 'http://localhost:8080/stats';
@@ -43,7 +44,10 @@ function adminToken(): string {
 }
 
 export function docker(args: string[]): string {
-  return execFileSync('docker', args, { encoding: 'utf8' }).trim();
+  return execFileSync('docker', args, {
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
+  }).trim();
 }
 
 /** ID запущених контейнерів сервісу compose. */
@@ -144,12 +148,116 @@ export async function waitUntilFinished(
   }
 }
 
+interface CompletedStep {
+  callKey: string | null;
+  finishedAt: string;
+  id: string;
+  stepId: string;
+  idempotencyKey: string;
+  attempts: number;
+}
+
+export interface CheckpointObservation extends CompletedStep {
+  calls?: number;
+}
+
+async function completedSteps(
+  db: DataSource,
+  ids: string[],
+): Promise<CompletedStep[]> {
+  return db.query(
+    `SELECT s.id, s."stepId", s."idempotencyKey", s.attempts, s."finishedAt"::text AS "finishedAt",
+           CASE WHEN s."stepId" = 'charge' THEN s."idempotencyKey"::text
+                WHEN s."stepId" IN ('start','finish') THEN e."correlationId" || ':' || s."stepId"
+           END AS "callKey"
+      FROM step_runs s JOIN executions e ON e.id = s."executionId"
+     WHERE e.id = ANY($1) AND s.status = 'succeeded'`,
+    [ids],
+  );
+}
+
+async function callCounts(): Promise<Record<string, number>> {
+  const response = await fetch(new URL('/counts', SINK_STATS_URL), {
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!response.ok)
+    throw new Error(`receiver request counts: HTTP ${response.status}`);
+  const counts = (await response.json()) as Record<string, number>;
+  for (const worker of containers('worker')) {
+    const lines = docker(['logs', '--since', LOG_SINCE, worker]).split('\n');
+    for (const line of lines) {
+      if (!line.startsWith('{')) continue;
+      const record = JSON.parse(line) as {
+        context?: string;
+        correlationId?: string;
+        msg?: unknown;
+      };
+      if (
+        record.context !== 'StepExecutor' ||
+        !record.correlationId ||
+        typeof record.msg !== 'string'
+      )
+        continue;
+      const prefix = record.msg.split(' ')[0];
+      if (prefix !== 'chaos' && prefix !== 'done') continue;
+      const key = `${record.correlationId}:${prefix === 'chaos' ? 'start' : 'finish'}`;
+      counts[key] = (counts[key] ?? 0) + 1;
+    }
+  }
+  return counts;
+}
+
+/** Фіксуємо завершені кроки перед кожним збоєм. Перше спостереження лишається
+ * точкою відліку для обох раундів, навіть якщо між ними крок запустили знову. */
+export async function captureCheckpoints(
+  ids: string[],
+  observed: Map<string, CheckpointObservation>,
+): Promise<void> {
+  const db = await openDatabase();
+  try {
+    const completed = await completedSteps(db, ids);
+    const counts = await callCounts();
+    for (const step of completed) {
+      if (observed.has(step.id)) continue;
+      const calls = step.callKey ? counts[step.callKey] : undefined;
+      if (step.stepId !== 'wait' && !calls)
+        throw new Error(`no observed call for completed step ${step.id}`);
+      observed.set(step.id, { ...step, calls });
+    }
+  } finally {
+    await db.destroy();
+  }
+}
+
+export function replayedCheckpoints(
+  before: Map<string, CheckpointObservation>,
+  after: CompletedStep[],
+  counts: Record<string, number>,
+): number {
+  const final = new Map(after.map((step) => [step.id, step]));
+  let changed = 0;
+  for (const step of before.values()) {
+    const result = final.get(step.id);
+    if (
+      result?.attempts !== step.attempts ||
+      result.idempotencyKey !== step.idempotencyKey ||
+      result.finishedAt !== step.finishedAt ||
+      (step.callKey !== null && counts[step.callKey] !== step.calls)
+    )
+      changed++;
+  }
+  return changed;
+}
+
 export interface Outcome {
   succeeded: number;
   failed: number;
   stepRows: number;
   /** Кроків із понад однією спробою: усього / http. */
   repeatedSteps: number;
+  observedSteps: number;
+  observedHttp: number;
+  changedCheckpoints: number;
   repeatedHttp: number;
   /** Задач, повернутих reaper-ом (lease минув). */
   reclaimed: number;
@@ -162,6 +270,7 @@ export async function collectOutcome(
   db: DataSource,
   ids: string[],
   before: SinkStats,
+  observed: Map<string, CheckpointObservation>,
 ): Promise<Outcome> {
   const q = async <T>(sql: string): Promise<T> => {
     const rows: T[] = await db.query(sql, [ids]);
@@ -187,6 +296,15 @@ export async function collectOutcome(
   return {
     ...executions,
     stepRows: steps.rows,
+    observedSteps: observed.size,
+    observedHttp: [...observed.values()].filter(
+      (step) => step.stepId === 'charge',
+    ).length,
+    changedCheckpoints: replayedCheckpoints(
+      observed,
+      await completedSteps(db, ids),
+      await callCounts(),
+    ),
     repeatedSteps: steps.repeated,
     repeatedHttp: steps.reran,
     ...jobs,
@@ -207,6 +325,7 @@ export function outcomeRows(o: Outcome, elapsedSeconds: string): string[] {
     `| Виконань succeeded / failed | ${o.succeeded} / ${o.failed} |`,
     `| Рядків step_runs (очікується ${EXECUTIONS * STEPS}) | ${o.stepRows} |`,
     `| Кроків, що мали понад 1 спробу (усього / http) | ${o.repeatedSteps} / ${o.repeatedHttp} |`,
+    `| Чекпоінтів до збоїв (з них HTTP) / змінених після відновлення | ${o.observedSteps} (${o.observedHttp}) / ${o.changedCheckpoints} |`,
     `| Задач, повернутих reaper-ом (lease минув) | ${o.reclaimed} |`,
     `| Задач у стані dead | ${o.dead} |`,
     `| Запитів до отримувача / унікальних ефектів | ${o.sink.requests} / ${o.sink.effects} |`,
@@ -217,6 +336,10 @@ export function outcomeRows(o: Outcome, elapsedSeconds: string): string[] {
 /** Порушення гарантій, спільних для всіх сценаріїв. */
 export function guaranteeProblems(o: Outcome): string[] {
   return [
+    !o.observedHttp && 'no completed HTTP step was observed before a fault',
+    o.changedCheckpoints > 0 &&
+      `${o.changedCheckpoints} completed checkpoints changed or received another call`,
+    o.dead > 0 && `${o.dead} dead jobs`,
     o.succeeded !== EXECUTIONS &&
       `only ${o.succeeded}/${EXECUTIONS} executions succeeded`,
     o.stepRows !== EXECUTIONS * STEPS &&
