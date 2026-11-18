@@ -342,19 +342,28 @@ export class JobRunnerService implements BeforeApplicationShutdown {
     const execution = await this.executions.findOneOrFail({
       where: { id: job.executionId },
     });
-    // Знімок версії, зафіксований під час створення виконання, а не поточний стан workflow.
-    const snapshot = await this.versions.findOneOrFail({
-      where: { id: execution.workflowVersionId ?? undefined },
-    });
-
     const ctx: StepContext = { input: execution.input, steps: {} };
-    const runs = new Map(
-      (await this.checkpoints.load(execution.id)).map((r) => [r.stepIndex, r]),
-    );
-
     /** Крок, що виконується зараз (для запису провалу). */
     let current: StepRun | undefined;
     try {
+      // Знімок версії, зафіксований під час створення виконання, а не поточний стан workflow.
+      // Без знімку виконання запускати не можна: `{ id: undefined }` TypeORM виконав би без умови
+      // й повернув першу-ліпшу версію. CHECK у БД такого стану не допускає — це остання лінія
+      // захисту, і провал записується одразу, без повторів.
+      if (!execution.workflowVersionId)
+        throw new StepError(
+          'execution has no workflow version snapshot',
+          false,
+        );
+      const snapshot = await this.versions.findOneByOrFail({
+        id: execution.workflowVersionId,
+      });
+      const runs = new Map(
+        (await this.checkpoints.load(execution.id)).map((r) => [
+          r.stepIndex,
+          r,
+        ]),
+      );
       for (let i = 0; i < snapshot.steps.length; i++) {
         const step = snapshot.steps[i];
         const previous = runs.get(i);
