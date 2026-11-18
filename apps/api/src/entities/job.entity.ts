@@ -18,6 +18,10 @@ export type JobStatus = 'queued' | 'running' | 'done' | 'failed' | 'dead';
 @Index('IDX_jobs_claim', ['runAt'], { where: `"status" = 'queued'` })
 // Reaper: задачі в роботі з простроченим lease.
 @Index('IDX_jobs_lease', ['lockedUntil'], { where: `"status" = 'running'` })
+// Очищення: завершені задачі, старші за термін зберігання (FINISHED_JOBS_SQL).
+@Index('IDX_jobs_finished', ['finishedAt'], {
+  where: `"status" IN ('done', 'failed', 'dead')`,
+})
 export class Job {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -62,4 +66,11 @@ export class Job {
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;
+
+  /**
+   * Коли задача стала завершеною (`done`, `failed`, `dead`) — за годинником БД. За ним завершені
+   * задачі видаляються після JOB_RETENTION_DAYS; виконання й кроки (історія тенанта) лишаються.
+   */
+  @Column({ type: 'timestamptz', nullable: true })
+  finishedAt: Date | null;
 }

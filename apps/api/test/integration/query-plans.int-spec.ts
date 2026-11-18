@@ -2,6 +2,7 @@ import { DataSource } from 'typeorm';
 import {
   CLAIM_CANDIDATE_SQL,
   EXPIRED_LEASES_SQL,
+  FINISHED_JOBS_SQL,
 } from '../../src/engine/job-queue.service';
 import { openTestDataSource, truncateAll } from '../helpers/db';
 
@@ -35,11 +36,12 @@ describe('query plans of the queue use their indexes', () => {
     ds = await openTestDataSource();
     await truncateAll(ds);
     await ds.query(`
-      INSERT INTO jobs ("tenantId", "executionId", status, "runAt", "lockedUntil")
+      INSERT INTO jobs ("tenantId", "executionId", status, "runAt", "lockedUntil", "finishedAt")
       SELECT gen_random_uuid(), gen_random_uuid(),
              CASE WHEN g % 400 = 0 THEN 'queued' WHEN g % 400 = 1 THEN 'running' ELSE 'done' END,
              now() - (g || ' seconds')::interval,
-             CASE WHEN g % 400 = 1 THEN now() + interval '30 seconds' END
+             CASE WHEN g % 400 = 1 THEN now() + interval '30 seconds' END,
+             CASE WHEN g % 400 > 1 THEN now() - (g || ' minutes')::interval END
         FROM generate_series(1, 20000) g`);
     await ds.query(`
       INSERT INTO step_runs ("executionId", "stepIndex", "stepId", status)
@@ -62,6 +64,12 @@ describe('query plans of the queue use their indexes', () => {
   it.each([
     ['claiming the next ready job', CLAIM_CANDIDATE_SQL, [], 'IDX_jobs_claim'],
     ['finding expired leases', EXPIRED_LEASES_SQL, [], 'IDX_jobs_lease'],
+    [
+      'finding finished jobs past their retention period',
+      FINISHED_JOBS_SQL,
+      [7],
+      'IDX_jobs_finished',
+    ],
     [
       'looking a step up by its idempotency key',
       `SELECT * FROM step_runs WHERE "idempotencyKey" = $1`,

@@ -161,5 +161,6 @@ describe('a job whose worker vanished', () => {
       .findOneByOrFail({ executionId: run.body.id });
     expect(job.status).toBe('done');
     expect(job.lockedBy).toBeNull();
+    expect(job.finishedAt).toBeInstanceOf(Date);
   });
 });

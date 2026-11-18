@@ -81,6 +81,8 @@ describe('retries and the attempt limit', () => {
       attempts: 3,
       lastError: 'http 503',
     });
+    // Момент завершення — для видалення після терміну зберігання.
+    expect(job.finishedAt).toBeInstanceOf(Date);
     const execution = await ds.getRepository(Execution).findOneByOrFail({ id });
     expect(execution.status).toBe('failed');
     expect(execution.error).toContain('no attempts left (3/3)');
@@ -101,7 +103,11 @@ describe('retries and the attempt limit', () => {
     expect(receiver.hits('/missing')).toHaveLength(1);
     expect(
       await ds.getRepository(Job).findOneByOrFail({ executionId: id }),
-    ).toMatchObject({ status: 'failed', attempts: 1 });
+    ).toMatchObject({
+      status: 'failed',
+      attempts: 1,
+      finishedAt: expect.any(Date) as Date,
+    });
   });
 
   it('fails at once when the input turns the url into an invalid one', async () => {

@@ -54,6 +54,7 @@ export class JobRunnerService implements BeforeApplicationShutdown {
     { keeper: LeaseKeeper; done: Promise<void> }
   >();
   private reaper?: NodeJS.Timeout;
+  private cleanup?: NodeJS.Timeout;
   /** Невдалі захоплення поспіль (спільно для всіх циклів); 0 — захоплення працює. */
   private claimFailures = 0;
   /** До цього моменту (Date.now()) цикли не захоплюють задач після невдалого захоплення. */
@@ -81,6 +82,34 @@ export class JobRunnerService implements BeforeApplicationShutdown {
     for (let i = 0; i < concurrency; i++) this.loops.push(this.loop());
     const leaseMs = this.config.get('JOB_LEASE_MS', { infer: true });
     this.reaper = setInterval(() => void this.reap(), leaseMs / 2);
+    this.scheduleCleanup();
+  }
+
+  /** Наступне очищення через інтервал ±50%: воркери, що стартували разом, не чистять одночасно. */
+  private scheduleCleanup(): void {
+    if (this.stopping.signal.aborted) return;
+    const interval = this.config.get('JOB_CLEANUP_INTERVAL_MS', {
+      infer: true,
+    });
+    this.cleanup = setTimeout(
+      () => void this.purgeFinished().finally(() => this.scheduleCleanup()),
+      interval * (0.5 + Math.random()),
+    );
+  }
+
+  /** Видаляє старі завершені задачі. Помилка не зупиняє воркер — наступне очищення повторить. */
+  private async purgeFinished(): Promise<void> {
+    const days = this.config.get('JOB_RETENTION_DAYS', { infer: true });
+    try {
+      const deleted = await this.queue.purgeFinished(days);
+      if (deleted > 0)
+        this.logger.log(
+          { deleted, retentionDays: days },
+          'deleted finished jobs past their retention period',
+        );
+    } catch (err) {
+      this.logger.error({ error: toSafeError(err) }, 'job cleanup failed');
+    }
   }
 
   /**
@@ -93,6 +122,7 @@ export class JobRunnerService implements BeforeApplicationShutdown {
     if (this.stopping.signal.aborted) return;
     this.stopping.abort();
     clearInterval(this.reaper);
+    clearTimeout(this.cleanup);
     const grace = this.config.get('WORKER_SHUTDOWN_GRACE_MS', { infer: true });
     const pending = () => [...this.inFlight.values()].map((j) => j.done);
     if (this.inFlight.size > 0) {

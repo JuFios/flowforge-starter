@@ -89,6 +89,21 @@ export const EXPIRED_LEASES_SQL = `
    LIMIT ${REAP_BATCH}
    FOR UPDATE SKIP LOCKED`;
 
+/** Скільки завершених задач видаляє одна транзакція очищення. */
+export const PURGE_BATCH = 1000;
+
+/**
+ * Пачка завершених задач, старших за термін зберігання ($1 — днів), найстаріші першими (індекс
+ * IDX_jobs_finished). SKIP LOCKED: очищення в кількох воркерах не чекає одне на одного.
+ */
+export const FINISHED_JOBS_SQL = `
+  SELECT id FROM jobs
+   WHERE status IN ('done', 'failed', 'dead')
+     AND "finishedAt" < now() - make_interval(days => $1)
+   ORDER BY "finishedAt"
+   LIMIT ${PURGE_BATCH}
+   FOR UPDATE SKIP LOCKED`;
+
 @Injectable()
 export class JobQueueService {
   constructor(
@@ -173,7 +188,8 @@ export class JobQueueService {
   async completeIn(em: EntityManager, job: Job): Promise<void> {
     await this.assertLease(em, job);
     await em.query(
-      `UPDATE jobs SET status = 'done', "lockedBy" = NULL, "lockedUntil" = NULL, "lockToken" = NULL
+      `UPDATE jobs SET status = 'done', "lockedBy" = NULL, "lockedUntil" = NULL, "lockToken" = NULL,
+                       "finishedAt" = now()
         WHERE id = $1`,
       [job.id],
     );
@@ -239,7 +255,7 @@ export class JobQueueService {
     await em.query(
       `UPDATE jobs
           SET status = $3, "lockedBy" = NULL, "lockedUntil" = NULL, "lockToken" = NULL,
-              "lastError" = $2
+              "lastError" = $2, "finishedAt" = now()
         WHERE id = $1`,
       [job.id, error, outcome],
     );
@@ -283,5 +299,22 @@ export class JobQueueService {
       }
       return reaped;
     });
+  }
+
+  /**
+   * Видаляє завершені задачі (`done`, `failed`, `dead`), що завершились понад `retentionDays` днів
+   * тому, пачками по PURGE_BATCH — кожна пачка окремою короткою транзакцією, без довгих блокувань.
+   * Виконання й кроки не видаляються: це історія тенанта, яку показує API. Повертає кількість.
+   */
+  async purgeFinished(retentionDays: number): Promise<number> {
+    let total = 0;
+    for (;;) {
+      const [, deleted]: [unknown[], number] = await this.ds.query(
+        `DELETE FROM jobs WHERE id IN (${FINISHED_JOBS_SQL})`,
+        [retentionDays],
+      );
+      total += deleted;
+      if (deleted < PURGE_BATCH) return total;
+    }
   }
 }

@@ -139,4 +139,51 @@ describe('data migrations', () => {
       job: 'done',
     });
   });
+
+  it('JobFinishedAt dates finished jobs by their execution, or by the job itself', async () => {
+    await truncateAll(ds);
+    await revertThrough('JobFinishedAt');
+    const tenantId = '00000000-0000-4000-8000-0000000000aa';
+    const insert = async (
+      jobStatus: string,
+      executionFinishedAt: string | null,
+      jobCreatedAt: string,
+    ) => {
+      const [{ id }]: Array<{ id: string }> = await ds.query(
+        `INSERT INTO executions ("tenantId", "workflowId", status, "finishedAt")
+         VALUES ($1, gen_random_uuid(), 'succeeded', $2) RETURNING id`,
+        [tenantId, executionFinishedAt],
+      );
+      const [{ id: jobId }]: Array<{ id: string }> = await ds.query(
+        `INSERT INTO jobs ("tenantId", "executionId", status, "createdAt")
+         VALUES ($1, $2, $3, $4) RETURNING id`,
+        [tenantId, id, jobStatus, jobCreatedAt],
+      );
+      return jobId;
+    };
+    const done = await insert(
+      'done',
+      '2026-03-01T10:00:05Z',
+      '2026-03-01T10:00:00Z',
+    );
+    const dead = await insert('dead', null, '2026-03-02T00:00:00Z');
+    const queued = await insert(
+      'queued',
+      '2026-03-03T00:00:00Z',
+      '2026-03-03T00:00:00Z',
+    );
+
+    await ds.runMigrations({ transaction: 'each' });
+
+    const finishedAt = async (id: string) => {
+      const [row]: Array<{ finishedAt: Date | null }> = await ds.query(
+        `SELECT "finishedAt" FROM jobs WHERE id = $1`,
+        [id],
+      );
+      return row.finishedAt?.toISOString() ?? null;
+    };
+    expect(await finishedAt(done)).toBe('2026-03-01T10:00:05.000Z');
+    expect(await finishedAt(dead)).toBe('2026-03-02T00:00:00.000Z');
+    expect(await finishedAt(queued)).toBeNull();
+  });
 });

@@ -6,6 +6,7 @@ import { StepCheckpoints1794949553919 } from './1794949553919-StepCheckpoints';
 import { WorkflowVersions1794949818904 } from './1794949818904-WorkflowVersions';
 import { DurableTimers1794950256356 } from './1794950256356-DurableTimers';
 import { StepIdempotencyKey1794950965096 } from './1794950965096-StepIdempotencyKey';
+import { JobFinishedAt1794989523846 } from './1794989523846-JobFinishedAt';
 
 /**
  * Явний перелік міграцій у порядку застосування. Без glob-шаблонів, щоб однаково
@@ -21,4 +22,5 @@ export const MIGRATIONS = [
   WorkflowVersions1794949818904,
   DurableTimers1794950256356,
   StepIdempotencyKey1794950965096,
+  JobFinishedAt1794989523846,
 ];

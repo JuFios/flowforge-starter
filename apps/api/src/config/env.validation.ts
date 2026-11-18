@@ -252,6 +252,23 @@ export class EnvironmentVariables extends DatabaseEnvironment {
   WORKER_SHUTDOWN_GRACE_MS = 20_000;
 
   /**
+   * Скільки днів зберігаються завершені задачі (`done`, `failed`, `dead`), перш ніж воркер їх
+   * видалить. Виконання й кроки не видаляються — це історія тенанта, яку показує API.
+   */
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(3650)
+  JOB_RETENTION_DAYS = 30;
+
+  /** Як часто кожен воркер видаляє завершені задачі, старші за JOB_RETENTION_DAYS (з jitter). */
+  @Type(() => Number)
+  @IsInt()
+  @Min(1_000)
+  @Max(MAX_TIMER_MS)
+  JOB_CLEANUP_INTERVAL_MS = 3_600_000;
+
+  /**
    * ТИМЧАСОВА МЕЖА — до переробки планувальника (ТЗ 3.3.8).
    * Лише захищає setInterval від переповнення: більше за MAX_TIMER_MS Node мовчки
    * перетворює на 1 мс. Допустиме запізнення cron вона не обмежує; змістовну межу

@@ -105,7 +105,11 @@ describe('background loops log errors without input values', () => {
       {} as Repository<Execution>,
       {} as Repository<WorkflowVersion>,
       {} as CheckpointService,
-      config({ WORKER_CONCURRENCY: 1, JOB_LEASE_MS: 60_000 }),
+      config({
+        WORKER_CONCURRENCY: 1,
+        JOB_LEASE_MS: 60_000,
+        JOB_CLEANUP_INTERVAL_MS: 600_000,
+      }),
       {} as QueueMetrics,
     );
 

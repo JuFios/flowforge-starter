@@ -42,6 +42,7 @@ describe('worker backs off when claiming jobs fails', () => {
     const values: Partial<EnvironmentVariables> = {
       WORKER_CONCURRENCY: CONCURRENCY,
       JOB_LEASE_MS: 600_000,
+      JOB_CLEANUP_INTERVAL_MS: 600_000,
       WORKER_POLL_INTERVAL_MS: 10,
       WORKER_SHUTDOWN_GRACE_MS: 0,
     };
