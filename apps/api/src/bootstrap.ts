@@ -8,6 +8,7 @@ import { ConfigService } from '@nestjs/config';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { Logger } from 'nestjs-pino';
 import { getMetadataStorage } from 'class-validator';
+import { exceedsJsonDepth, jsonTooDeepMessage } from './common/json-depth';
 import { EnvironmentVariables } from './config/env.validation';
 import {
   CreateWorkflowDto,
@@ -21,6 +22,15 @@ class ApiValidationPipe extends ValidationPipe {
     value: unknown,
     metadata: ArgumentMetadata,
   ): Promise<unknown> {
+    // Тіла-DTO — до class-transformer і class-validator: вони обходять значення рекурсивно.
+    // Пайп виконується після guard-ів, тож неавтентифікований запит отримує 401, а не пояснення.
+    // Тіла без DTO (вхід виконання, webhook) перевіряє parseRunInput — у webhook-а після підпису.
+    if (
+      metadata.type === 'body' &&
+      this.toValidate(metadata) &&
+      exceedsJsonDepth(value)
+    )
+      throw new BadRequestException(jsonTooDeepMessage('тіло запиту'));
     if (
       metadata.type === 'body' &&
       metadata.metatype &&

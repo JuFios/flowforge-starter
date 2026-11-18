@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { exceedsJsonDepth, MAX_STEP_RESULT_DEPTH } from '../common/json-depth';
 import { StepDefinition } from '../entities';
 import { MAX_URL_LENGTH } from '../workflows/definition';
 import { parseRetryAfter } from './retry-after';
@@ -131,11 +132,20 @@ export class StepExecutor {
       // TypeError('terminated') з причиною в `cause`). Це збій мережі, повтор може допомогти.
       throw new StepError(`http request failed: ${networkReason(err)}`, true);
     }
+    let body: unknown;
     try {
-      return { status: res.status, body: JSON.parse(text) as unknown };
+      body = JSON.parse(text);
     } catch {
       return { status: res.status, body: text.slice(0, 10_000) };
     }
+    // Результат кроку зберігається в jsonb і серіалізується (рекурсивно) у чекпоінті й шаблонах
+    // наступних кроків: надглибокий JSON переповнив би стек. Повтор дав би той самий результат.
+    if (exceedsJsonDepth(body, MAX_STEP_RESULT_DEPTH))
+      throw new StepError(
+        `http response JSON is nested deeper than ${MAX_STEP_RESULT_DEPTH} levels`,
+        false,
+      );
+    return { status: res.status, body };
   }
 }
 

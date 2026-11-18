@@ -19,24 +19,31 @@ export function isStorableText(text: string): boolean {
 
 /**
  * Шлях (`$.a[1].b`) до першого рядка — ключа чи значення — з символом, який Postgres не зберігає,
- * або undefined, якщо таких немає.
+ * або undefined, якщо таких немає. Обхід у глибину з явним стеком (не рекурсія): глибина
+ * вкладеності не обмежена стеком викликів. Ключ перевіряється перед своїм значенням.
  */
 export function findUnstorable(value: unknown, path = '$'): string | undefined {
-  if (typeof value === 'string')
-    return isStorableText(value) ? undefined : path;
-  if (Array.isArray(value)) {
-    for (let i = 0; i < value.length; i++) {
-      const found = findUnstorable(value[i], `${path}[${i}]`);
-      if (found) return found;
+  const stack: Array<{ item: unknown; where: string }> = [
+    { item: value, where: path },
+  ];
+  for (let next = stack.pop(); next; next = stack.pop()) {
+    const { item, where } = next;
+    if (typeof item === 'string') {
+      if (!isStorableText(item)) return where;
+      continue;
     }
-    return undefined;
-  }
-  if (typeof value === 'object' && value !== null) {
-    for (const [key, item] of Object.entries(value)) {
-      const where = `${path}.${toStorableText(key)}`;
-      if (!isStorableText(key)) return where;
-      const found = findUnstorable(item, where);
-      if (found) return found;
+    if (typeof item !== 'object' || item === null) continue;
+    // У стек — у зворотному порядку, щоб діставати в прямому (як рекурсивний обхід).
+    if (Array.isArray(item)) {
+      for (let i = item.length - 1; i >= 0; i--)
+        stack.push({ item: item[i] as unknown, where: `${where}[${i}]` });
+      continue;
+    }
+    const entries = Object.entries(item as Record<string, unknown>);
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const [key, child] = entries[i];
+      const at = `${where}.${toStorableText(key)}`;
+      stack.push({ item: child, where: at }, { item: key, where: at });
     }
   }
   return undefined;

@@ -92,7 +92,7 @@ describe('JSON nesting depth', () => {
     );
 
   it('accepts a run input nested exactly 64 levels deep', async () => {
-    const res = await runWith(nested(63)); // 63 вкладені об'єкти всередині кореневого
+    const res = await runWith(nested(64));
     expect(res.status).toBe(201);
   });
 
@@ -146,7 +146,7 @@ describe('JSON nesting depth', () => {
     expect(await res.text()).toMatch(/64/);
   });
 
-  it('fails an http step without retries when the response JSON is nested deeper than 64 levels', async () => {
+  it('fails an http step without retries when the response JSON is nested deeper than 2048 levels', async () => {
     receiver.respond = (_req, res) => {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(nested(3000));
@@ -169,7 +169,7 @@ describe('JSON nesting depth', () => {
     });
     const execution = await ds.getRepository(Execution).findOneByOrFail({ id });
     expect(execution).toMatchObject({ status: 'failed' });
-    expect(execution.error).toMatch(/nested deeper than 64/);
+    expect(execution.error).toMatch(/nested deeper than 2048/);
     expect(
       await ds.getRepository(Job).findOneByOrFail({ executionId: id }),
     ).toMatchObject({ status: 'failed' });

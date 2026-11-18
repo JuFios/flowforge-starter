@@ -1,4 +1,5 @@
 import { BadRequestException } from '@nestjs/common';
+import { exceedsJsonDepth, jsonTooDeepMessage } from '../common/json-depth';
 import { findUnstorable } from '../common/storable-text';
 import { StepDefinition } from '../entities';
 
@@ -190,6 +191,8 @@ export function validateSteps(raw: unknown): StepDefinition[] {
   if (!Array.isArray(raw) || raw.length === 0 || raw.length > MAX_STEPS) {
     fail(`steps має бути масивом від 1 до ${MAX_STEPS} елементів`);
   }
+  // До JSON.stringify і обходу рядків: обидва рекурсивні й переповнили б стек.
+  if (exceedsJsonDepth(raw)) fail(jsonTooDeepMessage('steps'));
   if (Buffer.byteLength(JSON.stringify(raw)) > MAX_DEFINITION_BYTES) {
     fail(`steps більший за ${MAX_DEFINITION_BYTES} байт`);
   }

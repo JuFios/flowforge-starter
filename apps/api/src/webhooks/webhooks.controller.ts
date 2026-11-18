@@ -17,6 +17,22 @@ import { ExecutionsService } from '../executions/executions.service';
 import { parseRunInput } from '../executions/run-input.pipe';
 
 /**
+ * Очікуваний підпис тіла або undefined, якщо тіло неможливо серіалізувати: на надглибокій
+ * вкладеності JSON.stringify переповнює стек (RangeError). Такий підпис не підтверджується —
+ * відповідь 401, як і на будь-який непідтверджений запит, а не 500.
+ */
+function expectedSignature(secret: string, body: unknown): string | undefined {
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(body);
+  } catch (err) {
+    if (err instanceof RangeError) return undefined;
+    throw err;
+  }
+  return createHmac('sha256', secret).update(serialized).digest('hex');
+}
+
+/**
  * Вхідні webhook-и. Підпис: hex HMAC-SHA256 від тіла запиту
  * секретом тенанта, у заголовку x-signature.
  */
@@ -46,10 +62,8 @@ export class WebhooksController {
       where: { id: workflow.tenantId },
     });
 
-    const expected = createHmac('sha256', tenant.webhookSecret)
-      .update(JSON.stringify(body))
-      .digest('hex');
-    if (signature !== expected) {
+    const expected = expectedSignature(tenant.webhookSecret, body);
+    if (expected === undefined || signature !== expected) {
       throw new UnauthorizedException('Невірний підпис');
     }
 

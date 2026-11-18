@@ -1,4 +1,5 @@
 import { BadRequestException, Injectable, PipeTransform } from '@nestjs/common';
+import { exceedsJsonDepth, jsonTooDeepMessage } from '../common/json-depth';
 import { findUnstorable } from '../common/storable-text';
 
 /** Найбільший розмір вхідних даних виконання (JSON), байт. Зберігається в executions.input. */
@@ -14,6 +15,9 @@ export function parseRunInput(value: unknown): Record<string, unknown> {
     throw new BadRequestException(
       "вхідні дані виконання мають бути JSON-об'єктом",
     );
+  // До JSON.stringify і обходу рядків: обидва рекурсивні й переповнили б стек.
+  if (exceedsJsonDepth(value))
+    throw new BadRequestException(jsonTooDeepMessage('вхідні дані виконання'));
   if (Buffer.byteLength(JSON.stringify(value)) > MAX_RUN_INPUT_BYTES)
     throw new BadRequestException(
       `вхідні дані виконання більші за ${MAX_RUN_INPUT_BYTES} байт`,
