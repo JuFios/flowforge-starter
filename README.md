@@ -147,16 +147,18 @@ curl localhost:3000/executions/<executionId> -H "x-api-key: $API_KEY"
 
 **Валідація на межі API.** Тіло `POST`/`PATCH /workflows` описують DTO (`class-validator`), а
 кроки перевіряє `validateSteps` (`src/workflows/definition.ts`). Невідоме поле (у тілі запиту чи в
-кроці) — 400, а не мовчазне відкидання. Тіло запиту — до 100 КіБ (більше — 413).
+кроці) — 400, а не мовчазне відкидання. Тіло запиту — до `HTTP_BODY_LIMIT` (100 КіБ за
+замовчуванням; більше — 413). Будь-який рядок (ключ чи значення) у тілі з символом U+0000 або
+одиночним сурогатом UTF-16 — 400: Postgres таких рядків не зберігає (проблема 22).
 
 | Що | Обмеження |
 |---|---|
 | `name` | рядок 1..200 символів; `cron` — до 100, `timezone` — 1..64 символи; `enabled` — boolean |
 | `steps` | 1..50 кроків, унікальні `id` (`^[a-z][a-z0-9_]{0,31}$`), разом до 64 КіБ JSON |
-| `http` | `url` до 2048 символів, лише `http://` / `https://`; `method` — `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`; `headers` — до 50 пар рядок → рядок (ім'я — token RFC 9110 до 256 символів, значення до 8 КіБ без CR/LF); заборонені `Idempotency-Key` (його ставить платформа) і службові заголовки з'єднання (`Host`, `Content-Length`, `Transfer-Encoding`, `Connection` тощо); `body` — рядок до 32 КіБ |
+| `http` | `url` до 2048 символів, лише `http://` / `https://`; `method` — `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`; `headers` — до 50 пар рядок → рядок (ім'я — token RFC 9110 до 256 символів, значення до 8 КіБ без CR/LF); заборонені `Idempotency-Key` (його ставить платформа) і службові заголовки з'єднання (`Host`, `Content-Length`, `Transfer-Encoding`, `Connection` тощо); `body` — рядок до 32 КіБ, лише для `POST`/`PUT`/`PATCH`/`DELETE` (у `GET`/`HEAD` тіла немає; метод за замовчуванням — `GET`) |
 | `transform` / `log` | `expr` / `message` — до 4096 символів |
 | `delay` | `ms` — ціле 0..2 592 000 000 (30 діб): пауза — довговічний таймер, слот воркера не тримає |
-| вхід виконання | тіло `POST /workflows/:id/run` і webhook-а — JSON-об'єкт до 64 КіБ |
+| вхід виконання | тіло `POST /workflows/:id/run` і webhook-а — JSON-об'єкт до 64 КіБ; webhook перевіряє вхід лише після підпису (без підпису — 401) |
 
 OpenAPI-документація — буде заповнено.
 
@@ -173,8 +175,10 @@ OpenAPI-документація — буде заповнено.
 | `NODE_ENV` | `development` | `development` / `test` / `production` |
 | `PORT` | `3000` | порт HTTP API |
 | `METRICS_PORT` | `3200` | службовий порт API лише для `GET /metrics`; compose його не публікує; `0` — випадковий вільний порт (тести) |
+| `HTTP_BODY_LIMIT` | `102400` | найбільше JSON-тіло запиту, байт, 69632..1048576 (нижня межа — визначення workflow 64 КіБ плюс решта полів); більше — 413 |
 | `DATABASE_URL` | — (обов'язкова) | `postgres://user:pass@host:5432/db` |
 | `DB_CONNECT_TIMEOUT_MS` | `5000` | таймаут встановлення з'єднання з Postgres, 100..60000 мс (і для CLI міграцій) |
+| `DB_POOL_SIZE` | `10` | найбільше з'єднань із Postgres в одному процесі, 5..1000, не менше за `WORKER_CONCURRENCY + 4` (проблема 25); сума пулів усіх процесів має вміщатися в `max_connections` Postgres (100 за замовчуванням) |
 | `DB_STATEMENT_TIMEOUT_MS` | `30000` | межа одного SQL-запиту (`statement_timeout`) і простою відкритої транзакції (`idle_in_transaction_session_timeout`), 100..600000 мс; на CLI міграцій не діє |
 | `ADMIN_TOKEN` | — (обов'язкова, ≥ 12 символів) | токен `POST /tenants`; у `NODE_ENV=production` приклад і очевидні заглушки заборонені (див. нижче) |
 | `LOG_LEVEL` | `info` | рівень логування pino |
@@ -186,6 +190,8 @@ OpenAPI-документація — буде заповнено.
 | `JOB_BACKOFF_BASE_MS` | `1000` | нижня межа затримки повтору, 10..3600000 мс |
 | `JOB_BACKOFF_MAX_MS` | `300000` | верхня межа затримки повтору, 10..86400000 мс, не менша за `JOB_BACKOFF_BASE_MS` |
 | `WORKER_SHUTDOWN_GRACE_MS` | `20000` | скільки воркер під час завершення чекає на задачі в роботі, 0..600000 мс; має бути меншим за `stop_grace_period` воркера (30 с у compose) |
+| `JOB_RETENTION_DAYS` | `30` | скільки днів зберігати завершені задачі (`done`/`failed`/`dead`) у `jobs`, 1..3650; виконання й кроки не видаляються (проблема 26) |
+| `JOB_CLEANUP_INTERVAL_MS` | `3600000` | як часто кожен воркер видаляє старі завершені задачі, 1000..2147483647 мс, з відхиленням ±50% |
 | `SCHEDULER_TICK_MS` | `30000` | період тіку планувальника, 100..2147483647 мс — **тимчасова межа** (лише ліміт таймерів Node, див. «Що не встигли») |
 | `TEST_DATABASE_URL` | `postgres://flowforge:flowforge@localhost:5432/flowforge_test` | лише для інтеграційних тестів |
 
@@ -244,6 +250,9 @@ npm run build && npm run migration:generate -- src/database/migrations/<Name>
   workflow завершуються як `failed` (проблема 9).
 - `DurableTimers` — `step_runs.wakeAt` (проблема 10).
 - `StepIdempotencyKey` — `step_runs.idempotencyKey` (унікальний; наявні рядки отримують власний UUID).
+- `JobFinishedAt` — `jobs.finishedAt` і частковий індекс `IDX_jobs_finished` для очищення
+  (проблема 26); наявні завершені задачі отримують момент завершення свого виконання (або момент
+  створення задачі, якщо його немає).
 
 Команди беруть `DATABASE_URL` і `DB_CONNECT_TIMEOUT_MS` з оточення або з `apps/api/.env` (решта
 конфігурації застосунку CLI не потрібна). `statement_timeout` на міграції не діє: зміна схеми
@@ -270,7 +279,7 @@ docker-compose up --build
 
 Перевірено на БД, створеній стартовим кодом (і з даними в його форматі: дублікати `step_runs`,
 задачі в черзі, виконання вже видаленого workflow): після цього застосовуються решта міграцій, від
-`AddCorrelationId` до `StepIdempotencyKey`, а `migration:generate --check` не знаходить розбіжностей
+`AddCorrelationId` до `JobFinishedAt`, а `migration:generate --check` не знаходить розбіжностей
 між схемою і сутностями.
 
 ## Тести
@@ -297,7 +306,11 @@ npm run test:all            # обидва набори
   (lease, heartbeat, fencing), `queue-retries` (ліміт спроб, `dead`), `durable-execution`
   (чекпоінти, знімок версії, `Idempotency-Key`), `durable-timers`, `worker-shutdown`,
   `execution-atomicity`, `worker-crash` (SIGKILL процесу воркера посеред кроку), `worker-metrics`,
-  `query-plans` (`EXPLAIN`), `migration-data` (перетворення наявних даних міграціями).
+  `query-plans` (`EXPLAIN`), `migration-data` (перетворення наявних даних міграціями),
+  `retry-after`, `connection-pool` (64 цикли, повільна БД), `job-retention`, `unstorable-text`
+  (U+0000 і одиночні сурогати), `webhook-input`, `body-limit`.
+- Перевірки часу в сценаріях черги спираються на факти з БД (`wakeAt`, `runAt`, `lockToken`,
+  `attempts`) за годинником БД, а не на час процесу тесту.
 
 CI (`.github/workflows/ci.yml`):
 
@@ -306,7 +319,7 @@ CI (`.github/workflows/ci.yml`):
 | `api` | format:check, lint, typecheck, unit, build |
 | `integration` | інтеграційні тести з `services: postgres` |
 | `frontend` | format:check, lint, build |
-| `compose` | `docker compose up --wait` з нуля: міграції, healthy API, рівно два healthy воркери і фронтенд, запуск workflow наскрізь (виконання `succeeded` зі збереженим `correlationId`); потім chaos-сценарій (`npm run chaos`: SIGKILL воркерів під навантаженням) |
+| `compose` | `docker compose up --wait` з нуля: міграції, healthy API, рівно два healthy воркери і фронтенд, запуск workflow наскрізь (виконання `succeeded` зі збереженим `correlationId`); потім chaos-сценарії (`npm run chaos`: SIGKILL воркерів під навантаженням; `npm run chaos:postgres`: перезапуск Postgres під навантаженням) |
 
 Усі job-и мають `timeout-minutes`; у `compose` очікування готовності обмежене `--wait-timeout 180`,
 а кожен `curl` — `--max-time`, тож сервіс, що прийняв з'єднання й мовчить, валить job за таймаутом,
@@ -748,7 +761,7 @@ npm run lint           # ESLint, 0 попереджень
 
 - **Як виправлено.** `isRetryableStatus`: 408, 425, 429 і 5xx — повторювані, решта 4xx — ні.
 - **Альтернативи.** Враховувати `Retry-After`: корисно, але потребує окремої межі (тенант-отримувач
-  міг би відкласти задачу на тижні). Лишається як можливе покращення.
+  міг би відкласти задачу на тижні). Зроблено пізніше, з межею `JOB_BACKOFF_MAX_MS` (проблема 23).
 
 ### 14. Повтори без jitter і без верхньої межі
 
@@ -796,7 +809,7 @@ npm run lint           # ESLint, 0 попереджень
   глобальному `ValidationPipe` (невідомі поля — 400), `validateSteps` з обмеженнями з таблиці в
   «Запуск → Валідація на межі API» (повертає нормалізовані кроки: лише відомі поля, метод у
   верхньому регістрі), `RunInputPipe` для входу виконання (API і webhook), явний ліміт тіла
-  запиту 100 КіБ.
+  запиту 100 КіБ (тепер — `HTTP_BODY_LIMIT`, проблема 17).
 - **Альтернативи.** JSON Schema (ajv) або zod для кроків: окрема бібліотека й друга система
   валідації поруч із `class-validator`. Дискримінований union кроків на `class-validator`
   (`@ValidateNested` + `discriminator`) погано дає точні повідомлення для полів, що
@@ -829,6 +842,271 @@ npm run lint           # ESLint, 0 попереджень
   у відповідь тенанту все одно потрапляв би довільний внутрішній текст, лише частково замаскований.
   Ховати й помилки кроку: тенант не зміг би зрозуміти, чому його workflow впав.
 
+### 17. Ліміт тіла запиту не задавався конфігурацією
+
+- **Що.** Ліміт JSON-тіла був константою `JSON_BODY_LIMIT = '100kb'` у `src/bootstrap.ts`, хоча
+  погоджений план вимагав змінну конфігурації.
+- **Чому небезпечно.** Межу споживання пам'яті на запит (ТЗ, розд. 4) не можна змінити без
+  перезбирання образу, а зменшити її нижче легітимних тіл (визначення workflow 64 КіБ) нічого не
+  заважало б.
+- **Як відтворити.** `test/integration/body-limit.int-spec.ts` (застосунок із `HTTP_BODY_LIMIT=70000`)
+  і `test/unit/env.validation.spec.ts`.
+
+  ```text
+  ✕ rejects a body above the configured limit with 413
+    Expected: 413
+    Received: 401
+  ✕ bounds the HTTP body limit so the largest valid definition and run input still fit
+  ```
+
+- **Як виправлено.** `HTTP_BODY_LIMIT` (байти, за замовчуванням 102400) у схемі конфігурації,
+  `.env.example` і таблиці «Конфігурація»; `configureApp` бере значення з `ConfigService`. Межі
+  валідації: не менше 68 КіБ (визначення кроків 64 КіБ плюс решта полів — обидва ліміти по 64 КіБ
+  уміщаються), не більше 1 МіБ.
+- **Альтернативи.** Рядок у форматі `bytes` (`100kb`): зручніше читати, але розбір дає транзитивна
+  залежність body-parser, на яку код не повинен спиратися, а межі валідації довелося б перевіряти
+  після розбору. Ціле число байтів валідується тим самим `class-validator`.
+
+### 18. Webhook пояснював формат входу до перевірки підпису
+
+- **Що.** На `POST /hooks/:workflowId` `RunInputPipe` виконувався до перевірки підпису (пайп
+  параметра — раніше за тіло обробника), тож запит без підпису з тілом-масивом або понад 64 КіБ
+  отримував 400 з поясненням замість 401. Регресія цього PR (проблема 15).
+- **Чому небезпечно.** Неавтентифікований клієнт дізнається правила валідації й ліміти, а сервер
+  виконує розбір і перевірки для будь-кого, хто знає id workflow.
+- **Як відтворити.** `test/integration/webhook-input.int-spec.ts`.
+
+  ```text
+  ✕ answers an unsigned delivery of an array with 401 and no details
+  ✕ answers an unsigned delivery of an object above 64 KiB with 401 and no details
+  ✕ answers a wrongly signed delivery of an array with 401
+  ✕ answers a wrongly signed delivery of an object above 64 KiB with 401
+    Expected: 401
+    Received: 400
+  ```
+
+- **Як виправлено.** Перевірку входу винесено у функцію `parseRunInput`; webhook викликає її лише
+  після звірки підпису, `POST /workflows/:id/run` і далі використовує `RunInputPipe` (там guard
+  автентифікує раніше за пайпи).
+- **Альтернативи.** Guard для webhook-а з перевіркою підпису: правильне місце, але підпис зараз
+  рахується над повторно серіалізованим тілом, і його переробка на сирі байти — PR 4 (беклог);
+  тоді перевірка й переїде в guard.
+
+### 19. `GET`/`HEAD` з тілом і запити, які fetch відмовляється надсилати, повторювались як мережеві збої
+
+- **Що.** `validateSteps` пропускав `body` для `GET`/`HEAD` (і для кроку без `method`, тобто `GET`),
+  а `fetch` кидав `TypeError: Request with GET/HEAD method cannot have body`. Будь-яку помилку
+  `fetch` крок вважав повторюваною мережевою (`http request failed: network error`). Так само
+  повторювався запит на порт зі списку заборонених специфікацією fetch (`bad port`, напр. 9, 25).
+- **Чому небезпечно.** Детермінована відмова марно витрачає всі `JOB_MAX_ATTEMPTS` спроб із
+  backoff (за замовчуванням — хвилини), а виконання врешті `dead` з неправдивою причиною.
+- **Як відтворити.** `test/unit/definition.spec.ts`, `test/unit/step-errors.spec.ts`.
+
+  ```text
+  ✕ rejects a body on a GET request / a body on a HEAD request / a body without a method
+    Received function did not throw
+  ✕ does not retry a request that fetch refuses to send (GET with a body)
+  ✕ does not retry a request to a port that fetch blocks
+    -   "retryable": false,
+    +   "retryable": true,
+  ```
+
+- **Як виправлено.** `validateHttp` дозволяє `body` лише для `POST`/`PUT`/`PATCH`/`DELETE`.
+  Повторюваними лишаються тільки справжні збої мережі (`TypeError('fetch failed')` від undici) і
+  таймаут; заборонений порт — неповторювана `http request is invalid: the port is not allowed`,
+  будь-яка інша помилка `fetch` — неповторювана `http request is invalid`. Тип помилки
+  визначається за `name`, а не `instanceof`: undici створює помилки в іншому realm, ніж код під
+  Jest. Наявний тест «unreachable receiver» звертався саме на порт 9 і перевіряв не те, що заявляв
+  (див. «Зміни наявних тестів»).
+- **Альтернативи.** Мовчки відкидати `body` для `GET`: тенант не дізнався б, що поле не діє.
+  Перелік «відомих» не-мережевих текстів помилок: крихкий, кожна нова помилка знову стала б
+  повторюваною; тут навпаки — повторюється лише те, що точно є мережею.
+
+### 20. URL, зламаний підстановкою шаблону, повторювався як мережевий збій
+
+- **Що.** Значення з `input`/`steps`, підставлене в `url` (напр., пробіл у хості), давало невалідний
+  URL; `fetch` кидав `ERR_INVALID_URL`, а крок повторювався до `dead`. Після виправлення 19 це вже
+  неповторювана, але незрозуміла `http request is invalid`.
+- **Чому небезпечно.** Ті самі марні спроби, а тенант не бачить, що причина — його дані.
+- **Як відтворити.** `test/unit/step-errors.spec.ts`, `test/integration/queue-retries.int-spec.ts`.
+
+  ```text
+  ✕ fails at once with an explanation when the url is invalid after substitution
+  ✕ fails at once when the substituted url is longer than the url limit
+  ✕ fails at once when the substitution turns the url into a non-http scheme
+  ✕ fails at once when the input turns the url into an invalid one
+    -   "error": "http url is invalid after template substitution",
+    +   "error": "http request is invalid",
+  ```
+
+- **Як виправлено.** Перед запитом підставлений URL перевіряється (`URL.canParse`, схема лише
+  `http:`/`https:`, довжина до 2048): інакше — неповторювана `http url is invalid after template
+  substitution`, без звернення до мережі.
+- **Альтернативи.** Кодувати підставлені значення (`encodeURIComponent`): змінило б семантику
+  наявних шаблонів (тенант може свідомо підставляти шлях із `/`). Рішення щодо екранування
+  шаблонів — у PR 4 (безпека шаблонізатора, беклог).
+
+### 21. Результат кроку з U+0000 або одиночним сурогатом валив чекпоінт
+
+- **Що.** Postgres не зберігає U+0000 ні в `jsonb` (`unsupported Unicode escape sequence`), ні в
+  `text` (`invalid byte sequence for encoding "UTF8": 0x00`), а `jsonb` відкидає й одиночні
+  сурогати UTF-16 (`"\ud800"`: `Unicode low surrogate must follow a high surrogate`). Відповідь
+  отримувача з таким символом (JSON-екранування `\u0000`, байт `0x00` у тексті, `\ud800` у JSON)
+  валила чекпоінт внутрішньою помилкою; текст помилки кроку з U+0000 (напр., з виразу `transform`)
+  не записувався взагалі. Знайдено перевіркою в Postgres 16; одиночні сурогати — додатково до
+  початкової знахідки.
+- **Чому небезпечно.** `http`-крок, ефект якого вже стався, надсилався знову на кожній спробі, а
+  виконання ставало `dead` («повтор уже виконаного кроку»). Якщо падав запис провалу, задача
+  висіла до кінця lease, і виконання завершувалось оманливою причиною про зниклий воркер.
+- **Як відтворити.** `test/integration/unstorable-text.int-spec.ts`.
+
+  ```text
+  ✕ checkpoints a JSON response with U+0000 in a value and a key once, with U+FFFD in place of the character
+  ✕ checkpoints a JSON response with a lone surrogate once, with U+FFFD in place of the character
+  ✕ checkpoints a text response with a NUL byte once, with U+FFFD in place of the character
+    expect(receiver.hits('/odd')).toHaveLength(1)
+    Received length: 3
+  ✕ records a step error that contains U+0000
+    -   "error": "transform: bad�value",
+    +   "error": "lease expired: worker worker-7601ceaa stopped renewing it; no attempts left (3/3)",
+  ```
+
+- **Як виправлено.** `src/common/storable-text.ts`: `toStorable` проводить результат кроку через
+  JSON (як при записі) і замінює U+0000 та одиночні сурогати в ключах і рядках на U+FFFD (символ
+  заміни Unicode); `toStorableText` — те саме для текстів помилок. Чекпоінт, завершення виконання й
+  запис провалу зберігають очищене значення, а наступні кроки отримують саме його (так само, як
+  після відновлення з чекпоінта). Кількість замін — у лозі воркера з кореляційним ID.
+- **Альтернативи (рішення погоджено).** Неповторюваний провал кроку: виконання стало б `failed`,
+  хоча ефект у отримувача вже стався. Зберігати символ екранованим (`\\u0000` як текст):
+  неоднозначно з легітимним рядком `\u0000` і змінює значення для шаблонів. Зберігати результат як
+  `text`/`bytea`: змінює тип даних API і відновлення `ctx.steps`. Обмеження: якщо два ключі після
+  заміни збіглися, лишається останній (як у `JSON.parse`).
+
+### 22. U+0000 або одиночний сурогат у вході чи визначенні давали 500
+
+- **Що.** Той самий символ у вході виконання (API, webhook), у кроках, `name`/`cron`/`timezone`
+  workflow чи `name` тенанта проходив валідацію і падав на записі в Postgres.
+- **Чому небезпечно.** 500 замість 400: помилка вхідних даних виглядає як збій сервера, а тенант не
+  розуміє, що виправити (ТЗ, розд. 4: валідація на межі).
+- **Як відтворити.** `test/integration/unstorable-text.int-spec.ts`, блок «at the API boundary».
+
+  ```text
+  ✕ rejects run input with U+0000 in a value / in a key / a lone surrogate (400)
+  ✕ rejects signed webhook input with … (400)
+  ✕ rejects a workflow with a step field with U+0000 / a lone surrogate / a name / a timezone (400)
+  ✕ rejects a workflow update with U+0000 in the name (400)
+  ✕ rejects a tenant name with U+0000 (400)
+    Expected: 400
+    Received: 500
+  ```
+
+- **Як виправлено.** `findUnstorable` (шлях до першого поганого ключа чи значення) у
+  `parseRunInput` і `validateSteps`; декоратор `@IsStorableText()` на рядкових полях DTO. Відповідь —
+  400 зі шляхом поля (`steps[0].message містить символ U+0000 …`).
+- **Альтернативи.** Мовчки замінювати символи у вході: тенант отримав би не ті дані, які надіслав.
+  Перевірка в `reviver` body-parser-а для всіх запитів: охоплює все одразу, але спрацьовує до
+  перевірки підпису webhook-а (повторило б проблему 18) і дає лише загальне «Bad Request».
+
+### 23. `Retry-After` від отримувача ігнорувався
+
+- **Що.** На 429 і 503 повтор планувався звичайним backoff (десятки мілісекунд — секунди), навіть
+  якщо отримувач просив `Retry-After: 2` чи дату.
+- **Чому небезпечно.** Повтори приходять раніше, ніж отримувач готовий, отримують ту саму 429/503 і
+  витрачають ліміт спроб, а виконання — `dead`, хоча за вказаний час запит пройшов би.
+- **Як відтворити.** `test/integration/retry-after.int-spec.ts` (затримку фіксує тригер БД у момент
+  повернення задачі в чергу) і `test/unit/step-errors.spec.ts`.
+
+  ```text
+  ✕ waits at least as long as HTTP 429 asks in seconds    Expected: >= 2000  Received: 75
+  ✕ waits at least as long as HTTP 503 asks in seconds    Expected: >= 2000  Received: 66
+  ✕ accepts Retry-After as an HTTP date                   Expected: >= 2900  Received: 66
+  ✕ never waits longer than the backoff cap, whatever the receiver asks
+                                                          Expected: >= 4500  Received: 96
+  ✕ passes the Retry-After of HTTP 429/503 on to the retry
+  ```
+
+- **Як виправлено.** Для 429 і 503 `Retry-After` (ціле секунд або HTTP-date) потрапляє в
+  `StepError.retryAfterMs`; затримка повтору — `min(JOB_BACKOFF_MAX_MS, max(Retry-After, backoff))`:
+  не раніше, ніж просить отримувач, не коротше за звичайний backoff (нижня межа і jitter
+  лишаються), не довше за верхню межу. Невалідний заголовок ігнорується.
+- **Альтернативи.** Брати `Retry-After` як є: отримувач (а через нього тенант) міг би відкласти
+  задачу на тижні. Ігнорувати jitter, якщо є `Retry-After`: усі задачі, що отримали однакову
+  відповідь, повторились би в одну мить.
+
+### 24. При недоступній БД кожен цикл воркера щосекунди стукав у БД і писав помилку
+
+- **Що.** Після невдалого захоплення кожен цикл чекав 1 с і пробував знову, із записом у лог. При
+  `WORKER_CONCURRENCY=64` — до 64 запитів і 64 рядків логу на секунду з одного воркера.
+- **Чому небезпечно.** Лог-флуд ховає справжню причину й навантажує збирач логів, а хвиля
+  підключень щойно відновленої БД заважає їй піднятися.
+- **Як відтворити.** `test/unit/claim-backoff.spec.ts` (16 циклів, захоплення завжди падає).
+
+  ```text
+  ✕ probes the database with one loop at a growing interval and logs once per probe
+    Expected: <= 19
+    Received:    64
+  ✕ resumes claiming in every loop once the database is back
+  ```
+
+- **Як виправлено.** Спільний для циклів воркера відступ: після збою — `backoffMs` (full jitter) від
+  1 с до 30 с, що зростає з кожним збоєм поспіль. Поки він триває, цикли не звертаються до БД, а
+  перевіряє її один цикл; лог — один рядок на перевірку (`consecutiveFailures`, `retryInMs`), після
+  відновлення — `job claim recovered`. Задачі в роботі цей відступ не зачіпає (heartbeat має власну
+  логіку, див. 3.3.1).
+- **Альтернативи.** Окремий відступ у кожному циклі: менше запитів, але 64 незалежні таймери й ті
+  самі 64 рядки логу за кожну хвилю. Зупиняти воркер до відновлення `/ready`: залежність від
+  оркестратора і ризик не підхопити задачі після короткого збою.
+
+### 25. 64 цикли на пулі з 10 з'єднань губили lease при повільній БД
+
+- **Що.** Розмір пулу не задавався (у pg за замовчуванням — 10), а `WORKER_CONCURRENCY` дозволяв
+  до 64; очікування з'єднання обмежене лише `DB_CONNECT_TIMEOUT_MS`. Heartbeat-и стояли в черзі пулу
+  позаду опитувань черги всіма циклами.
+- **Чому небезпечно.** Коли БД повільніша (блокування, I/O), продовження lease не встигають, reaper
+  повертає задачі живого воркера, кроки повторюються (для `http` — повторний запит).
+- **Як відтворити.** `test/integration/connection-pool.int-spec.ts`: 64 цикли, 64 кроки, утричі
+  довші за lease. Без уповільнення пул 10 витримує (зелений і до виправлення). Коли кожне
+  оновлення рядка задачі тримає з'єднання 150 мс (тригер `pg_sleep` у тесті): 11 з 64 виконань
+  `failed` (перший замір) або всі `succeeded`, але з поверненими reaper-ом задачами (тест):
+
+  ```text
+  ✕ keeps every lease when each job update holds its connection for 150 ms
+    + "lastError": "lease expired: worker worker-15f80686 stopped renewing it",
+  ```
+
+  Той самий сценарій із пулом 68 і 80 — зелений (≈ 6 с). При 50 мс на оновлення пул 10 ще
+  витримує.
+- **Як виправлено.** `DB_POOL_SIZE` (за замовчуванням 10) з валідацією `DB_POOL_SIZE ≥
+  WORKER_CONCURRENCY + 4` (з'єднання на цикл плюс heartbeat-и, reaper, очищення, `/ready`);
+  невідповідна конфігурація не стартує.
+- **Альтернативи.** Окремий маленький пул для heartbeat-ів: менше з'єднань, але дві конфігурації
+  пулу й складніша модель. Розмір пулу, обчислений із `WORKER_CONCURRENCY` автоматично: приховує від
+  оператора суму з'єднань, яку треба звірити з `max_connections` Postgres.
+
+### 26. Завершені задачі ніколи не видалялись
+
+- **Що.** Рядок `jobs` лишався назавжди після `done`/`failed`/`dead`.
+- **Чому небезпечно.** Таблиця черги росте необмежено (cron щохвилини — 1440 рядків на добу на
+  workflow), разом з нею — vacuum, резервні копії й час міграцій; гарячі запити захищені
+  частковими індексами, але решта — ні.
+- **Як відтворити.** `test/integration/job-retention.int-spec.ts`.
+
+  ```text
+  ✕ removes done, failed and dead jobs finished long ago, in batches, and keeps the rest
+    QueryFailedError: column "finishedAt" of relation "jobs" does not exist
+  ```
+
+- **Як виправлено.** Колонка `jobs.finishedAt` (міграція `JobFinishedAt` з backfill) ставиться
+  разом із завершенням. Кожен воркер раз на `JOB_CLEANUP_INTERVAL_MS` (±50%) видаляє завершені
+  задачі, старші за `JOB_RETENTION_DAYS` (30), пачками по 1000 окремими короткими транзакціями
+  (`FOR UPDATE SKIP LOCKED`: кілька воркерів не чекають одне одного); запит використовує
+  частковий індекс `IDX_jobs_finished` (перевірено `EXPLAIN`). `executions` і `step_runs` — історія
+  тенанта, яку показує API, — не видаляються.
+- **Альтернативи.** Партиціювання `jobs` за часом і `DROP PARTITION`: найдешевше видалення, але
+  частковий індекс черги і `SKIP LOCKED` на партиціях складніші, а для обсягів тестового проєкту
+  це передчасно. `pg_cron`: розширення й права, яких застосунок не має. Видаляти разом із
+  виконаннями: втрата історії тенанта (окреме рішення про термін зберігання історії не приймалося).
+
 ### Аудит решти наявних тестів
 
 Кожен тест перевірено мутацією коду, поведінку якого він заявляє:
@@ -854,6 +1132,32 @@ whose worker died…»): вони нічого не перевіряли, але
 
 Знахідки інших категорій — буде заповнено.
 
+### Мутаційна перевірка тестів для проблем 17–26
+
+Кожен ключовий тест перевірено, зламавши саме ту частину виправлення, яку він доводить (після
+кожної мутації код відновлено):
+
+| Мутація | Тест | Результат |
+|---|---|---|
+| ліміт тіла — знову константа | `body-limit` | червоний ✔ |
+| webhook перевіряє вхід до підпису | `webhook-input` | червоний ✔ (4) |
+| прибрано заборону тіла для `GET`/`HEAD` | `definition.spec` | червоний ✔ (3) |
+| будь-яка помилка `fetch` — мережева | `step-errors.spec` | червоний ✔ |
+| URL не перевіряється після підстановки | `step-errors.spec` | червоний ✔ (3) |
+| очищення без одиночних сурогатів | `unstorable-text` | червоний ✔ (4) |
+| чекпоінт пише результат без очищення | `unstorable-text` | червоний ✔ (3) |
+| `Retry-After` без верхньої межі / ігнорується | `retry-after` | червоний ✔ (1 / 4) |
+| відступ захоплення не росте / без єдиного перевіряльника | `claim-backoff.spec` | червоний ✔ ¹ |
+| `DB_POOL_SIZE` не передається в пул | `connection-pool` | червоний ✔ |
+| очищення видаляє й незавершені / лише одну пачку за прохід | `job-retention` | червоний ✔ ¹ |
+| продовження lease не викликає heartbeat | `queue-recovery` | червоний ✔ |
+| рання повторна пауза починає відлік заново | `durable-timers` | червоний ✔ ¹ |
+
+¹ Перший прогін мутацій ці тести пропустили (зелені): заглушка захоплення падала миттєво;
+«незавершену» задачу воркер у тесті просто виконував; пачки доробляли наступні проходи; тест ранньої
+повторної паузи не перевіряв, що `wakeAt` не змінився. Тести посилено (окремий коміт), після чого
+всі мутації червоні.
+
 ## Зміни наявних тестів
 
 | Файл | Зміна | Обґрунтування |
@@ -868,6 +1172,14 @@ whose worker died…»): вони нічого не перевіряли, але
 | `test/integration/worker-correlation.int-spec.ts` | задача для `process()` береться через `claimNext`, виконання створюється хелпером зі знімком версії | обробляти можна лише захоплену задачу (з lease і fencing-токеном), а виконання без знімку версії заборонене `CHECK`; перевірка кореляції та сама |
 | `test/integration/timestamps.int-spec.ts` | рядок `executions` вставляється зі статусом `succeeded` | `CHK_executions_version_snapshot` вимагає знімок версії лише від незавершених виконань; тест перевіряє `createdAt`, статус на нього не впливає |
 | `test/helpers/db.ts` | `createWorkflow` створює й першу версію; `truncateAll` очищає лише наявні таблиці | хелпери відтворюють те, що робить застосунок; тести міграцій тимчасово відкочують схему, і новіших таблиць у цей момент ще немає |
+| `test/integration/execution-errors.int-spec.ts` › «reports an unreachable receiver…» | порт 9 замінено на щойно звільнений порт; перевіряється `http request failed: connection refused` | порт 9 входить до списку заборонених fetch (`bad port`): тест перевіряв не відмову з'єднання, а блокування порту, яке тепер — окрема неповторювана помилка (проблема 19) |
+| `test/unit/background-error-logging.spec.ts` › worker, `test/unit/claim-backoff.spec.ts` | у заглушку конфігурації додано `JOB_CLEANUP_INTERVAL_MS` | воркер планує очищення старих задач (проблема 26); без значення таймер спрацьовував одразу й додавав рядки логу, які тест не перевіряє; перевірка лише одного рядка про збій захоплення та сама |
+| `test/integration/query-plans.int-spec.ts` | засіяні завершені задачі мають `finishedAt`; доданий випадок для `FINISHED_JOBS_SQL` | реалістичний розподіл для нового запиту очищення; наявні перевірки планів ті самі |
+| `test/integration/queue-retries.int-spec.ts` | `start()` приймає вхід виконання; додано перевірки `finishedAt` | новий тест URL після підстановки (проблема 20) потребує входу; наявні перевірки ті самі |
+| `test/integration/queue-recovery.int-spec.ts` › «keeps its lease…» | додано спостереження за рядком задачі під час кроку: один `lockToken`, кілька значень `lockedUntil` | тест заявляв продовження lease, але перевіряв лише наслідок (одна спроба); тепер видно й сам heartbeat у БД |
+| `test/integration/durable-timers.int-spec.ts` | замість очікування з межею 1,5 с і `waited < 3500` — факти з БД: швидке виконання завершилось раніше за `wakeAt`; `wakeAt` не змінився після перезапуску, `wakeAt − startedAt ≈ ms`, крок завершився не раніше за `wakeAt` | межі часу залежали від швидкості машини (повільний CI давав хибне падіння); нові перевірки доводять ту саму поведінку одним годинником (БД) |
+| `test/integration/worker-shutdown.int-spec.ts` | `runAt <= now()` перевіряється в SQL, а не порівнянням із `Date.now()` процесу | годинник процесу тесту й БД можуть розходитись; межа тривалості завершення (grace) лишилась — це сама заявлена поведінка |
+| `test/integration/worker-metrics.int-spec.ts` | воркер стартує після підготовки задачі «зниклого воркера», а не в `beforeAll`; перед читанням метрик — очікування останніх подій у самих метриках | серія з 10 прогонів показала падіння (1 з 5): воркер устигав захопити задачу раніше, ніж тест переводив її в стан із простроченим lease, і лічильники залежали від того, хто встиг першим. Лічильник оновлюється одразу після транзакції, тож і читання одразу після неї зрідка не встигало. Очікувані значення ті самі |
 
 ## Архітектурні рішення
 
@@ -946,6 +1258,20 @@ fencing-токеном (`lockToken`) для володіння задачею. A
   `WORKER_SHUTDOWN_GRACE_MS` → скасувати й повернути решту без зарахованої спроби.
 - **Час** — завжди годинник БД (`now()`): `runAt`, `lockedUntil`, `wakeAt`, backoff. Розбіжність
   годинників воркерів на чергу не впливає.
+- **`Retry-After`** (проблема 23): для 429 і 503 затримка повтору — не менша за запитану
+  отримувачем, але в межах `[backoff, JOB_BACKOFF_MAX_MS]`.
+- **Неповторювані помилки запиту** (проблеми 19–20): невалідний після підстановки URL,
+  заборонений порт, запит, який `fetch` відмовляється надсилати — одразу `failed`.
+- **Збій БД під час захоплення** (проблема 24): спільний для циклів воркера експоненційний відступ
+  1..30 с, один цикл перевіряє відновлення, один рядок логу на перевірку.
+- **Пул з'єднань** (проблема 25): `DB_POOL_SIZE ≥ WORKER_CONCURRENCY + 4`, перевіряється під час
+  старту.
+- **Очищення завершених задач** (проблема 26). Варіанти: видаляти разом із виконаннями (втрата
+  історії тенанта), партиціювання за часом, `pg_cron`, періодичне видалення пачками у воркерах.
+  Обрано останнє: `jobs.finishedAt`, частковий індекс, пачки по 1000 з `SKIP LOCKED`,
+  `JOB_RETENTION_DAYS` (30). Обмеження: видалення пачками — це dead tuples для autovacuum; на дуже
+  великих обсягах краще партиціювання. Історія виконань (`executions`, `step_runs`) не
+  обмежена — термін її зберігання — окреме рішення.
 
 Обмеження: опитування (`WORKER_POLL_INTERVAL_MS` з jitter) замість `LISTEN/NOTIFY` дає
 затримку захоплення до інтервалу опитування в порожній черзі (видно в
@@ -1012,7 +1338,9 @@ fencing-токеном (`lockToken`) для володіння задачею. A
 
 Що **не** гарантується: exactly-once для отримувача, який ігнорує `Idempotency-Key` (це
 неможливо без його участі: відповідь могла загубитися вже після виконання запиту). Порядок
-виконань між собою: різні виконання незалежні.
+виконань між собою: різні виконання незалежні. Побайтова точність результату кроку: U+0000 і
+одиночні сурогати, яких Postgres не зберігає, у збереженому результаті замінено на U+FFFD
+(проблема 21).
 
 ## Потік виконання і межі транзакцій
 
@@ -1044,6 +1372,7 @@ flowchart TD
 |---|---|
 | захоплення наступної задачі | `IDX_jobs_claim` — `jobs ("runAt") WHERE status = 'queued'` (частковий) |
 | пошук прострочених lease (reaper) | `IDX_jobs_lease` — `jobs ("lockedUntil") WHERE status = 'running'` (частковий) |
+| завершені задачі, старші за термін зберігання (очищення) | `IDX_jobs_finished` — `jobs ("finishedAt") WHERE status IN ('done', 'failed', 'dead')` (частковий) |
 | пошук кроку за ключем ідемпотентності | `UQ_step_runs_idempotency_key` — унікальний `step_runs ("idempotencyKey")` |
 | чекпоінти виконання | `UQ_step_runs_execution_step` — унікальний `step_runs ("executionId", "stepIndex")` |
 | версія workflow для виконання | `UQ_workflow_versions_workflow_version` — унікальний `("workflowId", "version")` |
@@ -1054,7 +1383,8 @@ flowchart TD
 Старий індекс `(status, "runAt")` видалено.
 
 **Як перевірено.** Інтеграційний тест `query-plans.int-spec.ts` засіває 20 тис. задач і кроків
-і для того самого SQL, що виконує черга (`CLAIM_CANDIDATE_SQL`, `EXPIRED_LEASES_SQL`), перевіряє в
+і для того самого SQL, що виконує черга (`CLAIM_CANDIDATE_SQL`, `EXPIRED_LEASES_SQL`,
+`FINISHED_JOBS_SQL`), перевіряє в
 `EXPLAIN (FORMAT JSON)`, що використовується потрібний індекс і немає `Seq Scan`. Вручну на
 100 тис. задач (`EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF)`):
 
