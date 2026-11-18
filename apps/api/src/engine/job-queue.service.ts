@@ -104,6 +104,9 @@ export const FINISHED_JOBS_SQL = `
    LIMIT ${PURGE_BATCH}
    FOR UPDATE SKIP LOCKED`;
 
+/** Видалення однієї пачки завершених задач (FINISHED_JOBS_SQL), $1 — днів зберігання. */
+export const PURGE_FINISHED_SQL = `DELETE FROM jobs WHERE id IN (${FINISHED_JOBS_SQL})`;
+
 @Injectable()
 export class JobQueueService {
   constructor(
@@ -310,7 +313,7 @@ export class JobQueueService {
     let total = 0;
     for (;;) {
       const [, deleted]: [unknown[], number] = await this.ds.query(
-        `DELETE FROM jobs WHERE id IN (${FINISHED_JOBS_SQL})`,
+        PURGE_FINISHED_SQL,
         [retentionDays],
       );
       total += deleted;

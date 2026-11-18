@@ -3,6 +3,7 @@ import {
   CLAIM_CANDIDATE_SQL,
   EXPIRED_LEASES_SQL,
   FINISHED_JOBS_SQL,
+  PURGE_FINISHED_SQL,
 } from '../../src/engine/job-queue.service';
 import { openTestDataSource, truncateAll } from '../helpers/db';
 
@@ -67,6 +68,14 @@ describe('query plans of the queue use their indexes', () => {
     [
       'finding finished jobs past their retention period',
       FINISHED_JOBS_SQL,
+      [7],
+      'IDX_jobs_finished',
+    ],
+    [
+      // Сам DELETE: пачка вибирається індексом очищення, а рядки видаляються за первинним
+      // ключем — без читання всієї таблиці на кожну пачку.
+      'deleting one batch of finished jobs',
+      PURGE_FINISHED_SQL,
       [7],
       'IDX_jobs_finished',
     ],
