@@ -111,7 +111,15 @@ export class StepExecutor {
         throw new StepError('http request is invalid', false);
       throw new StepError(`http request failed: ${networkReason(err)}`, true);
     }
-    const text = await res.text();
+    let text: string;
+    try {
+      text = await res.text();
+    } catch (err) {
+      if (signal?.aborted) throw err;
+      // Заголовки прийшли, але тіло не дочитано: таймаут або обрив з'єднання (undici —
+      // TypeError('terminated') з причиною в `cause`). Це збій мережі, повтор може допомогти.
+      throw new StepError(`http request failed: ${networkReason(err)}`, true);
+    }
     if (!res.ok) {
       throw new StepError(
         `http ${res.status}`,
