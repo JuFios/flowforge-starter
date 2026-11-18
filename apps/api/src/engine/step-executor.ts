@@ -111,6 +111,17 @@ export class StepExecutor {
         throw new StepError('http request is invalid', false);
       throw new StepError(`http request failed: ${networkReason(err)}`, true);
     }
+    if (!res.ok) {
+      // Заголовки визначають результат навіть при обриві непотрібного тіла.
+      void res.body?.cancel().catch(() => undefined);
+      throw new StepError(
+        `http ${res.status}`,
+        isRetryableStatus(res.status),
+        RETRY_AFTER_STATUSES.has(res.status)
+          ? parseRetryAfter(res.headers.get('retry-after'))
+          : undefined,
+      );
+    }
     let text: string;
     try {
       text = await res.text();
@@ -119,15 +130,6 @@ export class StepExecutor {
       // Заголовки прийшли, але тіло не дочитано: таймаут або обрив з'єднання (undici —
       // TypeError('terminated') з причиною в `cause`). Це збій мережі, повтор може допомогти.
       throw new StepError(`http request failed: ${networkReason(err)}`, true);
-    }
-    if (!res.ok) {
-      throw new StepError(
-        `http ${res.status}`,
-        isRetryableStatus(res.status),
-        RETRY_AFTER_STATUSES.has(res.status)
-          ? parseRetryAfter(res.headers.get('retry-after'))
-          : undefined,
-      );
     }
     try {
       return { status: res.status, body: JSON.parse(text) as unknown };

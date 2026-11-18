@@ -110,9 +110,82 @@ describe('data migrations', () => {
     ).toEqual([{ status: 'succeeded', output: 42 }]);
   });
 
-  it.each(['old', 'replacement'])(
-    'stops an ambiguous migrated checkpoint with step id %s and preserves the recorded effect',
-    async (stepId) => {
+  it('closes a stale job while preserving the result already recorded by the old worker', async () => {
+    await truncateAll(ds);
+    await revertThrough('QueueLease');
+    const [execution]: { id: string; tenantId: string }[] = await ds.query(
+      `INSERT INTO executions ("tenantId", "workflowId", status, output, "finishedAt")
+       VALUES (gen_random_uuid(), gen_random_uuid(), 'succeeded', '42', now()) RETURNING id, "tenantId"`,
+    );
+    await ds.query(
+      `INSERT INTO jobs ("tenantId", "executionId", status, "lockedUntil")
+       VALUES ($1, $2, 'running', now() - interval '1 minute')`,
+      [execution.tenantId, execution.id],
+    );
+    await ds.runMigrations({ transaction: 'each' });
+    expect(
+      await ds.query(
+        `SELECT e.status, e.output, j.status AS job, j."lockedUntil", j."finishedAt" = e."finishedAt" AS "sameFinish"
+       FROM executions e JOIN jobs j ON j."executionId" = e.id WHERE e.id = $1`,
+        [execution.id],
+      ),
+    ).toEqual([
+      {
+        status: 'succeeded',
+        output: 42,
+        job: 'done',
+        lockedUntil: null,
+        sameFinish: true,
+      },
+    ]);
+  });
+
+  it('keeps a modern first attempt on a backfilled version after a worker restart', async () => {
+    await truncateAll(ds);
+    await revertThrough('RecoverCheckpoints');
+    const [v]: { id: string; tenantId: string; workflowId: string }[] =
+      await ds.query(
+        `INSERT INTO workflow_versions ("tenantId","workflowId",version,steps)
+       VALUES (gen_random_uuid(),gen_random_uuid(),2,'[{"id":"send","type":"http","url":"https://example.org"}]')
+       RETURNING *`,
+      );
+    const [e]: { id: string }[] = await ds.query(
+      `INSERT INTO executions ("tenantId","workflowId","workflowVersionId",status)
+       VALUES ($1,$2,$3,'running') RETURNING id`,
+      [v.tenantId, v.workflowId, v.id],
+    );
+    await ds.query(
+      `INSERT INTO jobs ("tenantId","executionId",status) VALUES ($1,$2,'queued')`,
+      [v.tenantId, e.id],
+    );
+    const [step]: { idempotencyKey: string }[] = await ds.query(
+      `INSERT INTO step_runs ("executionId","stepIndex","stepId",status) VALUES ($1,0,'send','running') RETURNING "idempotencyKey"`,
+      [e.id],
+    );
+    await ds.runMigrations({ transaction: 'each' });
+    expect(
+      await ds.query(
+        `SELECT e.status, e."workflowVersionId", j.status AS job, s."idempotencyKey" FROM executions e
+       JOIN jobs j ON j."executionId"=e.id JOIN step_runs s ON s."executionId"=e.id WHERE e.id=$1`,
+        [e.id],
+      ),
+    ).toEqual([
+      {
+        status: 'running',
+        workflowVersionId: v.id,
+        job: 'queued',
+        idempotencyKey: step.idempotencyKey,
+      },
+    ]);
+  });
+
+  it.each([
+    ['old', 'succeeded'],
+    ['replacement', 'succeeded'],
+    ['replacement', 'running'],
+  ])(
+    'stops an ambiguous migrated checkpoint with step id %s and status %s and preserves the recorded output',
+    async (stepId, stepStatus) => {
       await truncateAll(ds);
       await revertThrough('QueueLease');
       const [wf]: { id: string; tenantId: string }[] =
@@ -127,8 +200,8 @@ describe('data migrations', () => {
         [wf.tenantId, e.id],
       );
       await ds.query(
-        `INSERT INTO step_runs ("executionId","stepIndex","stepId",status,output) VALUES($1,0,$2,'succeeded','42')`,
-        [e.id, stepId],
+        `INSERT INTO step_runs ("executionId","stepIndex","stepId",status,output) VALUES($1,0,$2,$3,'42')`,
+        [e.id, stepId, stepStatus],
       );
       await ds.runMigrations({ transaction: 'each' });
       expect(
@@ -220,15 +293,30 @@ describe('data migrations', () => {
     await truncateAll(ds);
     await revertThrough('JobFinishedAt');
     const tenantId = '00000000-0000-4000-8000-0000000000aa';
+    const [version]: { id: string; workflowId: string }[] = await ds.query(
+      `INSERT INTO workflow_versions ("tenantId", "workflowId", version, steps)
+       VALUES ($1, gen_random_uuid(), 1, '[]') RETURNING id, "workflowId"`,
+      [tenantId],
+    );
     const insert = async (
       jobStatus: string,
       executionFinishedAt: string | null,
       jobCreatedAt: string,
     ) => {
       const [{ id }]: Array<{ id: string }> = await ds.query(
-        `INSERT INTO executions ("tenantId", "workflowId", status, "finishedAt")
-         VALUES ($1, gen_random_uuid(), 'succeeded', $2) RETURNING id`,
-        [tenantId, executionFinishedAt],
+        `INSERT INTO executions ("tenantId", "workflowId", "workflowVersionId", status, "finishedAt")
+         VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+        [
+          tenantId,
+          version.workflowId,
+          version.id,
+          jobStatus === 'queued'
+            ? 'pending'
+            : jobStatus === 'done'
+              ? 'succeeded'
+              : 'failed',
+          executionFinishedAt,
+        ],
       );
       const [{ id: jobId }]: Array<{ id: string }> = await ds.query(
         `INSERT INTO jobs ("tenantId", "executionId", status, "createdAt")
@@ -243,11 +331,7 @@ describe('data migrations', () => {
       '2026-03-01T10:00:00Z',
     );
     const dead = await insert('dead', null, '2026-03-02T00:00:00Z');
-    const queued = await insert(
-      'queued',
-      '2026-03-03T00:00:00Z',
-      '2026-03-03T00:00:00Z',
-    );
+    const queued = await insert('queued', null, '2026-03-03T00:00:00Z');
 
     await ds.runMigrations({ transaction: 'each' });
 

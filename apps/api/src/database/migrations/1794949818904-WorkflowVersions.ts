@@ -19,6 +19,14 @@ export class WorkflowVersions1794949818904 implements MigrationInterface {
     await queryRunner.query(`
             UPDATE executions e SET "workflowVersionId" = v.id
               FROM workflow_versions v WHERE v."workflowId" = e."workflowId"`);
+    // На цій межі всі наявні кроки належать старому воркеру, який міг уже надіслати HTTP.
+    // Позначаємо перервану спробу до появи нових воркерів, щоб RecoverCheckpoints розрізнила
+    // її та нову спробу під тією самою версією. Час завершення старої спроби невідомий.
+    await queryRunner.query(`
+            UPDATE step_runs s SET status = 'failed', error = 'original workflow definition is unknown'
+              FROM executions e JOIN workflow_versions v ON v.id = e."workflowVersionId"
+             WHERE s."executionId" = e.id AND s.status = 'running'
+               AND e.status <> 'succeeded' AND v.version > 1`);
     // Незавершені виконання вже видалених workflow виконати неможливо (стартовий код
     // повторював їх, доки не вичерпає спроби): завершуємо їх явно разом із задачами.
     const orphanError = 'workflow was deleted before this execution could run';

@@ -5,6 +5,11 @@ import { toStorable, toStorableText } from '../common/storable-text';
 import { Job, StepRun } from '../entities';
 import { FailureOutcome, JobQueueService } from './job-queue.service';
 
+interface SavedCheckpoint {
+  output: unknown;
+  finishedAt: Date;
+}
+
 /**
  * Записи про перебіг кроків. Кожен метод — одна транзакція, що спершу перевіряє lease задачі
  * (`assertLease` блокує рядок job): воркер, чий lease уже забрали, нічого не запише, а стан
@@ -35,8 +40,10 @@ export class CheckpointService {
     stepIndex: number,
     stepId: string,
   ): Promise<StepRun> {
-    return this.ds.transaction(async (em) => {
-      await this.queue.assertLease(em, job);
+    const run = await this.ds.transaction(async (em) => {
+      const locked = await this.queue.assertLease(em, job);
+      if (locked.attempts === 0)
+        await em.query('UPDATE jobs SET attempts = 1 WHERE id = $1', [job.id]);
       const [run]: StepRun[] = await em.query(
         `INSERT INTO step_runs ("executionId", "stepIndex", "stepId", status, attempts)
          VALUES ($1, $2, $3, 'running', 1)
@@ -52,26 +59,41 @@ export class CheckpointService {
       );
       return run;
     });
+    job.attempts = Math.max(job.attempts, 1);
+    return run;
   }
 
   /**
    * Чекпоінт: результат кроку зафіксовано, і він більше не обчислюватиметься. Лічильник спроб
-   * задачі починається знову з поточного захоплення (1): ліміт спроб діє на кожен крок окремо,
-   * а не на весь workflow.
+   * задачі між кроками дорівнює нулю. Наступну спробу зарахує startStep або нове захоплення.
    */
-  async checkpoint(job: Job, run: StepRun, output: unknown): Promise<unknown> {
+  async checkpoint(
+    job: Job,
+    run: StepRun,
+    output: unknown,
+  ): Promise<SavedCheckpoint> {
     const stored = this.storable(job, run.stepId, output);
-    await this.ds.transaction(async (em) => {
+    const saved = await this.ds.transaction(async (em) => {
       await this.queue.assertLease(em, job);
-      await em.query(
-        `UPDATE step_runs SET status = 'succeeded', output = $2, error = NULL, "finishedAt" = now()
-          WHERE id = $1`,
-        [run.id, JSON.stringify(stored)],
-      );
-      await em.query(`UPDATE jobs SET attempts = 1 WHERE id = $1`, [job.id]);
+      return this.saveCheckpoint(em, job, run, stored);
     });
-    job.attempts = 1;
-    return stored;
+    job.attempts = 0;
+    return saved;
+  }
+
+  private async saveCheckpoint(
+    em: EntityManager,
+    job: Job,
+    run: StepRun,
+    output: unknown,
+  ): Promise<SavedCheckpoint> {
+    const [rows]: [SavedCheckpoint[], number] = await em.query(
+      `UPDATE step_runs SET status = 'succeeded', output = $2, error = NULL, "finishedAt" = now()
+       WHERE id = $1 RETURNING output, "finishedAt"`,
+      [run.id, JSON.stringify(output)],
+    );
+    await em.query('UPDATE jobs SET attempts = 0 WHERE id = $1', [job.id]);
+    return rows[0];
   }
 
   /**
@@ -174,10 +196,14 @@ export class CheckpointService {
   /**
    * Задачу кроку `delay` знову захоплено. Якщо момент пробудження настав — крок завершено
    * (чекпоінт), інакше (напр., задачу повернув reaper раніше строку) — паркуємо знову до того
-   * самого моменту. true — крок завершено і можна йти далі.
+   * самого моменту. Повертає записаний результат або null після паркування.
    */
-  async wakeIfDue(job: Job, run: StepRun, output: unknown): Promise<boolean> {
-    const due = await this.ds.transaction(async (em) => {
+  async wakeIfDue(
+    job: Job,
+    run: StepRun,
+    output: unknown,
+  ): Promise<SavedCheckpoint | null> {
+    const saved = await this.ds.transaction(async (em) => {
       await this.queue.assertLease(em, job);
       const [{ due }]: Array<{ due: boolean }> = await em.query(
         `SELECT "wakeAt" <= now() AS due FROM step_runs WHERE id = $1`,
@@ -185,18 +211,12 @@ export class CheckpointService {
       );
       if (!due) {
         await this.release(em, job, run.wakeAt!);
-        return false;
+        return null;
       }
-      await em.query(
-        `UPDATE step_runs SET status = 'succeeded', output = $2, error = NULL, "finishedAt" = now()
-          WHERE id = $1`,
-        [run.id, JSON.stringify(output ?? null)],
-      );
-      await em.query(`UPDATE jobs SET attempts = 1 WHERE id = $1`, [job.id]);
-      return true;
+      return this.saveCheckpoint(em, job, run, output);
     });
-    if (due) job.attempts = 1;
-    return due;
+    if (saved) job.attempts = 0;
+    return saved;
   }
 
   /** Повертає задачу в чергу до `runAt` без lease і без зарахованої спроби. */

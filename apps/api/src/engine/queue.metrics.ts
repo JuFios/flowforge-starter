@@ -92,10 +92,11 @@ export class QueueMetrics {
     type: StepDefinition['type'],
     outcome: 'succeeded' | 'failed',
     startedAtMs: number,
+    finishedAtMs = Date.now(),
   ): void {
     this.stepDuration.observe(
       { type, outcome },
-      (Date.now() - startedAtMs) / 1000,
+      Math.max(0, finishedAtMs - startedAtMs) / 1000,
     );
   }
 

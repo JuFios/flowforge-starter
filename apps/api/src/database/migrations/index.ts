@@ -9,6 +9,7 @@ import { StepIdempotencyKey1794950965096 } from './1794950965096-StepIdempotency
 import { JobFinishedAt1794989523846 } from './1794989523846-JobFinishedAt';
 import { RunIdempotencyKey1794993774584 } from './1794993774584-RunIdempotencyKey';
 import { HistoryIndexes1794993930872 } from './1794993930872-HistoryIndexes';
+import { RecoverCheckpoints1795000000000 } from './1795000000000-RecoverCheckpoints';
 
 /**
  * Явний перелік міграцій у порядку застосування. Без glob-шаблонів, щоб однаково
@@ -27,4 +28,5 @@ export const MIGRATIONS = [
   JobFinishedAt1794989523846,
   RunIdempotencyKey1794993774584,
   HistoryIndexes1794993930872,
+  RecoverCheckpoints1795000000000,
 ];

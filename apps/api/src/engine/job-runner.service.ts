@@ -408,6 +408,7 @@ export class JobRunnerService implements BeforeApplicationShutdown {
     const ctx: StepContext = { input: execution.input, steps: {} };
     /** Крок, що виконується зараз (для запису провалу). */
     let current: StepRun | undefined;
+    let delayAttemptStartedAt: number | undefined;
     let finalOutput: unknown;
     try {
       // Знімок версії, зафіксований під час створення виконання, а не поточний стан workflow.
@@ -422,12 +423,15 @@ export class JobRunnerService implements BeforeApplicationShutdown {
       const snapshot = await this.versions.findOneByOrFail({
         id: execution.workflowVersionId,
       });
-      const runs = new Map(
-        (await this.checkpoints.load(execution.id)).map((r) => [
-          r.stepIndex,
-          r,
-        ]),
-      );
+      const history = await this.checkpoints.load(execution.id);
+      if (
+        history.some((run) => snapshot.steps[run.stepIndex]?.id !== run.stepId)
+      )
+        throw new StepError(
+          'checkpoint does not match the workflow version',
+          false,
+        );
+      const runs = new Map(history.map((run) => [run.stepIndex, run]));
       for (let i = 0; i < snapshot.steps.length; i++) {
         const step = snapshot.steps[i];
         const previous = runs.get(i);
@@ -439,18 +443,12 @@ export class JobRunnerService implements BeforeApplicationShutdown {
         keeper.assertActive();
         if (step.type === 'delay') {
           const output = { waitedMs: step.ms };
-          if (previous?.wakeAt) {
-            // Пауза вже почалась раніше: завершуємо її, лише коли настав збережений момент.
-            current = previous;
-            if (!(await this.checkpoints.wakeIfDue(job, previous, output)))
-              return;
-            current = undefined;
-            ctx.steps[step.id] = output;
-            continue;
-          }
-          const run = await this.checkpoints.startStep(job, i, step.id);
-          if (step.ms > 0) {
-            const wakeAt = await this.checkpoints.park(job, run, step.ms);
+          delayAttemptStartedAt = Date.now();
+          current = previous?.wakeAt
+            ? previous
+            : await this.checkpoints.startStep(job, i, step.id);
+          if (!current.wakeAt && step.ms > 0) {
+            const wakeAt = await this.checkpoints.park(job, current, step.ms);
             this.logger.log(
               {
                 jobId: job.id,
@@ -462,10 +460,19 @@ export class JobRunnerService implements BeforeApplicationShutdown {
             );
             return;
           }
-          current = run;
-          await this.checkpoints.checkpoint(job, run, output);
+          const saved = current.wakeAt
+            ? await this.checkpoints.wakeIfDue(job, current, output)
+            : await this.checkpoints.checkpoint(job, current, output);
+          if (!saved) return;
+          this.metrics.observeStep(
+            'delay',
+            'succeeded',
+            current.startedAt.getTime(),
+            saved.finishedAt.getTime(),
+          );
+          ctx.steps[step.id] = saved.output;
           current = undefined;
-          ctx.steps[step.id] = output;
+          delayAttemptStartedAt = undefined;
           continue;
         }
         current = await this.checkpoints.startStep(job, i, step.id);
@@ -483,11 +490,8 @@ export class JobRunnerService implements BeforeApplicationShutdown {
         }
         this.metrics.observeStep(step.type, 'succeeded', startedAt);
         // Далі — збережене значення (як і після відновлення з чекпоінта), а не сирий результат.
-        ctx.steps[step.id] = await this.checkpoints.checkpoint(
-          job,
-          current,
-          output,
-        );
+        const saved = await this.checkpoints.checkpoint(job, current, output);
+        ctx.steps[step.id] = saved.output;
         current = undefined;
       }
       const last = snapshot.steps[snapshot.steps.length - 1];
@@ -511,6 +515,8 @@ export class JobRunnerService implements BeforeApplicationShutdown {
         );
         return;
       }
+      if (current && delayAttemptStartedAt !== undefined)
+        this.metrics.observeStep('delay', 'failed', delayAttemptStartedAt);
       this.metrics.observeFailure(outcome, 'step_error');
       this.logger.warn(
         {

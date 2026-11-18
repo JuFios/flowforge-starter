@@ -221,8 +221,13 @@ export class JobQueueService {
    */
   async completeIn(em: EntityManager, job: Job): Promise<void> {
     await this.assertLease(em, job);
+    await this.markLockedJobDone(em, job);
+  }
+
+  /** Викликач уже заблокував рядок через assertLease або вибірку прострочених задач. */
+  private async markLockedJobDone(em: EntityManager, job: Job): Promise<void> {
     await em.query(
-      `UPDATE jobs SET status = 'done', "lockedBy" = NULL, "lockedUntil" = NULL, "lockToken" = NULL,
+      `UPDATE jobs SET status = 'done', attempts = GREATEST(attempts, 1), "lockedBy" = NULL, "lockedUntil" = NULL, "lockToken" = NULL,
                        "finishedAt" = now()
         WHERE id = $1`,
       [job.id],
@@ -325,6 +330,10 @@ export class JobQueueService {
         WHERE e.id = $1 AND v.id = e."workflowVersionId"
           AND last."executionId" = e.id AND last."stepIndex" = jsonb_array_length(v.steps) - 1
           AND NOT EXISTS (
+            SELECT FROM step_runs r WHERE r."executionId" = e.id
+              AND (r."stepIndex" < 0 OR r."stepIndex" >= jsonb_array_length(v.steps))
+          )
+          AND NOT EXISTS (
             SELECT FROM jsonb_array_elements(v.steps) WITH ORDINALITY AS step(definition, n)
              WHERE NOT EXISTS (
                SELECT FROM step_runs r WHERE r."executionId" = e.id AND r."stepIndex" = step.n - 1
@@ -334,7 +343,7 @@ export class JobQueueService {
       [job.executionId],
     );
     if (!finished) return false;
-    await this.completeIn(em, job);
+    await this.markLockedJobDone(em, job);
     return true;
   }
 
