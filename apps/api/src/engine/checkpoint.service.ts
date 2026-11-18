@@ -127,6 +127,11 @@ export class CheckpointService {
   /**
    * Спроба провалилась: стан кроку, задачі (повтор із backoff або кінець) і, якщо повторів не
    * буде, виконання — в одній транзакції.
+   *
+   * Стан береться з БД під блокуванням задачі, а не з того, що встиг отримати воркер: COMMIT
+   * попередньої транзакції (startStep, чекпоінт) міг відбутися, хоча драйвер повернув помилку.
+   * Блокування чекає на її результат і перевіряє, що lease досі наш, тож рядки кроків виконання
+   * змінює лише ця спроба.
    */
   async fail(
     job: Job,
@@ -138,21 +143,21 @@ export class CheckpointService {
     // Текст помилки кроку може містити дані тенанта чи отримувача (напр., U+0000).
     error = toStorableText(error);
     return this.ds.transaction(async (em) => {
+      const locked = await this.queue.assertLease(em, job);
       if (run) {
-        // COMMIT чекпоінта міг відбутися, хоча драйвер отримав помилку. Блокування задачі
-        // чекає на результат попередньої транзакції і перевіряє, що lease досі наш.
-        await this.queue.assertLease(em, job);
         const persisted = await em.findOneByOrFail(StepRun, { id: run.id });
         if (persisted.status === 'succeeded') {
           await this.release(em, job);
           return 'checkpointed';
         }
-        await em.query(
-          `UPDATE step_runs SET status = 'failed', error = $2, "finishedAt" = now()
-            WHERE id = $1 AND status = 'running'`,
-          [run.id, error],
-        );
       }
+      // Крок, розпочатий цією спробою, — і тоді, коли відповідь startStep загубилася і воркер
+      // його не знає (`run` = undefined). Кроки виконуються по черзі: такий рядок щонайбільше один.
+      await em.query(
+        `UPDATE step_runs SET status = 'failed', error = $2, "finishedAt" = now()
+          WHERE "executionId" = $1 AND status = 'running'`,
+        [job.executionId, error],
+      );
       const outcome = await this.queue.failIn(
         em,
         job,
@@ -161,9 +166,10 @@ export class CheckpointService {
         retryAfterMs,
       );
       if (outcome !== 'retry') {
+        // Лічильник спроб — із БД: відповідь startStep, що зарахувала спробу, могла загубитися.
         const final =
           outcome === 'dead'
-            ? `${error}; no attempts left (${job.attempts}/${job.maxAttempts})`
+            ? `${error}; no attempts left (${locked.attempts}/${locked.maxAttempts})`
             : error;
         await em.query(
           `UPDATE executions SET status = 'failed', error = $2, "finishedAt" = now() WHERE id = $1`,
