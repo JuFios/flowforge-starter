@@ -70,6 +70,23 @@ describe('a job whose worker vanished', () => {
     worker = await startWorker(1);
     others.push(await startWorker(2));
 
+    // Поки крок триває, у БД видно продовження lease: той самий lockToken, lockedUntil зсувається.
+    const leases = new Set<string>();
+    const tokens = new Set<string>();
+    await waitFor('the job to be claimed', async () => {
+      const job = await ds.getRepository(Job).findOneBy({ executionId: id });
+      return job?.status === 'running';
+    });
+    for (;;) {
+      const job = await ds
+        .getRepository(Job)
+        .findOneByOrFail({ executionId: id });
+      if (job.status !== 'running') break;
+      leases.add(job.lockedUntil!.toISOString());
+      tokens.add(job.lockToken!);
+      await sleep(100);
+    }
+
     await waitFor(
       'the slow execution to succeed',
       async () =>
@@ -82,6 +99,9 @@ describe('a job whose worker vanished', () => {
       .getRepository(Job)
       .findOneByOrFail({ executionId: id });
     expect(job.attempts).toBe(1);
+    // Крок утричі довший за lease: щонайменше два продовження, і жодного нового захоплення.
+    expect(leases.size).toBeGreaterThanOrEqual(3);
+    expect(tokens.size).toBe(1);
   });
 
   it('does not let a worker whose lease was taken over record the outcome', async () => {

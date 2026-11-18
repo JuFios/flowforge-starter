@@ -80,7 +80,22 @@ describe('queue metrics on the worker /metrics endpoint', () => {
       return rows.every((r) => ['succeeded', 'failed'].includes(r.status));
     });
 
-    const text = await (await fetch(`${worker.baseUrl}/metrics`)).text();
+    // Лічильники оновлюються одразу після транзакції, що зафіксувала стан: чекаємо на сам факт у
+    // метриках (останні події кожного виконання), а не на час.
+    const metrics = async () =>
+      (await fetch(`${worker.baseUrl}/metrics`)).text();
+    await waitFor('the final events to reach the metrics', async () => {
+      const t = await metrics();
+      return (
+        sample(t, 'flowforge_jobs_dead_total{reason="step_error"}') === 1 &&
+        sample(t, 'flowforge_job_leases_expired_total') === 1 &&
+        sample(
+          t,
+          'flowforge_step_duration_seconds_count{type="http",outcome="succeeded"}',
+        ) === 1
+      );
+    });
+    const text = await metrics();
     expect(
       sample(text, 'flowforge_job_claim_latency_seconds_count'),
     ).toBeGreaterThanOrEqual(3);

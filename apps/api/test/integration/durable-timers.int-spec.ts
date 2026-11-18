@@ -62,16 +62,20 @@ describe('delay steps are durable timers', () => {
     workers.push(await startWorker(1));
 
     await waitFor(
-      'the quick execution to finish while the other one sleeps',
+      'the quick execution to finish',
       async () => (await execution(quick)).status === 'succeeded',
-      { timeoutMs: 1_500 },
     );
-    expect((await execution(sleeping)).status).not.toBe('succeeded');
-
     await waitFor(
       'the sleeping execution to wake up and finish',
       async () => (await execution(sleeping)).status === 'succeeded',
     );
+    // Факти з БД (один годинник): швидке виконання завершилось раніше, ніж пауза мала скінчитись,
+    // тобто єдиний слот був вільний, поки виконання з delay чекало.
+    const { wakeAt } = await ds
+      .getRepository(StepRun)
+      .findOneByOrFail({ executionId: sleeping, stepId: 'wait' });
+    const { finishedAt } = await execution(quick);
+    expect(finishedAt!.getTime()).toBeLessThan(wakeAt!.getTime());
   });
 
   it('wakes up at the original time after the worker is restarted', async () => {
@@ -80,12 +84,13 @@ describe('delay steps are durable timers', () => {
       { id: 'after', type: 'log', message: 'woke up' },
     ]);
     const first = await startWorker(1);
-    await waitFor('the delay step to start', async () =>
-      ds.getRepository(StepRun).existsBy({ executionId: id, stepId: 'wait' }),
+    const parked = async () =>
+      ds.getRepository(StepRun).findOneBy({ executionId: id, stepId: 'wait' });
+    await waitFor(
+      'the delay step to be parked',
+      async () => (await parked())?.wakeAt != null,
     );
-    const { startedAt } = await ds
-      .getRepository(StepRun)
-      .findOneByOrFail({ executionId: id, stepId: 'wait' });
+    const before = (await parked())!;
     // Перезапуск воркера посеред паузи.
     await first.close();
     workers.push(await startWorker(1));
@@ -94,11 +99,17 @@ describe('delay steps are durable timers', () => {
       'the execution to finish after the restart',
       async () => (await execution(id)).status === 'succeeded',
     );
-    const { finishedAt } = await execution(id);
-    const waited = finishedAt!.getTime() - startedAt.getTime();
-    // Не раніше за заявлену паузу і без відліку заново після перезапуску.
-    expect(waited).toBeGreaterThanOrEqual(2_500);
-    expect(waited).toBeLessThan(3_500);
+    const after = (await parked())!;
+    // Факти з БД: момент пробудження зафіксовано один раз на початку паузи (now() + ms) і
+    // перезапуск його не зсунув; крок завершився не раніше за нього.
+    expect(after.wakeAt).toEqual(before.wakeAt);
+    const planned = before.wakeAt!.getTime() - before.startedAt.getTime();
+    expect(planned).toBeGreaterThanOrEqual(2_500);
+    expect(planned).toBeLessThan(2_500 + 1_000);
+    expect(after.finishedAt!.getTime()).toBeGreaterThanOrEqual(
+      before.wakeAt!.getTime(),
+    );
+    expect(after.attempts).toBe(1);
   });
 
   it('parks the job again when it is picked up before the wake-up time', async () => {

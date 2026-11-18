@@ -113,7 +113,12 @@ describe('worker graceful shutdown', () => {
       lockedBy: null,
       lockedUntil: null,
     });
-    expect(job.runAt.getTime()).toBeLessThanOrEqual(Date.now());
+    // Готова до захоплення одразу — за годинником БД, як і вся черга.
+    const [{ ready }]: Array<{ ready: boolean }> = await ds.query(
+      `SELECT "runAt" <= now() AS ready FROM jobs WHERE id = $1`,
+      [job.id],
+    );
+    expect(ready).toBe(true);
     expect(
       (await ds.getRepository(Execution).findOneByOrFail({ id })).status,
     ).not.toBe('failed');
