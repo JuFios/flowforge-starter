@@ -101,4 +101,39 @@ describe('http step error classification', () => {
       retryable: false,
     });
   });
+
+  it('fails at once with an explanation when the url is invalid after substitution', async () => {
+    const fetchSpy = jest.spyOn(globalThis, 'fetch');
+    const failure = executor.execute(
+      { id: 'call', type: 'http', url: 'http://{{ input.host }}/x' },
+      { input: { host: 'a b' }, steps: {} },
+    );
+    await expect(failure).rejects.toMatchObject({
+      message: 'http url is invalid after template substitution',
+      retryable: false,
+    });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('fails at once when the substituted url is longer than the url limit', async () => {
+    const failure = executor.execute(
+      { id: 'call', type: 'http', url: 'https://example.com/{{ input.path }}' },
+      { input: { path: 'a'.repeat(2048) }, steps: {} },
+    );
+    await expect(failure).rejects.toMatchObject({
+      message: 'http url is invalid after template substitution',
+      retryable: false,
+    });
+  });
+
+  it('fails at once when the substitution turns the url into a non-http scheme', async () => {
+    const failure = executor.execute(
+      { id: 'call', type: 'http', url: '{{ input.url }}' },
+      { input: { url: 'file:///etc/passwd' }, steps: {} },
+    );
+    await expect(failure).rejects.toMatchObject({
+      message: 'http url is invalid after template substitution',
+      retryable: false,
+    });
+  });
 });

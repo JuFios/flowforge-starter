@@ -36,7 +36,10 @@ describe('retries and the attempt limit', () => {
     await ds.destroy();
   });
 
-  async function start(steps: unknown[]): Promise<string> {
+  async function start(
+    steps: unknown[],
+    input: Record<string, unknown> = {},
+  ): Promise<string> {
     const wf = await api<{ id: string }>(
       apiApp.baseUrl,
       apiKey,
@@ -49,7 +52,7 @@ describe('retries and the attempt limit', () => {
       apiKey,
       'POST',
       `/workflows/${wf.body.id}/run`,
-      {},
+      input,
     );
     return run.body.id;
   }
@@ -99,6 +102,25 @@ describe('retries and the attempt limit', () => {
     expect(
       await ds.getRepository(Job).findOneByOrFail({ executionId: id }),
     ).toMatchObject({ status: 'failed', attempts: 1 });
+  });
+
+  it('fails at once when the input turns the url into an invalid one', async () => {
+    const id = await start(
+      [{ id: 'call', type: 'http', url: 'http://{{ input.host }}/hook' }],
+      { host: 'receiver with spaces' },
+    );
+    worker = await startWorker(1);
+    await finished(id);
+
+    expect(
+      await ds.getRepository(Job).findOneByOrFail({ executionId: id }),
+    ).toMatchObject({ status: 'failed', attempts: 1 });
+    expect(
+      await ds.getRepository(Execution).findOneByOrFail({ id }),
+    ).toMatchObject({
+      status: 'failed',
+      error: 'http url is invalid after template substitution',
+    });
   });
 
   it('gives each step its own attempt budget', async () => {
