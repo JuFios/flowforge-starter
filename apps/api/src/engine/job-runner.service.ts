@@ -13,6 +13,7 @@ import {
 import { toSafeError } from '../observability/safe-error';
 import { CheckpointService } from './checkpoint.service';
 import {
+  backoffMs,
   ClaimedJob,
   JobQueueService,
   LeaseLostError,
@@ -35,6 +36,12 @@ const INTERNAL_STEP_ERROR = 'internal error while running the step';
 /** Скільки після скасування кроків чекаємо, поки задачі повернуться в чергу. */
 const RELEASE_WAIT_MS = 5_000;
 
+/**
+ * Відступ після невдалого захоплення (БД недоступна): експоненційний, з jitter, від 1 с до 30 с.
+ * Спільний для всіх циклів воркера, тож навіть 64 цикли дають одну перевірку БД і один рядок логу.
+ */
+const CLAIM_BACKOFF = { baseMs: 1_000, maxMs: 30_000 };
+
 @Injectable()
 export class JobRunnerService implements BeforeApplicationShutdown {
   private readonly logger = new Logger(JobRunnerService.name);
@@ -47,6 +54,12 @@ export class JobRunnerService implements BeforeApplicationShutdown {
     { keeper: LeaseKeeper; done: Promise<void> }
   >();
   private reaper?: NodeJS.Timeout;
+  /** Невдалі захоплення поспіль (спільно для всіх циклів); 0 — захоплення працює. */
+  private claimFailures = 0;
+  /** До цього моменту (Date.now()) цикли не захоплюють задач після невдалого захоплення. */
+  private claimRetryAt = 0;
+  /** Один цикл уже перевіряє, чи БД відновилась; решта чекають на результат. */
+  private claimProbe = false;
 
   constructor(
     private readonly queue: JobQueueService,
@@ -155,15 +168,8 @@ export class JobRunnerService implements BeforeApplicationShutdown {
 
   private async loop(): Promise<void> {
     while (!this.stopping.signal.aborted) {
-      let job: ClaimedJob | null;
-      try {
-        job = await this.queue.claimNext(this.workerId);
-      } catch (err) {
-        // Задачі ще немає, тож і кореляційного контексту теж.
-        this.logger.error({ error: toSafeError(err) }, 'job claim failed');
-        await this.pause(1000);
-        continue;
-      }
+      const job = await this.claim();
+      if (job === undefined) continue;
       if (!job) {
         await this.idle();
         continue;
@@ -175,6 +181,59 @@ export class JobRunnerService implements BeforeApplicationShutdown {
         // Уже залоговано в process() — у контексті задачі; лише пауза перед наступною.
         await this.pause(1000);
       }
+    }
+  }
+
+  /**
+   * Захоплює наступну задачу з урахуванням спільного відступу після збоїв. null — черга порожня,
+   * undefined — задачу не захоплено (відступ, збій або завершення воркера), цикл іде на наступне коло.
+   */
+  private async claim(): Promise<ClaimedJob | null | undefined> {
+    let probe = false;
+    if (this.claimFailures > 0) {
+      const wait = this.claimRetryAt - Date.now();
+      // Під час перевірки іншим циклом — коротка пауза опитування, а не холостий цикл.
+      if (wait > 0 || this.claimProbe) {
+        await this.pause(
+          Math.max(
+            wait,
+            this.config.get('WORKER_POLL_INTERVAL_MS', { infer: true }),
+          ),
+        );
+        return undefined;
+      }
+      this.claimProbe = probe = true;
+    }
+    try {
+      const job = await this.queue.claimNext(this.workerId);
+      if (this.claimFailures > 0) {
+        this.logger.log(
+          { consecutiveFailures: this.claimFailures },
+          'job claim recovered',
+        );
+        this.claimFailures = 0;
+      }
+      return job;
+    } catch (err) {
+      // Збій під час уже запланованого відступу — той самий збій, що його спричинив (цикли
+      // почали захоплення одночасно): не рахуємо й не логуємо вдруге.
+      if (probe || Date.now() >= this.claimRetryAt) {
+        this.claimFailures += 1;
+        const retryInMs = backoffMs(this.claimFailures, CLAIM_BACKOFF);
+        this.claimRetryAt = Date.now() + retryInMs;
+        // Задачі ще немає, тож і кореляційного контексту теж.
+        this.logger.error(
+          {
+            error: toSafeError(err),
+            consecutiveFailures: this.claimFailures,
+            retryInMs,
+          },
+          'job claim failed',
+        );
+      }
+      return undefined;
+    } finally {
+      if (probe) this.claimProbe = false;
     }
   }
 
