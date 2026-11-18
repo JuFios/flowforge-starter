@@ -1,0 +1,167 @@
+import 'reflect-metadata';
+import { createHash, createHmac, pbkdf2Sync, randomBytes } from 'node:crypto';
+import { DataSource } from 'typeorm';
+import { API_ROLE, SYSTEM_ROLE, WORKER_ROLE } from '../tenancy/roles';
+import { loadDotEnvIfPresent } from './cli-env';
+import { buildDataSourceOptions } from './database.options';
+import { validateDatabaseEnv } from '../config/env.validation';
+
+/** Ітерацій PBKDF2 у SCRAM verifier — як `scram_iterations` Postgres за замовчуванням. */
+export const SCRAM_ITERATIONS = 4096;
+
+/** Ім'я login-ролі: звичайний ідентифікатор Postgres без лапок. */
+const ROLE_NAME = /^[a-z_][a-z0-9_]{0,62}$/;
+/**
+ * Пароль: лише латинські літери й цифри (потрапляє в URL підключення без екранування; SASLprep для
+ * такого набору нічого не змінює), щонайменше 24 символи.
+ */
+const PASSWORD = /^[A-Za-z0-9]{24,256}$/;
+
+export interface LoginRole {
+  user: string;
+  password: string;
+  /** Групова роль процесу: API_ROLE або WORKER_ROLE. */
+  group: typeof API_ROLE | typeof WORKER_ROLE;
+}
+
+/**
+ * SCRAM-SHA-256 verifier пароля (RFC 7677; формат `pg_authid.rolpassword`), обчислений на клієнті —
+ * як це робить `psql \password`. На сервер іде лише verifier, тож пароль у відкритому вигляді не
+ * потрапляє ні в лог Postgres, ні в `pg_stat_statements`.
+ */
+export function scramVerifier(
+  password: string,
+  salt: Buffer = randomBytes(16),
+  iterations = SCRAM_ITERATIONS,
+): string {
+  const salted = pbkdf2Sync(password, salt, iterations, 32, 'sha256');
+  const clientKey = createHmac('sha256', salted).update('Client Key').digest();
+  const storedKey = createHash('sha256').update(clientKey).digest();
+  const serverKey = createHmac('sha256', salted).update('Server Key').digest();
+  return `SCRAM-SHA-256$${iterations}:${salt.toString('base64')}$${storedKey.toString('base64')}:${serverKey.toString('base64')}`;
+}
+
+export function validateLoginRole(role: LoginRole): void {
+  if (!ROLE_NAME.test(role.user))
+    throw new Error(
+      `invalid database role name for ${role.group}: use lowercase letters, digits and _`,
+    );
+  if (!PASSWORD.test(role.password))
+    throw new Error(
+      `invalid password for the database role ${role.user}: 24..256 letters and digits (e.g. openssl rand -hex 24)`,
+    );
+}
+
+type Query = (sql: string, params?: unknown[]) => Promise<unknown>;
+
+/**
+ * Створює або оновлює login-ролі процесів (ідемпотентно): роль без суперкористувача й BYPASSRLS,
+ * член лише своєї групової ролі, з правом підключення лише до цієї БД. Пароль — SCRAM verifier.
+ * Відмовляється керувати суперкористувачем, власником схеми чи службовими груповими ролями.
+ */
+export async function provisionLoginRoles(
+  query: Query,
+  roles: LoginRole[],
+): Promise<void> {
+  const users = new Set<string>();
+  for (const role of roles) {
+    validateLoginRole(role);
+    if (users.has(role.user))
+      throw new Error(
+        'API and worker must use different database roles (least privilege per process)',
+      );
+    users.add(role.user);
+  }
+  const [{ superuser, database }] = (await query(
+    `SELECT r.rolsuper AS superuser, current_database() AS database
+       FROM pg_roles r WHERE r.rolname = current_user`,
+  )) as Array<{ superuser: boolean; database: string }>;
+  if (!superuser)
+    throw new Error('db:provision must run as a PostgreSQL superuser');
+
+  for (const role of roles) {
+    const [existing] = (await query(
+      `SELECT r.rolsuper AS superuser, r.rolname = current_user AS self,
+              r.rolname = ANY ($2) AS reserved
+         FROM pg_roles r WHERE r.rolname = $1`,
+      [role.user, [API_ROLE, WORKER_ROLE, SYSTEM_ROLE]],
+    )) as Array<{ superuser: boolean; self: boolean; reserved: boolean }>;
+    if (existing && (existing.superuser || existing.self || existing.reserved))
+      throw new Error(
+        `refusing to manage ${role.user}: it is a superuser, the schema owner or a group role`,
+      );
+    const attributes = `LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION INHERIT PASSWORD '${scramVerifier(role.password)}'`;
+    await query(
+      existing
+        ? `ALTER ROLE "${role.user}" ${attributes}`
+        : `CREATE ROLE "${role.user}" ${attributes}`,
+    );
+    // Лише своя групова роль: роль іншого процесу чи системна — відкликаються, якщо були.
+    for (const other of [API_ROLE, WORKER_ROLE, SYSTEM_ROLE])
+      if (other !== role.group)
+        await query(`REVOKE ${other} FROM "${role.user}"`);
+    await query(`GRANT ${role.group} TO "${role.user}"`);
+  }
+  const db = `"${database.replace(/"/g, '""')}"`;
+  await query(`REVOKE CONNECT ON DATABASE ${db} FROM PUBLIC`);
+  for (const role of roles)
+    await query(`GRANT CONNECT ON DATABASE ${db} TO "${role.user}"`);
+}
+
+/** Login-ролі процесів з оточення `migrate` (compose) або локального запуску. */
+export function loginRolesFromEnv(env: NodeJS.ProcessEnv): LoginRole[] {
+  const required = (name: string): string => {
+    const value = env[name];
+    if (!value) throw new Error(`${name} is required for db:provision`);
+    return value;
+  };
+  return [
+    {
+      user: env.API_DB_USER ?? 'flowforge_api',
+      password: required('API_DB_PASSWORD'),
+      group: API_ROLE,
+    },
+    {
+      user: env.WORKER_DB_USER ?? 'flowforge_worker',
+      password: required('WORKER_DB_PASSWORD'),
+      group: WORKER_ROLE,
+    },
+  ];
+}
+
+/** `npm run db:provision`: після migration:run, тим самим власником схеми. */
+async function main(): Promise<void> {
+  loadDotEnvIfPresent();
+  const url = process.env.MIGRATION_DATABASE_URL;
+  if (!url)
+    throw new Error(
+      'MIGRATION_DATABASE_URL is required for db:provision: the URL of the schema owner',
+    );
+  const roles = loginRolesFromEnv(process.env);
+  const ds = await new DataSource(
+    buildDataSourceOptions(
+      validateDatabaseEnv({ ...process.env, DATABASE_URL: url }),
+      { statementTimeout: false },
+    ),
+  ).initialize();
+  try {
+    await ds.transaction((em) =>
+      provisionLoginRoles((sql, params) => em.query(sql, params), roles),
+    );
+  } finally {
+    await ds.destroy();
+  }
+  console.log(
+    `database roles provisioned: ${roles.map((r) => r.user).join(', ')}`,
+  );
+}
+
+if (require.main === module)
+  main().catch((err: unknown) => {
+    // Лише повідомлення: без стеку й параметрів (у них не буває паролів, але і зайвого не друкуємо).
+    console.error(
+      'db:provision failed:',
+      err instanceof Error ? err.message : 'unknown error',
+    );
+    process.exit(1);
+  });

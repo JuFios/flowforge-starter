@@ -1,7 +1,16 @@
 import 'reflect-metadata';
 import { DataSource } from 'typeorm';
 import { buildDataSourceOptions } from '../../src/database/database.options';
-import { testDatabaseEnv, testDatabaseUrl } from './test-env';
+import { provisionLoginRoles } from '../../src/database/provision';
+import { API_ROLE, WORKER_ROLE } from '../../src/tenancy/roles';
+import {
+  TEST_API_DB_PASSWORD,
+  TEST_API_DB_USER,
+  TEST_WORKER_DB_PASSWORD,
+  TEST_WORKER_DB_USER,
+  testDatabaseEnv,
+  testDatabaseUrl,
+} from './test-env';
 
 async function ensureDatabaseExists(url: string): Promise<void> {
   const target = new URL(url);
@@ -26,7 +35,8 @@ async function ensureDatabaseExists(url: string): Promise<void> {
 
 /**
  * Один раз перед усіма інтеграційними тестами: тестова БД очищається повністю
- * і схема будується лише міграціями — так кожен прогін перевіряє міграції з нуля.
+ * і схема будується лише міграціями — так кожен прогін перевіряє міграції з нуля. Підключення —
+ * власником схеми (суперкористувачем), як крок міграцій у compose.
  */
 export default async function globalSetup(): Promise<void> {
   const url = testDatabaseUrl();
@@ -40,6 +50,22 @@ export default async function globalSetup(): Promise<void> {
     await ds.query('DROP SCHEMA IF EXISTS public CASCADE');
     await ds.query('CREATE SCHEMA public');
     await ds.runMigrations({ transaction: 'each' });
+    // Як db:provision у compose: застосунок у тестах ходить runtime-ролями без BYPASSRLS.
+    await provisionLoginRoles(
+      (sql, params) => ds.query(sql, params),
+      [
+        {
+          user: TEST_API_DB_USER,
+          password: TEST_API_DB_PASSWORD,
+          group: API_ROLE,
+        },
+        {
+          user: TEST_WORKER_DB_USER,
+          password: TEST_WORKER_DB_PASSWORD,
+          group: WORKER_ROLE,
+        },
+      ],
+    );
   } finally {
     await ds.destroy();
   }

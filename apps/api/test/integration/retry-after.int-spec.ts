@@ -36,7 +36,9 @@ describe('Retry-After on 429 and 503', () => {
             VALUES (NEW.id, EXTRACT(EPOCH FROM NEW."runAt" - now()) * 1000);
         END IF;
         RETURN NEW;
-      END $$ LANGUAGE plpgsql;
+      END $$ LANGUAGE plpgsql
+      -- Тригер спрацьовує в транзакції воркера (роль без прав на службову таблицю тесту).
+      SECURITY DEFINER SET search_path = pg_catalog, public;
       DROP TRIGGER IF EXISTS test_record_retry_delay ON jobs;
       CREATE TRIGGER test_record_retry_delay AFTER UPDATE ON jobs
         FOR EACH ROW EXECUTE FUNCTION test_record_retry_delay();`);

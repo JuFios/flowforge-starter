@@ -4,6 +4,7 @@ import { createServer } from 'node:net';
 import type { AddressInfo } from 'node:net';
 import { join } from 'node:path';
 import { DataSource } from 'typeorm';
+import { testWorkerDatabaseUrl } from '../helpers/test-env';
 import { AppModule } from '../../src/app.module';
 import { Execution, Job, StepRun } from '../../src/entities';
 import { RunningApp, startApp } from '../helpers/app';
@@ -58,6 +59,8 @@ describe('a worker killed in the middle of a step', () => {
     child = spawn(process.execPath, [WORKER_ENTRY], {
       env: {
         ...process.env,
+        // Окремий процес воркера — з роллю воркера, як у compose.
+        DATABASE_URL: testWorkerDatabaseUrl(),
         WORKER_HTTP_PORT: String(await freePort()),
         WORKER_CONCURRENCY: '1',
       },

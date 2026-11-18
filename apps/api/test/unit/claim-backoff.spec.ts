@@ -1,13 +1,13 @@
 import { Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { QueryFailedError, Repository } from 'typeorm';
+import { QueryFailedError } from 'typeorm';
 import { EnvironmentVariables } from '../../src/config/env.validation';
 import { CheckpointService } from '../../src/engine/checkpoint.service';
 import { JobQueueService } from '../../src/engine/job-queue.service';
 import { JobRunnerService } from '../../src/engine/job-runner.service';
 import { QueueMetrics } from '../../src/engine/queue.metrics';
 import { StepExecutor } from '../../src/engine/step-executor';
-import { Execution, WorkflowVersion } from '../../src/entities';
+import { fakeTenantDb } from '../helpers/fake-tenant-db';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -59,8 +59,7 @@ describe('worker backs off when claiming jobs fails', () => {
         reapExpired: jest.fn().mockResolvedValue([]),
       } as unknown as JobQueueService,
       {} as StepExecutor,
-      {} as Repository<Execution>,
-      {} as Repository<WorkflowVersion>,
+      fakeTenantDb(),
       {} as CheckpointService,
       {
         get: (key: keyof EnvironmentVariables) => values[key],

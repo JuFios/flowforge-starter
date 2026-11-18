@@ -2,9 +2,13 @@ import {
   Column,
   CreateDateColumn,
   Entity,
+  JoinColumn,
+  ManyToOne,
   PrimaryGeneratedColumn,
   Unique,
 } from 'typeorm';
+import { Tenant } from './tenant.entity';
+import { TENANT_ID_DEFAULT } from './tenant-column';
 import type { StepDefinition } from './workflow.entity';
 
 /**
@@ -15,6 +19,8 @@ import type { StepDefinition } from './workflow.entity';
  */
 @Entity('workflow_versions')
 @Unique('UQ_workflow_versions_workflow_version', ['workflowId', 'version'])
+// Ціль композитного FK з executions: виконання посилається лише на знімок свого тенанта.
+@Unique('UQ_workflow_versions_id_tenant', ['id', 'tenantId'])
 export class WorkflowVersion {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -22,8 +28,15 @@ export class WorkflowVersion {
   @Column('uuid')
   workflowId: string;
 
-  @Column('uuid')
+  @Column({ type: 'uuid', default: TENANT_ID_DEFAULT })
   tenantId: string;
+
+  @ManyToOne(() => Tenant, { onDelete: 'NO ACTION' })
+  @JoinColumn({
+    name: 'tenantId',
+    foreignKeyConstraintName: 'FK_workflow_versions_tenant',
+  })
+  tenant?: Tenant;
 
   @Column('int')
   version: number;

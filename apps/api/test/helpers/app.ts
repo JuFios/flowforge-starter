@@ -5,8 +5,10 @@ import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { AppModule } from '../../src/app.module';
 import { configureApp } from '../../src/bootstrap';
+import { RUNTIME_DATABASE_URL } from '../../src/database/runtime-database-url';
 import { buildPinoHttpOptions } from '../../src/observability/logger.options';
 import { jsonLineSink } from './json-log-sink';
+import { testWorkerDatabaseUrl } from './test-env';
 
 export interface RunningApp {
   app: INestApplication;
@@ -35,6 +37,12 @@ export async function startApp(
     ...extra,
     imports: [rootModule, ...(extra.imports ?? [])],
   });
+  // API і воркер у тестах живуть в одному процесі з одним DATABASE_URL (роль API); воркер, як і
+  // в compose, ходить у БД власною роллю.
+  if (rootModule.name === 'WorkerModule')
+    builder = builder
+      .overrideProvider(RUNTIME_DATABASE_URL)
+      .useValue(testWorkerDatabaseUrl());
   if (captureLogs) {
     const sink = jsonLineSink(logs);
     builder = builder

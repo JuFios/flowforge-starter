@@ -3,8 +3,12 @@ import {
   CreateDateColumn,
   Entity,
   Index,
+  JoinColumn,
+  ManyToOne,
   PrimaryGeneratedColumn,
 } from 'typeorm';
+import { Tenant } from './tenant.entity';
+import { TENANT_ID_DEFAULT } from './tenant-column';
 
 export type StepDefinition =
   | {
@@ -25,8 +29,15 @@ export class Workflow {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  @Column('uuid')
+  @Column({ type: 'uuid', default: TENANT_ID_DEFAULT })
   tenantId: string;
+
+  @ManyToOne(() => Tenant, { onDelete: 'NO ACTION' })
+  @JoinColumn({
+    name: 'tenantId',
+    foreignKeyConstraintName: 'FK_workflows_tenant',
+  })
+  tenant?: Tenant;
 
   @Column()
   name: string;

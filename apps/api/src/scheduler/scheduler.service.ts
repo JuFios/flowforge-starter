@@ -5,9 +5,7 @@ import {
   OnApplicationShutdown,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { InjectRepository } from '@nestjs/typeorm';
 import { parseExpression } from 'cron-parser';
-import { Repository } from 'typeorm';
 import { EnvironmentVariables } from '../config/env.validation';
 import { Workflow } from '../entities';
 import { ExecutionsService } from '../executions/executions.service';
@@ -16,6 +14,8 @@ import {
   runWithCorrelationId,
 } from '../observability/correlation';
 import { toSafeError } from '../observability/safe-error';
+import { SCHEDULE_PAGE, SystemDb } from '../tenancy/system-db';
+import { TenantDb } from '../tenancy/tenant-db';
 
 @Injectable()
 export class SchedulerService
@@ -26,8 +26,8 @@ export class SchedulerService
   private lastTick = new Date();
 
   constructor(
-    @InjectRepository(Workflow)
-    private readonly workflows: Repository<Workflow>,
+    private readonly system: SystemDb,
+    private readonly db: TenantDb,
     private readonly executions: ExecutionsService,
     private readonly config: ConfigService<EnvironmentVariables, true>,
   ) {}
@@ -52,10 +52,7 @@ export class SchedulerService
 
   /** Створює execution для кожного cron-спрацювання з моменту попереднього тіку. */
   async tick(now = new Date()): Promise<number> {
-    const scheduled = await this.workflows
-      .createQueryBuilder('w')
-      .where('w.enabled = true AND w.cron IS NOT NULL')
-      .getMany();
+    const scheduled = await this.scheduledWorkflows();
 
     let fired = 0;
     for (const wf of scheduled) {
@@ -82,6 +79,30 @@ export class SchedulerService
     }
     this.lastTick = now;
     return fired;
+  }
+
+  /**
+   * Усі увімкнені workflow з розкладом: ідентифікатори — сторінками SECURITY DEFINER-функції
+   * `scheduled_workflows` (keyset за id, до кінця), самі workflow — у контексті свого тенанта.
+   */
+  private async scheduledWorkflows(): Promise<Workflow[]> {
+    const result: Workflow[] = [];
+    let after: string | null = null;
+    for (;;) {
+      const page = await this.system.scheduledWorkflows(after, SCHEDULE_PAGE);
+      for (const { id, tenantId } of page) {
+        const wf = await this.db.run(tenantId, (em) =>
+          em.findOne(Workflow, {
+            where: { id, tenantId, enabled: true },
+          }),
+        );
+        if (wf?.cron) result.push(wf);
+      }
+      // Неповна сторінка — остання.
+      if (page.length < SCHEDULE_PAGE) break;
+      after = page[page.length - 1].id;
+    }
+    return result;
   }
 
   /**

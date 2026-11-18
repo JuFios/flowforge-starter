@@ -22,7 +22,8 @@
     "format:check": "prettier --check .",
     "chaos": "tsc -p scripts/tsconfig.json && node dist/scripts/chaos-kill-worker.js",
     "chaos:postgres": "tsc -p scripts/tsconfig.json && node dist/scripts/chaos-restart-postgres.js",
-    "chaos:sink:build": "tsc -p scripts/tsconfig.json"
+    "chaos:sink:build": "tsc -p scripts/tsconfig.json",
+    "db:provision": "node dist/database/provision.js"
   },
   "dependencies": {
     "@nestjs/common": "^10.3.0",

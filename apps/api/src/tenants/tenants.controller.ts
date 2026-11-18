@@ -6,19 +6,19 @@ import {
   Post,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { InjectRepository } from '@nestjs/typeorm';
-import { randomBytes, timingSafeEqual } from 'crypto';
-import { IsString, MinLength } from 'class-validator';
+import { randomBytes, randomUUID, timingSafeEqual } from 'crypto';
+import { IsString, MaxLength, MinLength } from 'class-validator';
 import { IsStorableText } from '../common/storable-text';
-import { Repository } from 'typeorm';
 import { hashApiKey } from '../auth/api-key.guard';
 import { EnvironmentVariables } from '../config/env.validation';
 import { Tenant } from '../entities';
+import { TenantDb } from '../tenancy/tenant-db';
 
 class CreateTenantDto {
   @IsString()
   @IsStorableText()
   @MinLength(2)
+  @MaxLength(200)
   name: string;
 }
 
@@ -31,7 +31,7 @@ function safeEqual(a: string, b: string): boolean {
 @Controller('tenants')
 export class TenantsController {
   constructor(
-    @InjectRepository(Tenant) private readonly tenants: Repository<Tenant>,
+    private readonly db: TenantDb,
     private readonly config: ConfigService<EnvironmentVariables, true>,
   ) {}
 
@@ -47,12 +47,18 @@ export class TenantsController {
     }
     const apiKey = `ff_${randomBytes(24).toString('hex')}`;
     const webhookSecret = randomBytes(24).toString('hex');
-    const tenant = await this.tenants.save(
-      this.tenants.create({
-        name: dto.name,
-        apiKeyHash: hashApiKey(apiKey),
-        webhookSecret,
-      }),
+    // Під RLS рядок тенанта видно й можна вставити лише в його власному контексті, тож id
+    // генерується тут, до вставки.
+    const id = randomUUID();
+    const tenant = await this.db.run(id, (em) =>
+      em.save(
+        em.create(Tenant, {
+          id,
+          name: dto.name,
+          apiKeyHash: hashApiKey(apiKey),
+          webhookSecret,
+        }),
+      ),
     );
     return { id: tenant.id, name: tenant.name, apiKey, webhookSecret };
   }

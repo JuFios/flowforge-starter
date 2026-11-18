@@ -7,9 +7,8 @@ import {
 } from '@nestjs/common';
 import { Counter } from 'prom-client';
 import { ConfigService } from '@nestjs/config';
-import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { EnvironmentVariables } from '../config/env.validation';
-import { DataSource, EntityManager, Repository } from 'typeorm';
+import { EntityManager } from 'typeorm';
 import {
   Execution,
   Job,
@@ -22,6 +21,7 @@ import {
   newCorrelationId,
 } from '../observability/correlation';
 import { MetricsService } from '../observability/metrics.service';
+import { TenantDb } from '../tenancy/tenant-db';
 
 @Injectable()
 export class ExecutionsService {
@@ -29,10 +29,7 @@ export class ExecutionsService {
   private readonly retried: Counter;
 
   constructor(
-    @InjectDataSource() private readonly ds: DataSource,
-    @InjectRepository(Execution)
-    private readonly executions: Repository<Execution>,
-    @InjectRepository(StepRun) private readonly stepRuns: Repository<StepRun>,
+    private readonly db: TenantDb,
     private readonly config: ConfigService<EnvironmentVariables, true>,
     metrics: MetricsService,
   ) {
@@ -76,9 +73,13 @@ export class ExecutionsService {
     idempotencyKey: string | null,
   ): Promise<{ execution: Execution; created: boolean }> {
     const correlationId = getCorrelationId() ?? newCorrelationId();
-    return this.ds.transaction(async (em) => {
+    return this.db.run(workflow.tenantId, async (em) => {
       const version = await em.findOneOrFail(WorkflowVersion, {
-        where: { workflowId: workflow.id, version: workflow.version },
+        where: {
+          workflowId: workflow.id,
+          version: workflow.version,
+          tenantId: workflow.tenantId,
+        },
         select: { id: true },
       });
       const fields = {
@@ -171,7 +172,7 @@ export class ExecutionsService {
    */
   async retry(tenantId: string, id: string): Promise<Execution> {
     const correlationId = getCorrelationId() ?? newCorrelationId();
-    const execution = await this.ds.transaction(async (em) => {
+    const execution = await this.db.run(tenantId, async (em) => {
       const [row]: Execution[] = await em.query(
         `SELECT * FROM executions WHERE id = $1 AND "tenantId" = $2 FOR UPDATE`,
         [id, tenantId],
@@ -186,13 +187,13 @@ export class ExecutionsService {
           'виконання створене до появи знімків версій workflow і не може бути повторене',
         );
       const [{ started }]: Array<{ started: boolean }> = await em.query(
-        `SELECT EXISTS (SELECT 1 FROM step_runs WHERE "executionId" = $1) AS started`,
-        [id],
+        `SELECT EXISTS (SELECT 1 FROM step_runs WHERE "executionId" = $1 AND "tenantId" = $2) AS started`,
+        [id, tenantId],
       );
       const [updated]: [Execution[], number] = await em.query(
         `UPDATE executions SET status = $2, error = NULL, output = NULL, "finishedAt" = NULL
-          WHERE id = $1 RETURNING *`,
-        [id, started ? 'running' : 'pending'],
+          WHERE id = $1 AND "tenantId" = $3 RETURNING *`,
+        [id, started ? 'running' : 'pending', tenantId],
       );
       const maxAttempts = this.config.get('JOB_MAX_ATTEMPTS', { infer: true });
       // Задача — та сама (завершена), або нова, якщо її вже видалило очищення (JOB_RETENTION_DAYS).
@@ -201,8 +202,8 @@ export class ExecutionsService {
             SET status = 'queued', attempts = 0, "maxAttempts" = $2, "runAt" = now(),
                 "lastError" = NULL, "finishedAt" = NULL, "correlationId" = $3,
                 "lockedBy" = NULL, "lockedUntil" = NULL, "lockToken" = NULL
-          WHERE "executionId" = $1 AND status IN ('done', 'failed', 'dead')`,
-        [id, maxAttempts, correlationId],
+          WHERE "executionId" = $1 AND "tenantId" = $4 AND status IN ('done', 'failed', 'dead')`,
+        [id, maxAttempts, correlationId, tenantId],
       );
       if (requeued === 0)
         await em.save(
@@ -224,11 +225,13 @@ export class ExecutionsService {
   }
 
   list(tenantId: string, limit = 50): Promise<Execution[]> {
-    return this.executions.find({
-      where: { tenantId },
-      order: { createdAt: 'DESC' },
-      take: Math.min(limit, 200),
-    });
+    return this.db.run(tenantId, (em) =>
+      em.find(Execution, {
+        where: { tenantId },
+        order: { createdAt: 'DESC' },
+        take: Math.min(limit, 200),
+      }),
+    );
   }
 
   /** Виконання тенанта разом із кроками; чуже виконання — 404, як неіснуюче. */
@@ -236,14 +239,16 @@ export class ExecutionsService {
     tenantId: string,
     id: string,
   ): Promise<Execution & { steps: StepRun[] }> {
-    const execution = await this.executions.findOne({
-      where: { id, tenantId },
+    return this.db.run(tenantId, async (em) => {
+      const execution = await em.findOne(Execution, {
+        where: { id, tenantId },
+      });
+      if (!execution) throw new NotFoundException('Execution не знайдено');
+      const steps = await em.find(StepRun, {
+        where: { executionId: execution.id, tenantId },
+        order: { stepIndex: 'ASC', startedAt: 'ASC' },
+      });
+      return { ...execution, steps };
     });
-    if (!execution) throw new NotFoundException('Execution не знайдено');
-    const steps = await this.stepRuns.find({
-      where: { executionId: execution.id },
-      order: { stepIndex: 'ASC', startedAt: 'ASC' },
-    });
-    return { ...execution, steps };
   }
 }

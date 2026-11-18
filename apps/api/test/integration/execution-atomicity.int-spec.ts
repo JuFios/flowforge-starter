@@ -25,7 +25,9 @@ describe('finishing an execution is atomic', () => {
           RAISE EXCEPTION 'simulated crash while finishing the job';
         END IF;
         RETURN NEW;
-      END $$ LANGUAGE plpgsql`);
+      END $$ LANGUAGE plpgsql
+      -- Тригер спрацьовує в транзакції воркера (роль без прав на службову послідовність тесту).
+      SECURITY DEFINER SET search_path = pg_catalog, public`);
     await ds.query(`
       CREATE TRIGGER test_fail_first_done BEFORE UPDATE ON jobs
       FOR EACH ROW EXECUTE FUNCTION test_fail_first_done()`);

@@ -187,12 +187,17 @@ describe('a job whose worker vanished', () => {
   it('returns every expired job in one reaper pass, not just one batch', async () => {
     // Масове падіння: задачі багатьох воркерів прострочились одночасно (більше за пачку reaper-а).
     const { tenant } = await createTenant(ds);
+    // Задача посилається на виконання свого тенанта (композитний FK, міграція TenantIsolation).
     await ds.query(
-      `INSERT INTO jobs ("tenantId", "executionId", status, attempts, "maxAttempts",
+      `WITH e AS (
+         INSERT INTO executions ("tenantId", "workflowId", status)
+         SELECT $1, gen_random_uuid(), 'succeeded' FROM generate_series(1, 250)
+         RETURNING id, "tenantId")
+       INSERT INTO jobs ("tenantId", "executionId", status, attempts, "maxAttempts",
                          "lockedBy", "lockToken", "lockedUntil")
-       SELECT $1, gen_random_uuid(), 'running', 1, 3, 'crashed', gen_random_uuid(),
+       SELECT e."tenantId", e.id, 'running', 1, 3, 'crashed', gen_random_uuid(),
               now() - interval '1 second'
-         FROM generate_series(1, 250)`,
+         FROM e`,
       [tenant.id],
     );
     const reaperApp = await startApp(WorkerModule);

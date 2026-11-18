@@ -7,13 +7,19 @@ import {
   JoinColumn,
   ManyToOne,
   PrimaryGeneratedColumn,
+  Unique,
 } from 'typeorm';
+import { Tenant } from './tenant.entity';
+import { TENANT_ID_DEFAULT } from './tenant-column';
 import { WorkflowVersion } from './workflow-version.entity';
 
 export type ExecutionStatus = 'pending' | 'running' | 'succeeded' | 'failed';
 
 @Entity('executions')
 @Index(['tenantId', 'createdAt'])
+// Ціль композитних FK із jobs і step_runs: задача чи крок можуть посилатися лише на виконання
+// свого тенанта.
+@Unique('UQ_executions_id_tenant', ['id', 'tenantId'])
 // Очищення історії: завершені виконання, старші за EXECUTION_RETENTION_DAYS.
 @Index('IDX_executions_finished', ['finishedAt'], {
   where: `"status" IN ('succeeded', 'failed')`,
@@ -33,8 +39,15 @@ export class Execution {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  @Column('uuid')
+  @Column({ type: 'uuid', default: TENANT_ID_DEFAULT })
   tenantId: string;
+
+  @ManyToOne(() => Tenant, { onDelete: 'NO ACTION' })
+  @JoinColumn({
+    name: 'tenantId',
+    foreignKeyConstraintName: 'FK_executions_tenant',
+  })
+  tenant?: Tenant;
 
   @Column('uuid')
   workflowId: string;
@@ -43,8 +56,23 @@ export class Execution {
   @Column({ type: 'uuid', nullable: true })
   workflowVersionId: string | null;
 
+  /**
+   * Знімок свого ж тенанта (композитний FK). MATCH SIMPLE: історичне завершене виконання без
+   * знімку (`workflowVersionId` NULL, див. CHK_executions_version_snapshot) лишається валідним.
+   */
   @ManyToOne(() => WorkflowVersion, { onDelete: 'RESTRICT' })
-  @JoinColumn({ name: 'workflowVersionId' })
+  @JoinColumn([
+    {
+      name: 'workflowVersionId',
+      referencedColumnName: 'id',
+      foreignKeyConstraintName: 'FK_executions_version_tenant',
+    },
+    {
+      name: 'tenantId',
+      referencedColumnName: 'tenantId',
+      foreignKeyConstraintName: 'FK_executions_version_tenant',
+    },
+  ])
   workflowVersion?: WorkflowVersion;
 
   @Column({ type: 'varchar', default: 'pending' })

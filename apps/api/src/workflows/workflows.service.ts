@@ -1,27 +1,35 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
-import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
-import { DataSource, EntityManager, Repository } from 'typeorm';
+import { EntityManager } from 'typeorm';
 import { Workflow, WorkflowVersion } from '../entities';
+import { TenantDb } from '../tenancy/tenant-db';
 import { validateSteps } from './definition';
 import { CreateWorkflowDto, UpdateWorkflowDto } from './dto/workflow.dto';
 
+/**
+ * Workflow тенанта. Кожен запит — у контексті тенанта (RLS) і з явним предикатом `tenantId`:
+ * два незалежні шари ізоляції (README, 3.3.4).
+ */
 @Injectable()
 export class WorkflowsService {
-  constructor(
-    @InjectDataSource() private readonly ds: DataSource,
-    @InjectRepository(Workflow)
-    private readonly workflows: Repository<Workflow>,
-  ) {}
+  constructor(private readonly db: TenantDb) {}
 
   list(tenantId: string): Promise<Workflow[]> {
-    return this.workflows.find({
-      where: { tenantId },
-      order: { createdAt: 'DESC' },
-    });
+    return this.db.run(tenantId, (em) =>
+      em.find(Workflow, { where: { tenantId }, order: { createdAt: 'DESC' } }),
+    );
   }
 
-  async get(tenantId: string, id: string): Promise<Workflow> {
-    const wf = await this.workflows.findOne({ where: { id, tenantId } });
+  get(tenantId: string, id: string): Promise<Workflow> {
+    return this.db.run(tenantId, (em) => this.getIn(em, tenantId, id));
+  }
+
+  /** Те саме в транзакції викликача (вона вже в контексті цього тенанта). */
+  async getIn(
+    em: EntityManager,
+    tenantId: string,
+    id: string,
+  ): Promise<Workflow> {
+    const wf = await em.findOne(Workflow, { where: { id, tenantId } });
     if (!wf) throw new NotFoundException('Workflow не знайдено');
     return wf;
   }
@@ -29,7 +37,7 @@ export class WorkflowsService {
   /** Workflow і його перша версія — в одній транзакції. */
   create(tenantId: string, input: CreateWorkflowDto): Promise<Workflow> {
     const steps = validateSteps(input.steps);
-    return this.ds.transaction(async (em) => {
+    return this.db.run(tenantId, async (em) => {
       const wf = await em.save(
         em.create(Workflow, {
           tenantId,
@@ -56,7 +64,7 @@ export class WorkflowsService {
   ): Promise<Workflow> {
     const steps =
       input.steps !== undefined ? validateSteps(input.steps) : undefined;
-    return this.ds.transaction(async (em) => {
+    return this.db.run(tenantId, async (em) => {
       const wf = await em.findOne(Workflow, {
         where: { id, tenantId },
         lock: { mode: 'pessimistic_write' },
@@ -86,7 +94,12 @@ export class WorkflowsService {
   }
 
   async remove(tenantId: string, id: string): Promise<void> {
-    const wf = await this.get(tenantId, id);
-    await this.workflows.remove(wf);
+    await this.db.run(tenantId, async (em) => {
+      const [, deleted]: [unknown[], number] = await em.query(
+        `DELETE FROM workflows WHERE id = $1 AND "tenantId" = $2`,
+        [id, tenantId],
+      );
+      if (deleted === 0) throw new NotFoundException('Workflow не знайдено');
+    });
   }
 }

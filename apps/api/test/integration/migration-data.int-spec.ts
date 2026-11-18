@@ -1,6 +1,9 @@
 import { ConfigService } from '@nestjs/config';
 import { JobQueueService } from '../../src/engine/job-queue.service';
+import { SystemDb } from '../../src/tenancy/system-db';
+import { TenantDb } from '../../src/tenancy/tenant-db';
 import { DataSource } from 'typeorm';
+import { MIGRATIONS } from '../../src/database/migrations';
 import { openTestDataSource, truncateAll } from '../helpers/db';
 
 /**
@@ -15,11 +18,32 @@ describe('data migrations', () => {
   });
 
   afterAll(async () => {
-    // Схема мусить лишитися повною для наступних тестів, навіть якщо тест упав посередині.
+    // Схема мусить лишитися повною для наступних тестів, навіть якщо тест упав посередині. Дані
+    // старих форматів (без тенантів) очищаються до того, як TenantIsolation перевірить цілісність.
+    await truncateAll(ds);
     await ds.runMigrations({ transaction: 'each' });
     await truncateAll(ds);
     await ds.destroy();
   });
+
+  /**
+   * Застосовує міграції лише до `name` (не включно). Тести старих міграцій перевіряють їх на даних
+   * своєї епохи — без тенантів і з довільними посиланнями, яких TenantIsolation далі не допускає
+   * (її перевірку на таких даних покриває окремий тест нижче).
+   */
+  async function migrateBefore(name: string): Promise<void> {
+    const until = MIGRATIONS.findIndex((m) => m.name.startsWith(name));
+    if (until < 0) throw new Error(`unknown migration ${name}`);
+    const partial = await new DataSource({
+      ...ds.options,
+      migrations: MIGRATIONS.slice(0, until),
+    }).initialize();
+    try {
+      await partial.runMigrations({ transaction: 'each' });
+    } finally {
+      await partial.destroy();
+    }
+  }
 
   /** Відкочує міграції, доки не буде скасовано міграцію з назвою, що починається з `name`. */
   async function revertThrough(name: string): Promise<void> {
@@ -51,7 +75,7 @@ describe('data migrations', () => {
       );
     }
 
-    await ds.runMigrations({ transaction: 'each' });
+    await migrateBefore('TenantIsolation');
 
     const after: Array<{
       stepIndex: number;
@@ -77,9 +101,16 @@ describe('data migrations', () => {
   it('recovers an expired legacy job with no token without rolling back its neighbors', async () => {
     await truncateAll(ds);
     await revertThrough('QueueLease');
-    const [wf]: { id: string; tenantId: string }[] =
-      await ds.query(`INSERT INTO workflows ("tenantId",name,steps)
-      VALUES (gen_random_uuid(),'old','[{"id":"a","type":"log","message":"x"}]') RETURNING *`);
+    // Тест проходить усі міграції й запускає reaper, тож дані узгоджені з TenantIsolation: тенант
+    // існує, задачі й кроки посилаються на його виконання.
+    const [tenant]: { id: string }[] = await ds.query(
+      `INSERT INTO tenants (name, "apiKeyHash", "webhookSecret") VALUES ('legacy', 'hash', 'secret') RETURNING id`,
+    );
+    const [wf]: { id: string; tenantId: string }[] = await ds.query(
+      `INSERT INTO workflows ("tenantId",name,steps)
+      VALUES ($1,'old','[{"id":"a","type":"log","message":"x"}]') RETURNING *`,
+      [tenant.id],
+    );
     const execs: { id: string }[] = await ds.query(
       `INSERT INTO executions ("tenantId","workflowId",status)
       SELECT $1,$2,'running' FROM generate_series(1,2) RETURNING id`,
@@ -98,7 +129,8 @@ describe('data migrations', () => {
     );
     await ds.runMigrations({ transaction: 'each' });
     const queue = new JobQueueService(
-      ds,
+      new TenantDb(ds),
+      new SystemDb(ds),
       new ConfigService({ JOB_BACKOFF_BASE_MS: 10, JOB_BACKOFF_MAX_MS: 100 }),
     );
     const recovered = await queue.reapExpired();
@@ -122,7 +154,7 @@ describe('data migrations', () => {
        VALUES ($1, $2, 'running', now() - interval '1 minute')`,
       [execution.tenantId, execution.id],
     );
-    await ds.runMigrations({ transaction: 'each' });
+    await migrateBefore('TenantIsolation');
     expect(
       await ds.query(
         `SELECT e.status, e.output, j.status AS job, j."lockedUntil", j."finishedAt" = e."finishedAt" AS "sameFinish"
@@ -162,7 +194,7 @@ describe('data migrations', () => {
       `INSERT INTO step_runs ("executionId","stepIndex","stepId",status) VALUES ($1,0,'send','running') RETURNING "idempotencyKey"`,
       [e.id],
     );
-    await ds.runMigrations({ transaction: 'each' });
+    await migrateBefore('TenantIsolation');
     expect(
       await ds.query(
         `SELECT e.status, e."workflowVersionId", j.status AS job, s."idempotencyKey" FROM executions e
@@ -203,7 +235,7 @@ describe('data migrations', () => {
         `INSERT INTO step_runs ("executionId","stepIndex","stepId",status,output) VALUES($1,0,$2,$3,'42')`,
         [e.id, stepId, stepStatus],
       );
-      await ds.runMigrations({ transaction: 'each' });
+      await migrateBefore('TenantIsolation');
       expect(
         await ds.query(
           `SELECT e.status,e."workflowVersionId",j.status AS job,s.output FROM executions e JOIN jobs j
@@ -246,7 +278,7 @@ describe('data migrations', () => {
     const orphan = await insertExecution(deletedWf, 'pending');
     const history = await insertExecution(deletedWf, 'succeeded');
 
-    await ds.runMigrations({ transaction: 'each' });
+    await migrateBefore('TenantIsolation');
 
     const versions: Array<{ id: string; version: number; steps: unknown }> =
       await ds.query(
@@ -333,7 +365,7 @@ describe('data migrations', () => {
     const dead = await insert('dead', null, '2026-03-02T00:00:00Z');
     const queued = await insert('queued', null, '2026-03-03T00:00:00Z');
 
-    await ds.runMigrations({ transaction: 'each' });
+    await migrateBefore('TenantIsolation');
 
     const finishedAt = async (id: string) => {
       const [row]: Array<{ finishedAt: Date | null }> = await ds.query(
@@ -346,4 +378,124 @@ describe('data migrations', () => {
     expect(await finishedAt(dead)).toBe('2026-03-02T00:00:00.000Z');
     expect(await finishedAt(queued)).toBeNull();
   });
+
+  /** Повна схема (попередній тест міг лишити її до TenantIsolation), потім відкат TenantIsolation. */
+  async function beforeTenantIsolation(): Promise<void> {
+    await truncateAll(ds);
+    await ds.runMigrations({ transaction: 'each' });
+    await revertThrough('TenantIsolation');
+  }
+
+  it('TenantIsolation gives steps their tenant and keeps history: deleted workflows, runs without a snapshot', async () => {
+    await beforeTenantIsolation();
+    const [tenant]: { id: string }[] = await ds.query(
+      `INSERT INTO tenants (name, "apiKeyHash", "webhookSecret") VALUES ('a', 'hash-a', 's') RETURNING id`,
+    );
+    // Історичне завершене виконання без знімку (дозволене CHK_executions_version_snapshot) і
+    // виконання видаленого workflow (на workflows FK навмисно немає).
+    const [legacy]: { id: string }[] = await ds.query(
+      `INSERT INTO executions ("tenantId", "workflowId", status, "finishedAt")
+       VALUES ($1, gen_random_uuid(), 'failed', now()) RETURNING id`,
+      [tenant.id],
+    );
+    const [version]: { id: string }[] = await ds.query(
+      `INSERT INTO workflow_versions ("tenantId", "workflowId", version, steps)
+       VALUES ($1, gen_random_uuid(), 1, '[{"id":"say","type":"log","message":"x"}]') RETURNING id`,
+      [tenant.id],
+    );
+    const [current]: { id: string }[] = await ds.query(
+      `INSERT INTO executions ("tenantId", "workflowId", "workflowVersionId", status)
+       VALUES ($1, gen_random_uuid(), $2, 'running') RETURNING id`,
+      [tenant.id, version.id],
+    );
+    for (const e of [legacy, current]) {
+      await ds.query(
+        `INSERT INTO step_runs ("executionId", "stepIndex", "stepId", status) VALUES ($1, 0, 'say', 'succeeded')`,
+        [e.id],
+      );
+      await ds.query(
+        `INSERT INTO jobs ("tenantId", "executionId", status) VALUES ($1, $2, 'done')`,
+        [tenant.id, e.id],
+      );
+    }
+
+    await ds.runMigrations({ transaction: 'each' });
+
+    expect(
+      await ds.query(
+        `SELECT "executionId", "tenantId" FROM step_runs ORDER BY "executionId"`,
+      ),
+    ).toEqual(
+      [legacy.id, current.id]
+        .sort()
+        .map((executionId) => ({ executionId, tenantId: tenant.id })),
+    );
+    expect(await ds.query(`SELECT count(*)::int AS n FROM executions`)).toEqual(
+      [{ n: 2 }],
+    );
+  });
+
+  type Orphan = (ids: {
+    otherTenant: string;
+    execution: string;
+  }) => [string, unknown[]];
+  it.each<[string, Orphan, string]>([
+    [
+      'a job of another tenant than its execution',
+      ({ otherTenant, execution }) => [
+        `INSERT INTO jobs ("tenantId", "executionId", status) VALUES ($1, $2, 'done')`,
+        [otherTenant, execution],
+      ],
+      'jobs whose tenant differs from their execution',
+    ],
+    [
+      'a step of a missing execution',
+      () => [
+        `INSERT INTO step_runs ("executionId", "stepIndex", "stepId", status)
+         VALUES (gen_random_uuid(), 0, 'say', 'failed')`,
+        [],
+      ],
+      'step_runs without their execution',
+    ],
+    [
+      'a workflow of an unknown tenant',
+      () => [
+        `INSERT INTO workflows ("tenantId", name, steps) VALUES (gen_random_uuid(), 'w', '[]')`,
+        [],
+      ],
+      'workflows of an unknown tenant',
+    ],
+  ])(
+    'TenantIsolation refuses to run with %s and changes nothing',
+    async (_case, orphan, reason) => {
+      await beforeTenantIsolation();
+      const tenants: { id: string }[] = await ds.query(
+        `INSERT INTO tenants (name, "apiKeyHash", "webhookSecret")
+         VALUES ('a', 'hash-a', 's'), ('b', 'hash-b', 's') RETURNING id`,
+      );
+      const [execution]: { id: string }[] = await ds.query(
+        `INSERT INTO executions ("tenantId", "workflowId", status, "finishedAt")
+         VALUES ($1, gen_random_uuid(), 'succeeded', now()) RETURNING id`,
+        [tenants[0].id],
+      );
+      const [sql, params] = orphan({
+        otherTenant: tenants[1].id,
+        execution: execution.id,
+      });
+      await ds.query(sql, params);
+
+      await expect(ds.runMigrations({ transaction: 'each' })).rejects.toThrow(
+        reason,
+      );
+      // Міграція в транзакції: колонки step_runs.tenantId так і не з'явилось.
+      expect(
+        await ds.query(
+          `SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'step_runs' AND column_name = 'tenantId'`,
+        ),
+      ).toHaveLength(0);
+      await truncateAll(ds);
+      await ds.runMigrations({ transaction: 'each' });
+    },
+  );
 });

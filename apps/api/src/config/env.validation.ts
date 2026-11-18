@@ -3,6 +3,7 @@ import { plainToInstance, Type } from 'class-transformer';
 import {
   IsIn,
   IsInt,
+  IsOptional,
   IsString,
   Matches,
   Max,
@@ -161,10 +162,15 @@ export class EnvironmentVariables extends DatabaseEnvironment {
   @Max(MAX_HTTP_BODY_LIMIT)
   HTTP_BODY_LIMIT = 100 * 1024;
 
+  /**
+   * Токен службових ендпоінтів `/tenants…`. Потрібен лише API (ApiEnvironment): воркер його не
+   * отримує, щоб компрометація воркера не давала адмін-доступу. Якщо заданий — перевіряється.
+   */
+  @IsOptional()
   @IsString()
   @MinLength(12)
   @IsSecureSecretInProduction()
-  ADMIN_TOKEN: string;
+  ADMIN_TOKEN?: string;
 
   @IsIn(LOG_LEVELS)
   LOG_LEVEL: LogLevel = 'info';
@@ -292,10 +298,44 @@ export class EnvironmentVariables extends DatabaseEnvironment {
   SCHEDULER_TICK_MS = 30_000;
 }
 
+/** Конфігурація процесу API: спільна плюс обов'язковий ADMIN_TOKEN. */
+export type ApiEnvironment = EnvironmentVariables & { ADMIN_TOKEN: string };
+
+/**
+ * Облікові дані власника схеми (міграції) runtime-процесам заборонені: API і воркер ходять у БД
+ * лише своїми ролями без BYPASSRLS, а URL власника є тільки в кроці міграцій.
+ */
+const OWNER_CREDENTIALS = ['MIGRATION_DATABASE_URL'] as const;
+
+function rejectOwnerCredentials(raw: Record<string, unknown>): void {
+  const present = OWNER_CREDENTIALS.filter(
+    (name) => typeof raw[name] === 'string' && raw[name] !== '',
+  );
+  if (present.length > 0)
+    throw new Error(
+      `Невалідна конфігурація оточення:\n  ${present.join(', ')}: облікові дані власника БД не передаються API і воркеру (лише кроку міграцій)`,
+    );
+}
+
+/** Спільна схема API і воркера (ConfigModule). */
 export function validateEnv(
   raw: Record<string, unknown>,
 ): EnvironmentVariables {
+  rejectOwnerCredentials(raw);
   return validateAs(EnvironmentVariables, raw);
+}
+
+/** Схема API: спільна плюс обов'язковий ADMIN_TOKEN. */
+export function validateApiEnv(raw: Record<string, unknown>): ApiEnvironment {
+  rejectOwnerCredentials(raw);
+  const env = validateAs(EnvironmentVariables, raw);
+  // Явна перевірка: @IsOptional спільної схеми вимикає для цієї властивості будь-які інші
+  // декоратори, зокрема @IsDefined.
+  if (env.ADMIN_TOKEN === undefined)
+    throw new Error(
+      "Невалідна конфігурація оточення:\n  ADMIN_TOKEN: обов'язковий для API",
+    );
+  return env as ApiEnvironment;
 }
 
 /** Лише змінні підключення до БД — для CLI міграцій. */

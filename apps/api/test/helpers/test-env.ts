@@ -25,3 +25,30 @@ export function testDatabaseEnv(): DatabaseEnvironment {
 }
 
 export const TEST_ADMIN_TOKEN = 'test-admin-token-0123456789';
+
+/**
+ * Runtime-ролі тестів: окремі імена від ролей compose, бо групові й login-ролі спільні для
+ * кластера Postgres, а тестовий прогін не повинен змінювати паролі робочих ролей поруч.
+ */
+export const TEST_API_DB_USER = 'flowforge_api_test';
+export const TEST_WORKER_DB_USER = 'flowforge_worker_test';
+export const TEST_API_DB_PASSWORD = 'testApiRolePassword0123456789';
+export const TEST_WORKER_DB_PASSWORD = 'testWorkerRolePassword0123456789';
+
+/** Адреса тестової БД з обліковими даними іншої ролі. */
+export function testRoleUrl(user: string, password: string): string {
+  const url = new URL(testDatabaseUrl());
+  url.username = user;
+  url.password = password;
+  return url.toString();
+}
+
+/** Роль процесу API (flowforge_api_role, без BYPASSRLS). */
+export function testApiDatabaseUrl(): string {
+  return testRoleUrl(TEST_API_DB_USER, TEST_API_DB_PASSWORD);
+}
+
+/** Роль процесу воркера (flowforge_worker_role, без BYPASSRLS). */
+export function testWorkerDatabaseUrl(): string {
+  return testRoleUrl(TEST_WORKER_DB_USER, TEST_WORKER_DB_PASSWORD);
+}

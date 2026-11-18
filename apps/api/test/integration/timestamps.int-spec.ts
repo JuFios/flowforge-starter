@@ -17,6 +17,26 @@ async function openSessionIn(timeZone: string): Promise<DataSource> {
   }).initialize();
 }
 
+/**
+ * Батьківські рядки для вставок: композитні FK (міграція TenantIsolation) вимагають наявних тенанта
+ * й виконання того самого тенанта.
+ */
+async function tenantIn(ds: DataSource): Promise<string> {
+  return (
+    await ds
+      .getRepository(Tenant)
+      .save({ name: 'parent', apiKeyHash: randomUUID(), webhookSecret: 's' })
+  ).id;
+}
+
+async function executionIn(ds: DataSource): Promise<Execution> {
+  return ds.getRepository(Execution).save({
+    tenantId: await tenantIn(ds),
+    workflowId: randomUUID(),
+    status: 'succeeded',
+  });
+}
+
 /** Кожна колонка «момент створення/старту», яку заповнює DEFAULT now(). */
 const COLUMNS: Array<{
   name: string;
@@ -37,7 +57,7 @@ const COLUMNS: Array<{
       (
         await ds
           .getRepository(Workflow)
-          .save({ tenantId: randomUUID(), name: 'w', steps: [] })
+          .save({ tenantId: await tenantIn(ds), name: 'w', steps: [] })
       ).createdAt,
   },
   {
@@ -48,7 +68,7 @@ const COLUMNS: Array<{
           .getRepository(Execution)
           // Завершене виконання може не мати знімку версії (CHK_executions_version_snapshot).
           .save({
-            tenantId: randomUUID(),
+            tenantId: await tenantIn(ds),
             workflowId: randomUUID(),
             status: 'succeeded',
           })
@@ -56,21 +76,29 @@ const COLUMNS: Array<{
   },
   {
     name: 'jobs.createdAt',
-    insert: async (ds) =>
-      (
-        await ds
-          .getRepository(Job)
-          .save({ tenantId: randomUUID(), executionId: randomUUID() })
-      ).createdAt,
+    insert: async (ds) => {
+      const execution = await executionIn(ds);
+      return (
+        await ds.getRepository(Job).save({
+          tenantId: execution.tenantId,
+          executionId: execution.id,
+        })
+      ).createdAt;
+    },
   },
   {
     name: 'step_runs.startedAt',
-    insert: async (ds) =>
-      (
-        await ds
-          .getRepository(StepRun)
-          .save({ executionId: randomUUID(), stepIndex: 0, stepId: 's' })
-      ).startedAt,
+    insert: async (ds) => {
+      const execution = await executionIn(ds);
+      return (
+        await ds.getRepository(StepRun).save({
+          executionId: execution.id,
+          tenantId: execution.tenantId,
+          stepIndex: 0,
+          stepId: 's',
+        })
+      ).startedAt;
+    },
   },
 ];
 

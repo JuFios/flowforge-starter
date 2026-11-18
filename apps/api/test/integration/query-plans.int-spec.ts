@@ -37,24 +37,30 @@ describe('query plans of the queue use their indexes', () => {
   beforeAll(async () => {
     ds = await openTestDataSource();
     await truncateAll(ds);
+    // 50 тенантів; кожне з 20 тис. виконань має задачу й крок свого тенанта (композитні FK).
+    await ds.query(`
+      INSERT INTO tenants (name, "apiKeyHash", "webhookSecret")
+      SELECT 'plan-' || g, md5('key-' || g) || md5('hash-' || g), 'secret'
+        FROM generate_series(1, 50) g`);
+    // Виконання: завершені, з ключем запуску в кожного десятого.
+    await ds.query(`
+      WITH t AS (SELECT id, row_number() OVER (ORDER BY id) - 1 AS n FROM tenants)
+      INSERT INTO executions ("tenantId", "workflowId", status, "idempotencyKey", "finishedAt")
+      SELECT t.id, gen_random_uuid(), 'succeeded',
+             CASE WHEN g % 10 = 0 THEN 'key-' || g END,
+             now() - (g || ' minutes')::interval
+        FROM generate_series(1, 20000) g JOIN t ON t.n = g % 50`);
     await ds.query(`
       INSERT INTO jobs ("tenantId", "executionId", status, "runAt", "lockedUntil", "finishedAt")
-      SELECT gen_random_uuid(), gen_random_uuid(),
+      SELECT e."tenantId", e.id,
              CASE WHEN g % 400 = 0 THEN 'queued' WHEN g % 400 = 1 THEN 'running' ELSE 'done' END,
              now() - (g || ' seconds')::interval,
              CASE WHEN g % 400 = 1 THEN now() + interval '30 seconds' END,
              CASE WHEN g % 400 > 1 THEN now() - (g || ' minutes')::interval END
-        FROM generate_series(1, 20000) g`);
+        FROM (SELECT id, "tenantId", row_number() OVER (ORDER BY id) AS g FROM executions) e`);
     await ds.query(`
-      INSERT INTO step_runs ("executionId", "stepIndex", "stepId", status)
-      SELECT gen_random_uuid(), 0, 'call', 'succeeded' FROM generate_series(1, 20000)`);
-    // Виконання: завершені, з ключем запуску в кожного десятого.
-    await ds.query(`
-      INSERT INTO executions ("tenantId", "workflowId", status, "idempotencyKey", "finishedAt")
-      SELECT gen_random_uuid(), gen_random_uuid(), 'succeeded',
-             CASE WHEN g % 10 = 0 THEN 'key-' || g END,
-             now() - (g || ' minutes')::interval
-        FROM generate_series(1, 20000) g`);
+      INSERT INTO step_runs ("executionId", "tenantId", "stepIndex", "stepId", status)
+      SELECT id, "tenantId", 0, 'call', 'succeeded' FROM executions`);
     await ds.query(`ANALYZE executions`);
     await ds.query(`ANALYZE jobs`);
     await ds.query(`ANALYZE step_runs`);
@@ -73,7 +79,12 @@ describe('query plans of the queue use their indexes', () => {
 
   it.each([
     ['claiming the next ready job', CLAIM_CANDIDATE_SQL, [], 'IDX_jobs_claim'],
-    ['finding expired leases', EXPIRED_LEASES_SQL, [], 'IDX_jobs_lease'],
+    [
+      'finding expired leases of a tenant',
+      EXPIRED_LEASES_SQL,
+      ['00000000-0000-4000-8000-000000000000'],
+      'IDX_jobs_lease',
+    ],
     [
       'finding finished jobs past their retention period',
       FINISHED_JOBS_SQL,

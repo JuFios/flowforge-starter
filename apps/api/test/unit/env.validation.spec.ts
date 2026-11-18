@@ -1,7 +1,43 @@
 import {
+  validateApiEnv,
   validateDatabaseEnv,
   validateEnv,
 } from '../../src/config/env.validation';
+
+describe('per-process configuration', () => {
+  const url = 'postgres://flowforge_worker:pw@localhost:5432/db';
+
+  it('lets the worker start without ADMIN_TOKEN', () => {
+    expect(validateEnv({ DATABASE_URL: url }).ADMIN_TOKEN).toBeUndefined();
+  });
+
+  it('requires ADMIN_TOKEN for the API', () => {
+    expect(() => validateApiEnv({ DATABASE_URL: url })).toThrow(/ADMIN_TOKEN/);
+    expect(
+      validateApiEnv({ DATABASE_URL: url, ADMIN_TOKEN: 'a-long-admin-token' })
+        .ADMIN_TOKEN,
+    ).toBe('a-long-admin-token');
+  });
+
+  it.each([validateEnv, validateApiEnv])(
+    'refuses the schema owner credentials in a runtime process (%p)',
+    (validate) => {
+      const owner = 'postgres://flowforge:owner-secret@localhost:5432/db';
+      let message = '';
+      try {
+        validate({
+          DATABASE_URL: url,
+          ADMIN_TOKEN: 'a-long-admin-token',
+          MIGRATION_DATABASE_URL: owner,
+        });
+      } catch (err) {
+        message = (err as Error).message;
+      }
+      expect(message).toContain('MIGRATION_DATABASE_URL');
+      expect(message).not.toContain('owner-secret');
+    },
+  );
+});
 
 describe('validateEnv', () => {
   const base = {

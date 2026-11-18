@@ -76,7 +76,8 @@ describe('finished jobs are deleted after the retention period', () => {
 
     const oldDone = await execution('succeeded');
     await ds.query(
-      `INSERT INTO step_runs ("executionId", "stepIndex", "stepId", status) VALUES ($1, 0, 'say', 'succeeded')`,
+      `INSERT INTO step_runs ("executionId", "tenantId", "stepIndex", "stepId", status)
+       SELECT id, "tenantId", 0, 'say', 'succeeded' FROM executions WHERE id = $1`,
       [oldDone],
     );
     const expired = [
@@ -90,10 +91,15 @@ describe('finished jobs are deleted after the retention period', () => {
       await job('queued', null, await execution('running')),
       await job('running', null, await execution('running')),
     ];
+    // Кожна задача — свого виконання того самого тенанта (композитний FK).
     await ds.query(
-      `INSERT INTO jobs ("tenantId", "executionId", status, "createdAt", "finishedAt")
-       SELECT $1, gen_random_uuid(), 'done', now() - interval '60 days', now() - interval '45 days'
-         FROM generate_series(1, ${OLD_BULK})`,
+      `WITH e AS (
+         INSERT INTO executions ("tenantId", "workflowId", status, "finishedAt")
+         SELECT $1, gen_random_uuid(), 'succeeded', now() - interval '45 days'
+           FROM generate_series(1, ${OLD_BULK})
+         RETURNING id)
+       INSERT INTO jobs ("tenantId", "executionId", status, "createdAt", "finishedAt")
+       SELECT $1, e.id, 'done', now() - interval '60 days', now() - interval '45 days' FROM e`,
       [tenant.id],
     );
 
@@ -123,7 +129,7 @@ describe('finished jobs are deleted after the retention period', () => {
       `flowforge_jobs_purged_total ${OLD_BULK + expired.length}`,
     );
     // Історія тенанта лишається: виконання та їхні кроки не видаляються.
-    expect(await ds.getRepository(Execution).count()).toBe(6);
+    expect(await ds.getRepository(Execution).count()).toBe(6 + OLD_BULK);
     expect(
       await ds.getRepository(StepRun).countBy({ executionId: oldDone }),
     ).toBe(1);

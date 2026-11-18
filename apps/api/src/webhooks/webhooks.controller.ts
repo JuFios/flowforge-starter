@@ -9,12 +9,12 @@ import {
   Post,
   UnauthorizedException,
 } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
 import { createHmac } from 'crypto';
-import { Repository } from 'typeorm';
 import { Tenant, Workflow } from '../entities';
 import { ExecutionsService } from '../executions/executions.service';
 import { parseRunInput } from '../executions/run-input.pipe';
+import { SystemDb } from '../tenancy/system-db';
+import { TenantDb } from '../tenancy/tenant-db';
 
 /**
  * Очікуваний підпис тіла або undefined, якщо тіло неможливо серіалізувати: на надглибокій
@@ -39,9 +39,8 @@ function expectedSignature(secret: string, body: unknown): string | undefined {
 @Controller('hooks')
 export class WebhooksController {
   constructor(
-    @InjectRepository(Workflow)
-    private readonly workflows: Repository<Workflow>,
-    @InjectRepository(Tenant) private readonly tenants: Repository<Tenant>,
+    private readonly system: SystemDb,
+    private readonly db: TenantDb,
     private readonly executions: ExecutionsService,
   ) {}
 
@@ -54,13 +53,20 @@ export class WebhooksController {
     @Body() body: unknown,
     @Headers('x-signature') signature?: string,
   ) {
-    const workflow = await this.workflows.findOne({
-      where: { id: workflowId },
-    });
-    if (!workflow || !workflow.enabled) throw new NotFoundException();
-    const tenant = await this.tenants.findOneOrFail({
-      where: { id: workflow.tenantId },
-    });
+    // Тенант адресата — вузькою SECURITY DEFINER-функцією; workflow і секрет читаються вже в
+    // контексті цього тенанта (RLS), з явним предикатом tenantId.
+    const tenantId = await this.system.webhookTenant(workflowId);
+    const target =
+      tenantId &&
+      (await this.db.run(tenantId, async (em) => {
+        const workflow = await em.findOne(Workflow, {
+          where: { id: workflowId, tenantId, enabled: true },
+        });
+        const tenant = await em.findOne(Tenant, { where: { id: tenantId } });
+        return workflow && tenant ? { workflow, tenant } : null;
+      }));
+    if (!target) throw new NotFoundException();
+    const { workflow, tenant } = target;
 
     const expected = expectedSignature(tenant.webhookSecret, body);
     if (expected === undefined || signature !== expected) {

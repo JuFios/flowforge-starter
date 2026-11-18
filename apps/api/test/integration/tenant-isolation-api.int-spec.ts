@@ -42,6 +42,7 @@ describe('tenant isolation over HTTP', () => {
     });
     await ds.getRepository(StepRun).save({
       executionId: failedA.id,
+      tenantId: a.tenant.id,
       stepIndex: 0,
       stepId: 'say',
       status: 'failed',
