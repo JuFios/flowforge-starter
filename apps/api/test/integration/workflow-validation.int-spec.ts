@@ -46,6 +46,33 @@ describe('workflow and run input is validated at the API boundary', () => {
     expect(await ds.query(`SELECT 1 FROM workflows`)).toHaveLength(0);
   });
 
+  it.each(['__proto__', 'constructor'])(
+    'rejects the unknown top-level field %s on POST and PATCH',
+    async (field) => {
+      const unknown = { [field]: 'unknown' };
+      const wf = await api<{ id: string }>(
+        app.baseUrl,
+        apiKey,
+        'POST',
+        '/workflows',
+        { name: 'original', steps },
+      );
+      const patch = await call('PATCH', `/workflows/${wf.body.id}`, {
+        name: 'changed',
+        ...unknown,
+      });
+      const create = await call('POST', '/workflows', {
+        name: 'invalid',
+        steps,
+        ...unknown,
+      });
+      expect([patch.status, create.status]).toEqual([400, 400]);
+      expect(await ds.query('SELECT name FROM workflows')).toEqual([
+        { name: 'original' },
+      ]);
+    },
+  );
+
   it('rejects an invalid update with 400 and keeps the workflow unchanged', async () => {
     const created = await call('POST', '/workflows', { name: 'w', steps });
     expect(created.status).toBe(201);

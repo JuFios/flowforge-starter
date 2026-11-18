@@ -1,5 +1,6 @@
 import {
   BackoffOptions,
+  retryDelayMs,
   backoffMs as backoff,
 } from '../../src/engine/job-queue.service';
 
@@ -20,6 +21,17 @@ describe('backoffMs', () => {
       opts(() => 0.999),
     );
     expect(low).not.toBe(high);
+  });
+
+  it('uses the same Retry-After when it dominates the jittered backoff', () => {
+    for (const r of [0, 0.5, 0.999])
+      expect(
+        retryDelayMs(
+          1,
+          opts(() => r),
+          3000,
+        ),
+      ).toBe(3000);
   });
 
   it('stays within base..base·2^attempt for every random value', () => {

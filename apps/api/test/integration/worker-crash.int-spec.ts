@@ -5,7 +5,7 @@ import type { AddressInfo } from 'node:net';
 import { join } from 'node:path';
 import { DataSource } from 'typeorm';
 import { AppModule } from '../../src/app.module';
-import { Execution, StepRun } from '../../src/entities';
+import { Execution, Job, StepRun } from '../../src/entities';
 import { RunningApp, startApp } from '../helpers/app';
 import { createTenant, openTestDataSource, truncateAll } from '../helpers/db';
 import { api, Receiver, startWorker, waitFor } from '../helpers/queue';
@@ -41,13 +41,29 @@ describe('a worker killed in the middle of a step', () => {
     await receiver.start();
   });
 
-  afterAll(async () => {
+  afterEach(async () => {
     child?.kill('SIGKILL');
+    child = undefined;
     await rescuer?.close();
+    rescuer = undefined;
+  });
+
+  afterAll(async () => {
     await apiApp.close();
     await receiver.stop();
     await ds.destroy();
   });
+
+  async function startChild(): Promise<void> {
+    child = spawn(process.execPath, [WORKER_ENTRY], {
+      env: {
+        ...process.env,
+        WORKER_HTTP_PORT: String(await freePort()),
+        WORKER_CONCURRENCY: '1',
+      },
+      stdio: 'ignore',
+    });
+  }
 
   it('is picked up by another worker; completed steps are not repeated and the side effect happens once', async () => {
     // Отримувач поважає Idempotency-Key: ефект («відвантаження») — один на ключ.
@@ -97,14 +113,7 @@ describe('a worker killed in the middle of a step', () => {
       )
     ).body.id;
 
-    child = spawn(process.execPath, [WORKER_ENTRY], {
-      env: {
-        ...process.env,
-        WORKER_HTTP_PORT: String(await freePort()),
-        WORKER_CONCURRENCY: '1',
-      },
-      stdio: 'ignore',
-    });
+    await startChild();
     await waitFor(
       'the child worker to reach the second step',
       () => receiver.hits('/ship').length === 1,
@@ -114,7 +123,7 @@ describe('a worker killed in the middle of a step', () => {
     const exited = new Promise<NodeJS.Signals | null>((resolve) =>
       child!.once('exit', (_code, signal) => resolve(signal)),
     );
-    child.kill('SIGKILL');
+    child!.kill('SIGKILL');
     expect(await exited).toBe('SIGKILL');
     child = undefined;
     hold = false;
@@ -143,5 +152,89 @@ describe('a worker killed in the middle of a step', () => {
       ['ship', 'succeeded', 2],
       ['done', 'succeeded', 1],
     ]);
+  });
+  it('finalizes the stored result when SIGKILL follows the last checkpoint on the only attempt', async () => {
+    const { apiKey } = await createTenant(ds);
+    receiver.respond = (_req, res) =>
+      void res.writeHead(200).end('{"paid":true}');
+    const wf = await api<{ id: string }>(
+      apiApp.baseUrl,
+      apiKey,
+      'POST',
+      '/workflows',
+      {
+        name: 'single attempt',
+        steps: [
+          {
+            id: 'charge',
+            type: 'http',
+            method: 'POST',
+            url: receiver.url('/final'),
+          },
+        ],
+      },
+    );
+    const {
+      body: { id },
+    } = await api<{ id: string }>(
+      apiApp.baseUrl,
+      apiKey,
+      'POST',
+      `/workflows/${wf.body.id}/run`,
+      {},
+    );
+    await ds.getRepository(Job).update({ executionId: id }, { maxAttempts: 1 });
+    // Блокуємо лише завершення job. Чекпоінт має встигнути закомітитись у власній транзакції.
+    const barrier = ds.createQueryRunner();
+    await barrier.connect();
+    try {
+      await barrier.query('SELECT pg_advisory_lock(61487)');
+      await ds.query(`CREATE FUNCTION test_wait_before_done() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN PERFORM pg_advisory_xact_lock(61487); RETURN NEW; END $$`);
+      await ds.query(`CREATE TRIGGER test_wait_before_done BEFORE UPDATE ON jobs FOR EACH ROW
+        WHEN (NEW.status = 'done') EXECUTE FUNCTION test_wait_before_done()`);
+      await startChild();
+      await waitFor(
+        'final checkpoint committed and finish waiting',
+        async () => {
+          const waiting: unknown[] = await ds.query(
+            "SELECT 1 FROM pg_locks WHERE locktype='advisory' AND objid=61487 AND NOT granted",
+          );
+          return (
+            waiting.length === 1 &&
+            (await ds
+              .getRepository(StepRun)
+              .countBy({ executionId: id, status: 'succeeded' })) === 1
+          );
+        },
+      );
+      const exited = new Promise((resolve) =>
+        child!.once('exit', (_code, signal) => resolve(signal)),
+      );
+      child!.kill('SIGKILL');
+      expect(await exited).toBe('SIGKILL');
+      child = undefined;
+    } finally {
+      await barrier.query('SELECT pg_advisory_unlock(61487)');
+      await barrier.release();
+      await ds.query('DROP TRIGGER IF EXISTS test_wait_before_done ON jobs');
+      await ds.query('DROP FUNCTION IF EXISTS test_wait_before_done()');
+    }
+    rescuer = await startWorker(1);
+    await waitFor('reaper to settle execution', async () =>
+      ['failed', 'succeeded'].includes(
+        (await ds.getRepository(Execution).findOneByOrFail({ id })).status,
+      ),
+    );
+    expect(
+      await ds.getRepository(Execution).findOneByOrFail({ id }),
+    ).toMatchObject({
+      status: 'succeeded',
+      output: { status: 200, body: { paid: true } },
+    });
+    expect(
+      await ds.getRepository(Job).findOneByOrFail({ executionId: id }),
+    ).toMatchObject({ status: 'done', lockToken: null });
+    expect(receiver.hits('/final')).toHaveLength(1);
   });
 });

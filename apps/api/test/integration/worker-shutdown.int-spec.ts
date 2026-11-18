@@ -72,6 +72,35 @@ describe('worker graceful shutdown', () => {
     };
   }
 
+  it('never starts a step when the claim response arrives beyond the safe lease deadline', async () => {
+    const id = await run();
+    worker = await startApp(WorkerModule);
+    const queue = worker.app.get(JobQueueService);
+    const claim = queue.claimNext.bind(queue);
+    let returned = false;
+    jest.spyOn(queue, 'claimNext').mockImplementation(async (owner) => {
+      if (returned) return null;
+      const job = await claim(owner);
+      await sleep(1600);
+      returned = true;
+      return job;
+    });
+    jest
+      .spyOn(queue, 'heartbeat')
+      .mockImplementation(() => new Promise<boolean>(() => undefined));
+    // Цей тест ізолює прострочену відповідь одного claim від роботи reaper.
+    jest.spyOn(queue, 'reapExpired').mockResolvedValue([]);
+    receiver.respond = (_req, res) => void res.writeHead(200).end('{}');
+    const runner = worker.app.get(JobRunnerService);
+    runner.start(1);
+    await waitFor('late claim to return', () => returned);
+    await runner.beforeApplicationShutdown();
+    expect(receiver.hits('/slow')).toHaveLength(0);
+    expect(
+      await ds.getRepository(Execution).findOneByOrFail({ id }),
+    ).toMatchObject({ status: 'pending' });
+  });
+
   it('returns a claim that completes during shutdown without executing the job', async () => {
     const id = await run();
     worker = await startApp(WorkerModule);

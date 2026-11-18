@@ -127,6 +127,32 @@ describe('strings Postgres cannot store', () => {
       },
     );
 
+    it('stores a deeply nested successful POST result and sends the request once', async () => {
+      const body = '{"x":'.repeat(2000) + '"ok\\u0000"' + '}'.repeat(2000);
+      receiver.respond = (_req, res) =>
+        void res
+          .writeHead(200, { 'content-type': 'application/json' })
+          .end(body);
+      const id = await run([
+        {
+          id: 'call',
+          type: 'http',
+          method: 'POST',
+          url: receiver.url('/nested'),
+        },
+      ]);
+      worker = await startWorker(1);
+      await finished(id);
+      const execution = await ds
+        .getRepository(Execution)
+        .findOneByOrFail({ id });
+      expect(execution.status).toBe('succeeded');
+      expect(receiver.hits('/nested')).toHaveLength(1);
+      expect(JSON.stringify((execution.output as { body: unknown }).body)).toBe(
+        body.replace('\\u0000', REPLACEMENT),
+      );
+    });
+
     it('records a step error that contains U+0000', async () => {
       // Текст помилки transform-виразу задає тенант.
       const id = await run([
