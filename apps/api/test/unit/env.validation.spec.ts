@@ -118,6 +118,23 @@ describe('validateEnv', () => {
       }).JOB_BACKOFF_MAX_MS,
     ).toBe(5000);
   });
+
+  it('bounds the HTTP body limit so the largest valid definition and run input still fit', () => {
+    expect(validateEnv(base)).toMatchObject({ HTTP_BODY_LIMIT: 100 * 1024 });
+    // 68 КіБ: визначення кроків до 64 КіБ плюс решта полів запиту.
+    expect(validateEnv({ ...base, HTTP_BODY_LIMIT: '69632' })).toMatchObject({
+      HTTP_BODY_LIMIT: 69_632,
+    });
+    expect(() => validateEnv({ ...base, HTTP_BODY_LIMIT: '69631' })).toThrow(
+      /HTTP_BODY_LIMIT/,
+    );
+    expect(() =>
+      validateEnv({ ...base, HTTP_BODY_LIMIT: String(1024 * 1024 + 1) }),
+    ).toThrow(/HTTP_BODY_LIMIT/);
+    expect(() => validateEnv({ ...base, HTTP_BODY_LIMIT: '100kb' })).toThrow(
+      /HTTP_BODY_LIMIT/,
+    );
+  });
 });
 
 describe('validateDatabaseEnv (migration CLI)', () => {
