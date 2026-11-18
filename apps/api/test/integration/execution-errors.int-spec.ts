@@ -1,3 +1,5 @@
+import { createServer } from 'node:net';
+import type { AddressInfo } from 'node:net';
 import { DataSource } from 'typeorm';
 import { AppModule } from '../../src/app.module';
 import { Execution } from '../../src/entities';
@@ -104,11 +106,18 @@ describe('execution errors shown to the tenant', () => {
   });
 
   it('reports an unreachable receiver without the network details of the failure', async () => {
+    // Порт, який щойно звільнено: з'єднання відхиляється (ECONNREFUSED). Не «відомий закритий»
+    // порт на кшталт 9 — такі fetch блокує сам, ще до з'єднання.
+    const server = createServer();
+    await new Promise<void>((resolve) =>
+      server.listen(0, '127.0.0.1', resolve),
+    );
+    const { port } = server.address() as AddressInfo;
+    await new Promise((resolve) => server.close(resolve));
     const body = await runToFailure([
-      // Порт 9 (discard) на loopback закритий: з'єднання відхиляється.
-      { id: 'call', type: 'http', url: 'http://127.0.0.1:9/' },
+      { id: 'call', type: 'http', url: `http://127.0.0.1:${port}/` },
     ]);
-    expect(body.error).toMatch(/^http request failed/);
+    expect(body.error).toMatch(/^http request failed: connection refused/);
     expect(JSON.stringify(body)).not.toContain('ECONNREFUSED 127.0.0.1');
   });
 });

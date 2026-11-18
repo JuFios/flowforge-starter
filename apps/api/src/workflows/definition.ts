@@ -125,6 +125,11 @@ function validateHttp(
     if (typeof step.body !== 'string') fail(`${where}.body має бути рядком`);
     if (Buffer.byteLength(step.body) > MAX_HTTP_BODY_BYTES)
       fail(`${where}.body більший за ${MAX_HTTP_BODY_BYTES} байт`);
+    // GET і HEAD не мають тіла (fetch відмовляється надсилати такий запит); метод за
+    // замовчуванням — GET.
+    const effective = method ?? 'GET';
+    if (effective === 'GET' || effective === 'HEAD')
+      fail(`${where}.body не дозволений для методу ${effective}`);
     body = step.body;
   }
 

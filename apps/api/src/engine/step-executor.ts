@@ -86,6 +86,15 @@ export class StepExecutor {
     } catch (err) {
       // Скасування воркером (lease, завершення) — не помилка кроку, передаємо як є.
       if (signal?.aborted) throw err;
+      // Повторювані лише збої мережі й таймаут. Інша помилка fetch означає, що запит неможливо
+      // надіслати взагалі (напр., тіло в GET), і повтор дав би той самий результат.
+      if (isBlockedPort(err))
+        throw new StepError(
+          'http request is invalid: the port is not allowed',
+          false,
+        );
+      if (!isNetworkFailure(err))
+        throw new StepError('http request is invalid', false);
       throw new StepError(`http request failed: ${networkReason(err)}`, true);
     }
     const text = await res.text();
@@ -101,12 +110,36 @@ export class StepExecutor {
 }
 
 /**
+ * Збій мережі або таймаут. fetch (undici) повідомляє про мережеву помилку як
+ * `TypeError('fetch failed')` з причиною в `cause`; помилки в аргументах запиту він кидає з іншим
+ * текстом ще до з'єднання.
+ */
+function isNetworkFailure(err: unknown): boolean {
+  // За `name`, а не `instanceof`: помилку створює undici, і її клас може бути з іншого realm
+  // (напр., у vm-контексті тестового середовища), ніж глобальні TypeError/DOMException коду.
+  if (typeof err !== 'object' || err === null) return false;
+  const { name, message } = err as { name?: unknown; message?: unknown };
+  return (
+    name === 'TimeoutError' ||
+    (name === 'TypeError' && message === 'fetch failed')
+  );
+}
+
+/**
+ * Порт зі списку заборонених специфікацією fetch (напр., 9, 25, 6667): undici повідомляє про це як
+ * про мережеву помилку з причиною `bad port`, але відмова детермінована — повтор нічого не змінить.
+ */
+function isBlockedPort(err: unknown): boolean {
+  const cause = (err as { cause?: { message?: unknown } } | null)?.cause;
+  return isNetworkFailure(err) && cause?.message === 'bad port';
+}
+
+/**
  * Причина мережевої помилки для тенанта: лише клас збою, без адрес і внутрішнього тексту
  * (`ECONNREFUSED 10.0.0.7:5432` розкривав би інфраструктуру).
  */
 function networkReason(err: unknown): string {
-  if (err instanceof DOMException && err.name === 'TimeoutError')
-    return 'timed out';
+  if ((err as { name?: unknown }).name === 'TimeoutError') return 'timed out';
   const code = (err as { cause?: { code?: unknown } }).cause?.code;
   switch (code) {
     case 'ECONNREFUSED':
