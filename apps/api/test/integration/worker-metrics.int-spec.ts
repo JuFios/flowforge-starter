@@ -16,7 +16,7 @@ function sample(text: string, series: string): number | undefined {
 describe('queue metrics on the worker /metrics endpoint', () => {
   let ds: DataSource;
   let apiApp: RunningApp;
-  let worker: RunningApp;
+  let worker: RunningApp | undefined;
   const receiver = new Receiver();
 
   beforeAll(async () => {
@@ -24,11 +24,10 @@ describe('queue metrics on the worker /metrics endpoint', () => {
     await truncateAll(ds);
     apiApp = await startApp(AppModule);
     await receiver.start();
-    worker = await startWorker(2);
   });
 
   afterAll(async () => {
-    await worker.close();
+    await worker?.close();
     await apiApp.close();
     await receiver.stop();
     await ds.destroy();
@@ -72,6 +71,9 @@ describe('queue metrics on the worker /metrics endpoint', () => {
               "lockedUntil" = now() - interval '1 second' WHERE "executionId" = $1`,
       [lost],
     );
+    // Воркер — лише тепер: інакше він міг захопити задачу `lost` раніше, ніж тест перевів її в
+    // стан, який лишає зниклий воркер, і лічильники залежали б від того, хто встиг першим.
+    worker = await startWorker(2);
 
     await waitFor('all executions to finish', async () => {
       const rows = await ds
@@ -83,16 +85,19 @@ describe('queue metrics on the worker /metrics endpoint', () => {
     // Лічильники оновлюються одразу після транзакції, що зафіксувала стан: чекаємо на сам факт у
     // метриках (останні події кожного виконання), а не на час.
     const metrics = async () =>
-      (await fetch(`${worker.baseUrl}/metrics`)).text();
+      (await fetch(`${worker!.baseUrl}/metrics`)).text();
+    // Лічильники лише зростають: чекаємо, поки з'являться останні події, а точні значення
+    // перевіряємо нижче (з повідомленням про розбіжність, а не таймаутом).
     await waitFor('the final events to reach the metrics', async () => {
       const t = await metrics();
       return (
-        sample(t, 'flowforge_jobs_dead_total{reason="step_error"}') === 1 &&
-        sample(t, 'flowforge_job_leases_expired_total') === 1 &&
-        sample(
+        (sample(t, 'flowforge_jobs_dead_total{reason="step_error"}') ?? 0) >=
+          1 &&
+        (sample(t, 'flowforge_job_leases_expired_total') ?? 0) >= 1 &&
+        (sample(
           t,
           'flowforge_step_duration_seconds_count{type="http",outcome="succeeded"}',
-        ) === 1
+        ) ?? 0) >= 1
       );
     });
     const text = await metrics();
