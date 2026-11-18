@@ -27,6 +27,10 @@ export type LogLevel = (typeof LOG_LEVELS)[number];
 /** Найбільша затримка, яку приймають setTimeout/setInterval (2^31 - 1 мс). */
 export const MAX_TIMER_MS = 2_147_483_647;
 
+/** Межі HTTP_BODY_LIMIT, байт: 68 КіБ (визначення 64 КіБ + решта полів) .. 1 МіБ. */
+export const MIN_HTTP_BODY_LIMIT = 68 * 1024;
+export const MAX_HTTP_BODY_LIMIT = 1024 * 1024;
+
 /** Значення-приклади й очевидні заглушки: публічно відомі, тож не є секретом. */
 const PLACEHOLDER_SECRET =
   /change[\s_-]*me|example|placeholder|default|password|secret|qwerty|12345/i;
@@ -138,6 +142,17 @@ export class EnvironmentVariables extends DatabaseEnvironment {
   @Min(0)
   @Max(65535)
   METRICS_PORT = 3200;
+
+  /**
+   * Найбільше JSON-тіло HTTP-запиту, байт; більше — 413 ще до розбору. Нижня межа гарантує, що
+   * найбільші легітимні тіла вміщуються: визначення кроків до 64 КіБ плюс решта полів workflow
+   * (вхід виконання — теж до 64 КіБ). Верхня обмежує пам'ять, яку займає один запит.
+   */
+  @Type(() => Number)
+  @IsInt()
+  @Min(MIN_HTTP_BODY_LIMIT)
+  @Max(MAX_HTTP_BODY_LIMIT)
+  HTTP_BODY_LIMIT = 100 * 1024;
 
   @IsString()
   @MinLength(12)
