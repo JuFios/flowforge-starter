@@ -183,4 +183,24 @@ describe('a job whose worker vanished', () => {
     expect(job.lockedBy).toBeNull();
     expect(job.finishedAt).toBeInstanceOf(Date);
   });
+
+  it('returns every expired job in one reaper pass, not just one batch', async () => {
+    // Масове падіння: задачі багатьох воркерів прострочились одночасно (більше за пачку reaper-а).
+    const { tenant } = await createTenant(ds);
+    await ds.query(
+      `INSERT INTO jobs ("tenantId", "executionId", status, attempts, "maxAttempts",
+                         "lockedBy", "lockToken", "lockedUntil")
+       SELECT $1, gen_random_uuid(), 'running', 1, 3, 'crashed', gen_random_uuid(),
+              now() - interval '1 second'
+         FROM generate_series(1, 250)`,
+      [tenant.id],
+    );
+    const reaperApp = await startApp(WorkerModule);
+    others.push(reaperApp);
+
+    const reaped = await reaperApp.app.get(JobQueueService).reapExpired();
+
+    expect(reaped).toHaveLength(250);
+    expect(await ds.getRepository(Job).countBy({ status: 'running' })).toBe(0);
+  });
 });
