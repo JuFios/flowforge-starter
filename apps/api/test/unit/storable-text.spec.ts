@@ -38,6 +38,12 @@ describe('text that Postgres can store', () => {
     expect(findUnstorable(null)).toBeUndefined();
   });
 
+  it('walks a value nested deeper than the call stack allows without throwing', () => {
+    let deep: unknown = 'x\u0000';
+    for (let i = 0; i < 100_000; i++) deep = { a: deep };
+    expect(findUnstorable(deep)).toBe('$' + '.a'.repeat(100_000));
+  });
+
   it('copies a JSON value with every unstorable character replaced, counting them', () => {
     const { value, replaced } = toStorable({
       ['k\u0000']: ['\ud800', { deep: 'a\u0000\u0000' }],
