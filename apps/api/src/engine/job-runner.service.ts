@@ -315,9 +315,13 @@ export class JobRunnerService implements BeforeApplicationShutdown {
           throw err;
         }
         this.metrics.observeStep(step.type, 'succeeded', startedAt);
-        await this.checkpoints.checkpoint(job, current, output);
+        // Далі — збережене значення (як і після відновлення з чекпоінта), а не сирий результат.
+        ctx.steps[step.id] = await this.checkpoints.checkpoint(
+          job,
+          current,
+          output,
+        );
         current = undefined;
-        ctx.steps[step.id] = output;
       }
       const last = snapshot.steps[snapshot.steps.length - 1];
       await this.checkpoints.finish(job, ctx.steps[last.id]);

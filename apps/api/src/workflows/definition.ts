@@ -1,4 +1,5 @@
 import { BadRequestException } from '@nestjs/common';
+import { findUnstorable } from '../common/storable-text';
 import { StepDefinition } from '../entities';
 
 const STEP_TYPES = ['http', 'transform', 'log', 'delay'] as const;
@@ -192,6 +193,11 @@ export function validateSteps(raw: unknown): StepDefinition[] {
   if (Buffer.byteLength(JSON.stringify(raw)) > MAX_DEFINITION_BYTES) {
     fail(`steps більший за ${MAX_DEFINITION_BYTES} байт`);
   }
+  const unstorable = findUnstorable(raw, 'steps');
+  if (unstorable)
+    fail(
+      `${unstorable} містить символ U+0000 або некоректний Unicode (одиночний сурогат)`,
+    );
   const seen = new Set<string>();
   return raw.map((s: unknown, i) => {
     const where = `steps[${i}]`;

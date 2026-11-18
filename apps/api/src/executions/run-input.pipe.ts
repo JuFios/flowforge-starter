@@ -1,4 +1,5 @@
 import { BadRequestException, Injectable, PipeTransform } from '@nestjs/common';
+import { findUnstorable } from '../common/storable-text';
 
 /** Найбільший розмір вхідних даних виконання (JSON), байт. Зберігається в executions.input. */
 export const MAX_RUN_INPUT_BYTES = 64 * 1024;
@@ -16,6 +17,11 @@ export function parseRunInput(value: unknown): Record<string, unknown> {
   if (Buffer.byteLength(JSON.stringify(value)) > MAX_RUN_INPUT_BYTES)
     throw new BadRequestException(
       `вхідні дані виконання більші за ${MAX_RUN_INPUT_BYTES} байт`,
+    );
+  const unstorable = findUnstorable(value);
+  if (unstorable)
+    throw new BadRequestException(
+      `вхідні дані виконання: рядок ${unstorable} містить символ U+0000 або некоректний Unicode (одиночний сурогат)`,
     );
   return value as Record<string, unknown>;
 }

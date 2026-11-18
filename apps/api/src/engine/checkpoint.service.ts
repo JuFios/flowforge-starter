@@ -1,6 +1,7 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, EntityManager } from 'typeorm';
+import { toStorable, toStorableText } from '../common/storable-text';
 import { Job, StepRun } from '../entities';
 import { FailureOutcome, JobQueueService } from './job-queue.service';
 
@@ -11,6 +12,8 @@ import { FailureOutcome, JobQueueService } from './job-queue.service';
  */
 @Injectable()
 export class CheckpointService {
+  private readonly logger = new Logger(CheckpointService.name);
+
   constructor(
     @InjectDataSource() private readonly ds: DataSource,
     private readonly queue: JobQueueService,
@@ -56,17 +59,35 @@ export class CheckpointService {
    * задачі починається знову з поточного захоплення (1): ліміт спроб діє на кожен крок окремо,
    * а не на весь workflow.
    */
-  async checkpoint(job: Job, run: StepRun, output: unknown): Promise<void> {
+  async checkpoint(job: Job, run: StepRun, output: unknown): Promise<unknown> {
+    const stored = this.storable(job, run.stepId, output);
     await this.ds.transaction(async (em) => {
       await this.queue.assertLease(em, job);
       await em.query(
         `UPDATE step_runs SET status = 'succeeded', output = $2, error = NULL, "finishedAt" = now()
           WHERE id = $1`,
-        [run.id, JSON.stringify(output ?? null)],
+        [run.id, JSON.stringify(stored)],
       );
       await em.query(`UPDATE jobs SET attempts = 1 WHERE id = $1`, [job.id]);
     });
     job.attempts = 1;
+    return stored;
+  }
+
+  /**
+   * Результат кроку в тому вигляді, в якому його збереже Postgres. U+0000 і одиночні сурогати
+   * (напр., у відповіді отримувача) `jsonb` не приймає: замість провалу чекпоінта (і повтору вже
+   * виконаного http-запиту) вони замінюються на U+FFFD. Наступні кроки отримують саме збережене
+   * значення — те саме, що й після відновлення з чекпоінта.
+   */
+  private storable(job: Job, stepId: string, output: unknown): unknown {
+    const { value, replaced } = toStorable(output);
+    if (replaced > 0)
+      this.logger.warn(
+        { jobId: job.id, executionId: job.executionId, stepId, replaced },
+        'step result had characters Postgres cannot store, replaced with U+FFFD',
+      );
+    return value;
   }
 
   /** Виконання успішне: виконання й задача завершуються разом або ніяк. */
@@ -76,7 +97,7 @@ export class CheckpointService {
       await em.query(
         `UPDATE executions SET status = 'succeeded', output = $2, error = NULL, "finishedAt" = now()
           WHERE id = $1`,
-        [job.executionId, JSON.stringify(output ?? null)],
+        [job.executionId, JSON.stringify(toStorable(output).value)],
       );
     });
   }
@@ -91,6 +112,8 @@ export class CheckpointService {
     error: string,
     retryable: boolean,
   ): Promise<FailureOutcome> {
+    // Текст помилки кроку може містити дані тенанта чи отримувача (напр., U+0000).
+    error = toStorableText(error);
     return this.ds.transaction(async (em) => {
       const outcome = await this.queue.failIn(em, job, error, retryable);
       if (run) {
