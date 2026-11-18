@@ -1,7 +1,8 @@
 import { DataSource } from 'typeorm';
 import type { RunningApp } from '../helpers/app';
 import { createTenant, openTestDataSource, truncateAll } from '../helpers/db';
-import { api, Receiver, waitFor } from '../helpers/queue';
+// Лише тип: модуль хелперів імпортує застосунок, а його конфігурація читається під час імпорту.
+import type * as QueueHelpers from '../helpers/queue';
 
 /**
  * Затримка повтору з урахуванням `Retry-After`. Межа backoff тут ширша, ніж в інших тестах
@@ -13,7 +14,8 @@ describe('Retry-After on 429 and 503', () => {
   let ds: DataSource;
   let apiApp: RunningApp;
   let worker: RunningApp;
-  const receiver = new Receiver();
+  let q: typeof QueueHelpers;
+  let receiver: QueueHelpers.Receiver;
   let apiKey: string;
   const saved = process.env.JOB_BACKOFF_MAX_MS;
 
@@ -21,7 +23,8 @@ describe('Retry-After on 429 and 503', () => {
     // Оточення читається під час імпорту модуля застосунку, тож імпорт — після налаштування.
     process.env.JOB_BACKOFF_MAX_MS = String(BACKOFF_MAX_MS);
     const { startApp } = await import('../helpers/app');
-    const { startWorker } = await import('../helpers/queue');
+    q = await import('../helpers/queue');
+    receiver = new q.Receiver();
     ds = await openTestDataSource();
     // Затримка кожного повтору — за годинником БД у момент повернення задачі в чергу.
     await ds.query(`
@@ -38,7 +41,7 @@ describe('Retry-After on 429 and 503', () => {
       CREATE TRIGGER test_record_retry_delay AFTER UPDATE ON jobs
         FOR EACH ROW EXECUTE FUNCTION test_record_retry_delay();`);
     apiApp = await startApp();
-    worker = await startWorker(2);
+    worker = await q.startWorker(2);
     await receiver.start();
   });
 
@@ -75,7 +78,7 @@ describe('Retry-After on 429 and 503', () => {
         return void res.writeHead(status, { 'retry-after': retryAfter }).end();
       res.writeHead(200, { 'content-type': 'application/json' }).end('{}');
     };
-    const wf = await api<{ id: string }>(
+    const wf = await q.api<{ id: string }>(
       apiApp.baseUrl,
       apiKey,
       'POST',
@@ -85,7 +88,7 @@ describe('Retry-After on 429 and 503', () => {
         steps: [{ id: 'call', type: 'http', url: receiver.url('/ra') }],
       },
     );
-    await api(
+    await q.api(
       apiApp.baseUrl,
       apiKey,
       'POST',
@@ -93,7 +96,7 @@ describe('Retry-After on 429 and 503', () => {
       {},
     );
     let delay: number | undefined;
-    await waitFor('the first retry to be scheduled', async () => {
+    await q.waitFor('the first retry to be scheduled', async () => {
       const rows: Array<{ delayMs: number }> = await ds.query(
         `SELECT "delayMs" FROM test_retry_delays`,
       );
