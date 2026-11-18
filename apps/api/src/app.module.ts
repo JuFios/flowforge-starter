@@ -4,8 +4,10 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { ApiKeyGuard } from './auth/api-key.guard';
 import { EnvironmentVariables, validateEnv } from './config/env.validation';
 import { buildDataSourceOptions, ENTITIES } from './database/database.options';
+import { CheckpointService } from './engine/checkpoint.service';
 import { JobQueueService } from './engine/job-queue.service';
 import { JobRunnerService } from './engine/job-runner.service';
+import { QueueMetrics } from './engine/queue.metrics';
 import { StepExecutor } from './engine/step-executor';
 import { ExecutionsController } from './executions/executions.controller';
 import { ExecutionsService } from './executions/executions.service';
@@ -30,15 +32,18 @@ const coreImports = [
   TypeOrmModule.forRootAsync({
     inject: [ConfigService],
     useFactory: (config: ConfigService<EnvironmentVariables, true>) =>
-      buildDataSourceOptions({
-        DATABASE_URL: config.get('DATABASE_URL', { infer: true }),
-        DB_CONNECT_TIMEOUT_MS: config.get('DB_CONNECT_TIMEOUT_MS', {
-          infer: true,
-        }),
-        DB_STATEMENT_TIMEOUT_MS: config.get('DB_STATEMENT_TIMEOUT_MS', {
-          infer: true,
-        }),
-      }),
+      buildDataSourceOptions(
+        {
+          DATABASE_URL: config.get('DATABASE_URL', { infer: true }),
+          DB_CONNECT_TIMEOUT_MS: config.get('DB_CONNECT_TIMEOUT_MS', {
+            infer: true,
+          }),
+          DB_STATEMENT_TIMEOUT_MS: config.get('DB_STATEMENT_TIMEOUT_MS', {
+            infer: true,
+          }),
+        },
+        { poolSize: config.get('DB_POOL_SIZE', { infer: true }) },
+      ),
   }),
   TypeOrmModule.forFeature(ENTITIES),
   ObservabilityModule,
@@ -67,6 +72,12 @@ export class AppModule {}
 @Module({
   imports: coreImports,
   controllers: [MetricsController],
-  providers: [JobQueueService, JobRunnerService, StepExecutor],
+  providers: [
+    JobQueueService,
+    CheckpointService,
+    JobRunnerService,
+    StepExecutor,
+    QueueMetrics,
+  ],
 })
 export class WorkerModule {}

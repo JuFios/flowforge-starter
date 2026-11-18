@@ -101,6 +101,55 @@ describe('validateEnv', () => {
       validateEnv({ ...base, DB_STATEMENT_TIMEOUT_MS: '600001' }),
     ).toThrow(/DB_STATEMENT_TIMEOUT_MS/);
   });
+
+  it('rejects a retry backoff cap below its base', () => {
+    expect(() =>
+      validateEnv({
+        ...base,
+        JOB_BACKOFF_BASE_MS: '5000',
+        JOB_BACKOFF_MAX_MS: '1000',
+      }),
+    ).toThrow(/JOB_BACKOFF_MAX_MS: має бути не менше за JOB_BACKOFF_BASE_MS/);
+    expect(
+      validateEnv({
+        ...base,
+        JOB_BACKOFF_BASE_MS: '5000',
+        JOB_BACKOFF_MAX_MS: '5000',
+      }).JOB_BACKOFF_MAX_MS,
+    ).toBe(5000);
+  });
+
+  it('bounds the HTTP body limit so the largest valid definition and run input still fit', () => {
+    expect(validateEnv(base)).toMatchObject({ HTTP_BODY_LIMIT: 100 * 1024 });
+    // 68 КіБ: визначення кроків до 64 КіБ плюс решта полів запиту.
+    expect(validateEnv({ ...base, HTTP_BODY_LIMIT: '69632' })).toMatchObject({
+      HTTP_BODY_LIMIT: 69_632,
+    });
+    expect(() => validateEnv({ ...base, HTTP_BODY_LIMIT: '69631' })).toThrow(
+      /HTTP_BODY_LIMIT/,
+    );
+    expect(() =>
+      validateEnv({ ...base, HTTP_BODY_LIMIT: String(1024 * 1024 + 1) }),
+    ).toThrow(/HTTP_BODY_LIMIT/);
+    expect(() => validateEnv({ ...base, HTTP_BODY_LIMIT: '100kb' })).toThrow(
+      /HTTP_BODY_LIMIT/,
+    );
+  });
+
+  it('requires a connection pool large enough for every worker loop', () => {
+    expect(validateEnv(base)).toMatchObject({ DB_POOL_SIZE: 10 });
+    expect(
+      validateEnv({ ...base, WORKER_CONCURRENCY: '64', DB_POOL_SIZE: '68' })
+        .DB_POOL_SIZE,
+    ).toBe(68);
+    expect(() =>
+      validateEnv({ ...base, WORKER_CONCURRENCY: '64', DB_POOL_SIZE: '67' }),
+    ).toThrow(/DB_POOL_SIZE: має бути не менше за WORKER_CONCURRENCY \+ 4/);
+    // Значення за замовчуванням (10) не вміщає 64 цикли — конфігурацію треба задати явно.
+    expect(() => validateEnv({ ...base, WORKER_CONCURRENCY: '64' })).toThrow(
+      /DB_POOL_SIZE/,
+    );
+  });
 });
 
 describe('validateDatabaseEnv (migration CLI)', () => {

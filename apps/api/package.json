@@ -7,7 +7,7 @@
     "start": "node dist/main",
     "start:worker": "node dist/worker",
     "start:dev": "nest start --watch",
-    "lint": "eslint \"{src,test}/**/*.ts\" --max-warnings 0",
+    "lint": "eslint \"{src,test,scripts}/**/*.ts\" --max-warnings 0",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "jest -c test/jest-unit.json",
     "migration:generate": "typeorm migration:generate -d dist/database/data-source.js",
@@ -15,10 +15,14 @@
     "migration:run": "typeorm migration:run -d dist/database/data-source.js",
     "migration:revert": "typeorm migration:revert -d dist/database/data-source.js",
     "migration:show": "typeorm migration:show -d dist/database/data-source.js",
+    "pretest:integration": "nest build",
     "test:integration": "jest -c test/jest-integration.json",
     "test:all": "npm run test && npm run test:integration",
     "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "format:check": "prettier --check .",
+    "chaos": "tsc -p scripts/tsconfig.json && node dist/scripts/chaos-kill-worker.js",
+    "chaos:postgres": "tsc -p scripts/tsconfig.json && node dist/scripts/chaos-restart-postgres.js",
+    "chaos:sink:build": "tsc -p scripts/tsconfig.json"
   },
   "dependencies": {
     "@nestjs/common": "^10.3.0",

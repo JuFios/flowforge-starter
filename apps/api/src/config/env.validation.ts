@@ -27,6 +27,10 @@ export type LogLevel = (typeof LOG_LEVELS)[number];
 /** Найбільша затримка, яку приймають setTimeout/setInterval (2^31 - 1 мс). */
 export const MAX_TIMER_MS = 2_147_483_647;
 
+/** Межі HTTP_BODY_LIMIT, байт: 68 КіБ (визначення 64 КіБ + решта полів) .. 1 МіБ. */
+export const MIN_HTTP_BODY_LIMIT = 68 * 1024;
+export const MAX_HTTP_BODY_LIMIT = 1024 * 1024;
+
 /** Значення-приклади й очевидні заглушки: публічно відомі, тож не є секретом. */
 const PLACEHOLDER_SECRET =
   /change[\s_-]*me|example|placeholder|default|password|secret|qwerty|12345/i;
@@ -63,6 +67,35 @@ function IsSecureSecretInProduction(): PropertyDecorator {
       },
     });
 }
+
+/** Значення не менше за значення іншої властивості того самого об'єкта (плюс `extra`). */
+function IsNotLessThan(other: string, extra = 0): PropertyDecorator {
+  return (target, propertyName) =>
+    registerDecorator({
+      name: 'isNotLessThan',
+      target: target.constructor,
+      propertyName: propertyName as string,
+      constraints: [other, extra],
+      validator: {
+        validate(value: unknown, args: ValidationArguments) {
+          const bound = (args.object as Record<string, unknown>)[other];
+          return (
+            typeof value !== 'number' ||
+            typeof bound !== 'number' ||
+            value >= bound + extra
+          );
+        },
+        defaultMessage: () =>
+          `має бути не менше за ${other}${extra ? ` + ${extra}` : ''}`,
+      },
+    });
+}
+
+/**
+ * Запас пулу понад WORKER_CONCURRENCY: heartbeat-и задач у роботі (паралельно з записами
+ * циклів), reaper, очищення старих задач і перевірка /ready.
+ */
+export const DB_POOL_HEADROOM = 4;
 
 /**
  * Підключення до Postgres. Окремий клас, бо його валідує й CLI міграцій, якому решта
@@ -117,6 +150,17 @@ export class EnvironmentVariables extends DatabaseEnvironment {
   @Max(65535)
   METRICS_PORT = 3200;
 
+  /**
+   * Найбільше JSON-тіло HTTP-запиту, байт; більше — 413 ще до розбору. Нижня межа гарантує, що
+   * найбільші легітимні тіла вміщуються: визначення кроків до 64 КіБ плюс решта полів workflow
+   * (вхід виконання — теж до 64 КіБ). Верхня обмежує пам'ять, яку займає один запит.
+   */
+  @Type(() => Number)
+  @IsInt()
+  @Min(MIN_HTTP_BODY_LIMIT)
+  @Max(MAX_HTTP_BODY_LIMIT)
+  HTTP_BODY_LIMIT = 100 * 1024;
+
   @IsString()
   @MinLength(12)
   @IsSecureSecretInProduction()
@@ -131,12 +175,109 @@ export class EnvironmentVariables extends DatabaseEnvironment {
   @Max(64)
   WORKER_CONCURRENCY = 4;
 
+  /**
+   * Найбільша кількість з'єднань із Postgres в одному процесі (пул pg). Не менша за
+   * WORKER_CONCURRENCY + запас: інакше при повільній БД heartbeat-и стоять у черзі пулу позаду
+   * опитувань черги, і lease-и минають. Сума пулів усіх процесів має вміщатися в max_connections.
+   */
+  @Type(() => Number)
+  @IsInt()
+  @Min(1 + DB_POOL_HEADROOM)
+  @Max(1000)
+  @IsNotLessThan('WORKER_CONCURRENCY', DB_POOL_HEADROOM)
+  DB_POOL_SIZE = 10;
+
   /** Порт службового HTTP воркера (/health, /ready, /metrics). */
   @Type(() => Number)
   @IsInt()
   @Min(1)
   @Max(65535)
   WORKER_HTTP_PORT = 3100;
+
+  /**
+   * Тривалість lease задачі. Воркер продовжує lease (heartbeat) кожну третину цього часу; задачу
+   * воркера, що не продовжив lease вчасно (упав, завис, втратив мережу), повертає в чергу reaper.
+   * Найдовший крок не обмежений lease-ом: поки воркер живий, lease продовжується.
+   */
+  @Type(() => Number)
+  @IsInt()
+  @Min(500)
+  @Max(600_000)
+  JOB_LEASE_MS = 30_000;
+
+  /**
+   * Як часто вільний цикл воркера перевіряє чергу, коли задач немає (з випадковим відхиленням
+   * ±50%, щоб воркери не опитували БД синхронно).
+   */
+  @Type(() => Number)
+  @IsInt()
+  @Min(10)
+  @Max(60_000)
+  WORKER_POLL_INTERVAL_MS = 500;
+
+  /**
+   * Скільки спроб має кожен крок виконання (лічильник починається знову після кожного
+   * завершеного кроку). Після вичерпання повторюваних помилок задача переходить у стан `dead`.
+   */
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(100)
+  JOB_MAX_ATTEMPTS = 5;
+
+  /** Нижня межа затримки повтору задачі, мс (і база експоненти). */
+  @Type(() => Number)
+  @IsInt()
+  @Min(10)
+  @Max(3_600_000)
+  JOB_BACKOFF_BASE_MS = 1_000;
+
+  /** Верхня межа затримки повтору задачі, мс. Не менша за JOB_BACKOFF_BASE_MS. */
+  @Type(() => Number)
+  @IsInt()
+  @Min(10)
+  @Max(86_400_000)
+  @IsNotLessThan('JOB_BACKOFF_BASE_MS')
+  JOB_BACKOFF_MAX_MS = 300_000;
+
+  /**
+   * Скільки воркер під час завершення чекає на задачі в роботі; потім скасовує їх і повертає в
+   * чергу. Має бути помітно меншим за час, який оркестратор дає на зупинку (у compose —
+   * stop_grace_period воркера), інакше процес буде вбито раніше, ніж задачі повернуться.
+   */
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(600_000)
+  WORKER_SHUTDOWN_GRACE_MS = 20_000;
+
+  /**
+   * Скільки днів зберігаються завершені задачі (`done`, `failed`, `dead`), перш ніж воркер їх
+   * видалить. Виконання й кроки не видаляються — це історія тенанта, яку показує API.
+   */
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(3650)
+  JOB_RETENTION_DAYS = 30;
+
+  /**
+   * Скільки днів зберігається історія виконань (`executions` разом із `step_runs` і `jobs`) після
+   * завершення. 0 — зберігати завжди (за замовчуванням): історію тенанта, яку показує API,
+   * платформа без явного рішення оператора не видаляє.
+   */
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(3650)
+  EXECUTION_RETENTION_DAYS = 0;
+
+  /** Як часто кожен воркер видаляє завершені задачі, старші за JOB_RETENTION_DAYS (з jitter). */
+  @Type(() => Number)
+  @IsInt()
+  @Min(1_000)
+  @Max(MAX_TIMER_MS)
+  JOB_CLEANUP_INTERVAL_MS = 3_600_000;
 
   /**
    * ТИМЧАСОВА МЕЖА — до переробки планувальника (ТЗ 3.3.8).

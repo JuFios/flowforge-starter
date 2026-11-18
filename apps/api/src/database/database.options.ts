@@ -1,9 +1,23 @@
 import { DataSourceOptions } from 'typeorm';
 import type { DatabaseEnvironment } from '../config/env.validation';
-import { Execution, Job, StepRun, Tenant, Workflow } from '../entities';
+import {
+  Execution,
+  Job,
+  StepRun,
+  Tenant,
+  Workflow,
+  WorkflowVersion,
+} from '../entities';
 import { MIGRATIONS } from './migrations';
 
-export const ENTITIES = [Tenant, Workflow, Execution, StepRun, Job];
+export const ENTITIES = [
+  Tenant,
+  Workflow,
+  WorkflowVersion,
+  Execution,
+  StepRun,
+  Job,
+];
 
 /**
  * Запас клієнтського query_timeout понад statement_timeout: спершу запит скасовує сервер (з
@@ -13,6 +27,8 @@ export const ENTITIES = [Tenant, Workflow, Execution, StepRun, Job];
 export const QUERY_TIMEOUT_GRACE_MS = 5_000;
 
 export interface DataSourceBuildOptions {
+  /** Розмір пулу з'єднань (DB_POOL_SIZE); без нього — значення pg за замовчуванням (10). */
+  poolSize?: number;
   /**
    * Обмежувати тривалість запитів (statement_timeout, idle_in_transaction_session_timeout,
    * клієнтський query_timeout). Вимикається лише для CLI міграцій: зміна схеми великої таблиці
@@ -33,7 +49,7 @@ export function buildDataSourceOptions(
     DatabaseEnvironment,
     'DATABASE_URL' | 'DB_CONNECT_TIMEOUT_MS' | 'DB_STATEMENT_TIMEOUT_MS'
   >,
-  { statementTimeout = true }: DataSourceBuildOptions = {},
+  { statementTimeout = true, poolSize }: DataSourceBuildOptions = {},
 ): DataSourceOptions {
   const statementMs = db.DB_STATEMENT_TIMEOUT_MS;
   return {
@@ -41,6 +57,7 @@ export function buildDataSourceOptions(
     url: db.DATABASE_URL,
     // Без нього pg чекає встановлення з'єднання необмежено (сервер прийняв TCP і мовчить).
     connectTimeoutMS: db.DB_CONNECT_TIMEOUT_MS,
+    ...(poolSize !== undefined && { poolSize }),
     extra: statementTimeout
       ? {
           statement_timeout: statementMs,

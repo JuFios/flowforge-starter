@@ -14,6 +14,23 @@ import { createHmac } from 'crypto';
 import { Repository } from 'typeorm';
 import { Tenant, Workflow } from '../entities';
 import { ExecutionsService } from '../executions/executions.service';
+import { parseRunInput } from '../executions/run-input.pipe';
+
+/**
+ * Очікуваний підпис тіла або undefined, якщо тіло неможливо серіалізувати: на надглибокій
+ * вкладеності JSON.stringify переповнює стек (RangeError). Такий підпис не підтверджується —
+ * відповідь 401, як і на будь-який непідтверджений запит, а не 500.
+ */
+function expectedSignature(secret: string, body: unknown): string | undefined {
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(body);
+  } catch (err) {
+    if (err instanceof RangeError) return undefined;
+    throw err;
+  }
+  return createHmac('sha256', secret).update(serialized).digest('hex');
+}
 
 /**
  * Вхідні webhook-и. Підпис: hex HMAC-SHA256 від тіла запиту
@@ -32,7 +49,9 @@ export class WebhooksController {
   @HttpCode(202)
   async receive(
     @Param('workflowId', ParseUUIDPipe) workflowId: string,
-    @Body() body: Record<string, unknown>,
+    // Без пайпа: вхід перевіряється лише після підпису, інакше неавтентифікований запит
+    // отримав би 400 з поясненням формату замість 401.
+    @Body() body: unknown,
     @Headers('x-signature') signature?: string,
   ) {
     const workflow = await this.workflows.findOne({
@@ -43,14 +62,13 @@ export class WebhooksController {
       where: { id: workflow.tenantId },
     });
 
-    const expected = createHmac('sha256', tenant.webhookSecret)
-      .update(JSON.stringify(body))
-      .digest('hex');
-    if (signature !== expected) {
+    const expected = expectedSignature(tenant.webhookSecret, body);
+    if (expected === undefined || signature !== expected) {
       throw new UnauthorizedException('Невірний підпис');
     }
 
-    const execution = await this.executions.enqueue(workflow, body, 'webhook');
+    const input = parseRunInput(body);
+    const execution = await this.executions.enqueue(workflow, input, 'webhook');
     return { executionId: execution.id };
   }
 }

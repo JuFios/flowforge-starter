@@ -9,6 +9,7 @@ import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { randomBytes, timingSafeEqual } from 'crypto';
 import { IsString, MinLength } from 'class-validator';
+import { IsStorableText } from '../common/storable-text';
 import { Repository } from 'typeorm';
 import { hashApiKey } from '../auth/api-key.guard';
 import { EnvironmentVariables } from '../config/env.validation';
@@ -16,6 +17,7 @@ import { Tenant } from '../entities';
 
 class CreateTenantDto {
   @IsString()
+  @IsStorableText()
   @MinLength(2)
   name: string;
 }
