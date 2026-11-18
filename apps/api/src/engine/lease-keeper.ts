@@ -28,8 +28,9 @@ export class LeaseKeeper {
     private readonly queue: JobQueueService,
     private readonly job: Job,
     private readonly leaseMs: number,
+    leaseStartedAt: number,
   ) {
-    this.validUntil = Date.now() + leaseMs;
+    this.validUntil = leaseStartedAt + leaseMs;
   }
 
   /** Скасовується, коли lease втрачено (або зупинку запросив воркер, див. `abort`). */
@@ -39,7 +40,8 @@ export class LeaseKeeper {
 
   start(): this {
     this.armDeadline();
-    this.schedule();
+    const firstRenewal = this.validUntil - (2 * this.leaseMs) / 3;
+    this.schedule(Math.max(0, firstRenewal - performance.now()));
     return this;
   }
 
@@ -57,28 +59,43 @@ export class LeaseKeeper {
   /** Скасувати роботу, коли до кінця відомого lease лишається частка SAFETY. */
   private armDeadline(): void {
     clearTimeout(this.deadline);
-    const at = this.validUntil - this.leaseMs * LeaseKeeper.SAFETY;
-    this.deadline = setTimeout(
-      () => {
-        if (this.stopped || this.controller.signal.aborted) return;
-        this.logger.warn(
-          { jobId: this.job.id, executionId: this.job.executionId },
-          'lease could not be renewed in time, abandoning job',
-        );
-        this.abort(new Error('lease could not be renewed'));
-      },
-      Math.max(0, at - Date.now()),
+    const remaining = this.safeTimeRemaining();
+    if (remaining <= 0) {
+      this.expire();
+      return;
+    }
+    this.deadline = setTimeout(() => this.expire(), Math.ceil(remaining));
+  }
+
+  private safeTimeRemaining(): number {
+    return (
+      this.validUntil - this.leaseMs * LeaseKeeper.SAFETY - performance.now()
     );
   }
 
-  private schedule(): void {
+  private expire(): void {
+    if (this.stopped || this.signal.aborted) return;
+    this.logger.warn(
+      { jobId: this.job.id, executionId: this.job.executionId },
+      'lease could not be renewed in time, abandoning job',
+    );
+    this.abort(new Error('lease could not be renewed'));
+  }
+
+  /** Перевіряємо час перед ефектом і після SQL, навіть якщо цикл подій затримав таймер. */
+  assertActive(): void {
+    if (this.safeTimeRemaining() <= 0) this.expire();
+    this.signal.throwIfAborted();
+  }
+
+  private schedule(delayMs = this.leaseMs / 3): void {
     if (this.stopped || this.controller.signal.aborted) return;
-    this.timer = setTimeout(() => void this.renew(), this.leaseMs / 3);
+    this.timer = setTimeout(() => void this.renew(), delayMs);
   }
 
   private async renew(): Promise<void> {
     if (this.stopped) return;
-    const startedAt = Date.now();
+    const startedAt = performance.now();
     try {
       const renewed = await this.queue.heartbeat(this.job);
       if (this.stopped || this.signal.aborted) return;

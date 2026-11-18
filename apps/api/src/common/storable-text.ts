@@ -60,23 +60,20 @@ export interface Storable<T> {
  * збереженими. Якщо два ключі після заміни збіглися, лишається останній (як у JSON.parse).
  */
 export function toStorable(value: unknown): Storable<unknown> {
-  let replaced = 0;
-  const text = (s: string): string =>
-    s.replace(UNSTORABLE, () => {
-      replaced += 1;
-      return REPLACEMENT_CHARACTER;
-    });
-  const walk = (v: unknown): unknown => {
-    if (typeof v === 'string') return text(v);
-    if (Array.isArray(v)) return v.map(walk);
-    if (typeof v === 'object' && v !== null)
-      return Object.fromEntries(
-        Object.entries(v).map(([k, item]) => [text(k), walk(item)]),
-      );
-    return v;
-  };
   const json = JSON.stringify(value ?? null) ?? 'null';
-  return { value: walk(JSON.parse(json)), replaced };
+  let replaced = 0;
+  // JSON.stringify екранує NUL і одиночні сурогати як \uXXXX, а коректні пари
+  // лишає символами Unicode. Пари зворотних скісних рисок пропускаємо разом:
+  // буквальний текст «\u0000» має зберегтися. Однаково обробляються ключі та значення.
+  const sanitized = json.replace(
+    /\\\\|\\u(?:0000|d[89a-f][0-9a-f]{2})/g,
+    (escape) => {
+      if (escape.length === 2) return escape;
+      replaced++;
+      return REPLACEMENT_CHARACTER;
+    },
+  );
+  return { value: JSON.parse(sanitized) as unknown, replaced };
 }
 
 /** Рядок без символів, яких Postgres не зберігає (U+0000, одиночні сурогати). */

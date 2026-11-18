@@ -223,7 +223,8 @@ export class JobRunnerService implements BeforeApplicationShutdown {
     try {
       for (const job of await this.queue.reapExpired(this.stopping.signal)) {
         this.metrics.leasesExpired.inc();
-        this.metrics.observeFailure(job.outcome, 'lease_expired');
+        if (job.outcome !== 'done')
+          this.metrics.observeFailure(job.outcome, 'lease_expired');
         await runWithCorrelationId(
           job.correlationId ?? newCorrelationId(),
           'job',
@@ -237,7 +238,9 @@ export class JobRunnerService implements BeforeApplicationShutdown {
               },
               job.outcome === 'retry'
                 ? 'lease expired, job returned to the queue'
-                : 'lease expired, no attempts left',
+                : job.outcome === 'done'
+                  ? 'lease expired after the final checkpoint, execution finalized'
+                  : 'lease expired, no attempts left',
             );
             return Promise.resolve();
           },
@@ -329,11 +332,12 @@ export class JobRunnerService implements BeforeApplicationShutdown {
    * Непередбачена помилка логується тут же, всередині контексту (той самий correlationId,
    * jobId, executionId), і передається далі.
    */
-  process(job: Job): Promise<void> {
+  process(job: ClaimedJob): Promise<void> {
     const keeper = new LeaseKeeper(
       this.queue,
       job,
       this.config.get('JOB_LEASE_MS', { infer: true }),
+      job.leaseStartedAt,
     );
     const done = runWithCorrelationId(
       job.correlationId ?? newCorrelationId(),
@@ -341,7 +345,8 @@ export class JobRunnerService implements BeforeApplicationShutdown {
       async () => {
         keeper.start();
         try {
-          await this.processInContext(job, keeper.signal);
+          keeper.assertActive();
+          await this.processInContext(job, keeper);
         } catch (err) {
           if (keeper.signal.reason instanceof ShutdownAbort) {
             await this.releaseOnShutdown(job);
@@ -391,7 +396,8 @@ export class JobRunnerService implements BeforeApplicationShutdown {
     }
   }
 
-  private async processInContext(job: Job, signal: AbortSignal): Promise<void> {
+  private async processInContext(job: Job, keeper: LeaseKeeper): Promise<void> {
+    const signal = keeper.signal;
     this.logger.log(
       { jobId: job.id, executionId: job.executionId, attempt: job.attempts },
       'processing job',
@@ -402,6 +408,7 @@ export class JobRunnerService implements BeforeApplicationShutdown {
     const ctx: StepContext = { input: execution.input, steps: {} };
     /** Крок, що виконується зараз (для запису провалу). */
     let current: StepRun | undefined;
+    let finalOutput: unknown;
     try {
       // Знімок версії, зафіксований під час створення виконання, а не поточний стан workflow.
       // Без знімку виконання запускати не можна: `{ id: undefined }` TypeORM виконав би без умови
@@ -429,7 +436,7 @@ export class JobRunnerService implements BeforeApplicationShutdown {
           ctx.steps[step.id] = previous.output;
           continue;
         }
-        signal.throwIfAborted();
+        keeper.assertActive();
         if (step.type === 'delay') {
           const output = { waitedMs: step.ms };
           if (previous?.wakeAt) {
@@ -465,6 +472,7 @@ export class JobRunnerService implements BeforeApplicationShutdown {
         const startedAt = Date.now();
         let output: unknown;
         try {
+          keeper.assertActive();
           output = await this.executor.execute(step, ctx, {
             signal,
             idempotencyKey: current.idempotencyKey,
@@ -483,7 +491,7 @@ export class JobRunnerService implements BeforeApplicationShutdown {
         current = undefined;
       }
       const last = snapshot.steps[snapshot.steps.length - 1];
-      await this.checkpoints.finish(job, ctx.steps[last.id]);
+      finalOutput = ctx.steps[last.id];
     } catch (err) {
       if (err instanceof LeaseLostError || signal.aborted) throw err;
       // Тенант бачить лише помилки самого кроку; текст будь-якої іншої (БД, ORM, баг) може
@@ -515,6 +523,10 @@ export class JobRunnerService implements BeforeApplicationShutdown {
         },
         outcome === 'retry' ? 'step failed, will retry' : 'step failed',
       );
+      return;
     }
+    // Усі кроки вже записано. Помилка окремого COMMIT завершення лишає роботу
+    // reaper-у, який фіналізує execution зі збереженого результату.
+    await this.checkpoints.finish(job, finalOutput);
   }
 }

@@ -1,11 +1,13 @@
 import {
   ArgumentMetadata,
+  BadRequestException,
   INestApplication,
   ValidationPipe,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { Logger } from 'nestjs-pino';
+import { getMetadataStorage } from 'class-validator';
 import { EnvironmentVariables } from './config/env.validation';
 import {
   CreateWorkflowDto,
@@ -19,6 +21,27 @@ class ApiValidationPipe extends ValidationPipe {
     value: unknown,
     metadata: ArgumentMetadata,
   ): Promise<unknown> {
+    if (
+      metadata.type === 'body' &&
+      metadata.metatype &&
+      this.toValidate(metadata) &&
+      value !== null &&
+      typeof value === 'object'
+    ) {
+      // Перевіряємо вихідні ключі JSON, поки class-transformer ще не відкинув частину з них.
+      const fields = getMetadataStorage().getTargetValidationMetadatas(
+        metadata.metatype,
+        '',
+        false,
+        false,
+      );
+      const allowed = new Set(fields.map((field) => field.propertyName));
+      const unknown = Object.keys(value).filter((key) => !allowed.has(key));
+      if (unknown.length)
+        throw new BadRequestException(
+          unknown.map((key) => `property ${key} should not exist`),
+        );
+    }
     if (
       (metadata.metatype === CreateWorkflowDto ||
         metadata.metatype === UpdateWorkflowDto) &&

@@ -3,11 +3,14 @@ import { ConfigService } from '@nestjs/config';
 import { Repository } from 'typeorm';
 import { EnvironmentVariables } from '../../src/config/env.validation';
 import { CheckpointService } from '../../src/engine/checkpoint.service';
-import { JobQueueService } from '../../src/engine/job-queue.service';
+import {
+  ClaimedJob,
+  JobQueueService,
+} from '../../src/engine/job-queue.service';
 import { JobRunnerService } from '../../src/engine/job-runner.service';
 import { QueueMetrics } from '../../src/engine/queue.metrics';
 import { StepExecutor } from '../../src/engine/step-executor';
-import { Execution, Job, WorkflowVersion } from '../../src/entities';
+import { Execution, WorkflowVersion } from '../../src/entities';
 
 /**
  * Воркер виконує лише знімок версії, зафіксований у виконанні. Пошук `{ id: undefined }` TypeORM
@@ -64,7 +67,8 @@ describe('worker without a workflow version snapshot', () => {
       executionId: 'e-1',
       lockToken: 't',
       attempts: 1,
-    } as Job);
+      leaseStartedAt: performance.now(),
+    } as ClaimedJob);
 
     expect(anyVersion).not.toHaveBeenCalled();
     expect(fail).toHaveBeenCalledWith(

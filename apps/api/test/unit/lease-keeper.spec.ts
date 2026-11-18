@@ -11,6 +11,7 @@ function keeperWith(heartbeat: jest.Mock): LeaseKeeper {
     { heartbeat } as unknown as JobQueueService,
     job,
     LEASE_MS,
+    performance.now(),
   ).start();
 }
 
@@ -34,6 +35,25 @@ describe('LeaseKeeper', () => {
 
     expect(heartbeat).toHaveBeenCalledTimes(9);
     expect(keeper.signal.aborted).toBe(false);
+  });
+
+  it('counts time spent waiting for claim toward both the first renewal and the safety deadline', async () => {
+    const sent = performance.now();
+    await jest.advanceTimersByTimeAsync(1500);
+    const heartbeat = jest.fn(() => new Promise<boolean>(() => undefined));
+    const keeper = new LeaseKeeper(
+      { heartbeat } as unknown as JobQueueService,
+      job,
+      LEASE_MS,
+      sent,
+    ).start();
+    await jest.advanceTimersByTimeAsync(1);
+    expect(heartbeat).toHaveBeenCalledTimes(1);
+    await jest.advanceTimersByTimeAsync(898);
+    expect(keeper.signal.aborted).toBe(false);
+    await jest.advanceTimersByTimeAsync(1);
+    expect(keeper.signal.aborted).toBe(true);
+    keeper.stop();
   });
 
   it('leaves no timer when a pending renewal succeeds after stop', async () => {

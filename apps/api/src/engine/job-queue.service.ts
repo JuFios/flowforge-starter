@@ -32,7 +32,7 @@ export function backoffMs(
 
 /**
  * Затримка повтору з урахуванням побажання отримувача (`Retry-After`): не раніше, ніж він просить,
- * не коротша за звичайний backoff (його нижня межа і jitter лишаються) і не довша за `maxMs` —
+ * обмежена зверху `maxMs`. Якщо підказка переважає випадковий backoff, затримка фіксована —
  * отримувач не може відкласти задачу довше, ніж дозволяє конфігурація.
  */
 export function retryDelayMs(
@@ -54,7 +54,7 @@ export class LeaseLostError extends Error {
 }
 
 /** Захоплена задача: момент захоплення — за годинником БД (для метрики затримки захоплення). */
-export type ClaimedJob = Job & { claimedAt: Date };
+export type ClaimedJob = Job & { claimedAt: Date; leaseStartedAt: number };
 
 /** Задача, повернута reaper-ом після простроченого lease. */
 export interface ReapedJob {
@@ -62,7 +62,7 @@ export interface ReapedJob {
   executionId: string;
   correlationId: string | null;
   attempts: number;
-  outcome: 'retry' | 'dead';
+  outcome: 'retry' | 'dead' | 'done';
 }
 
 export type FailureOutcome = 'retry' | 'failed' | 'dead';
@@ -172,7 +172,8 @@ export class JobQueueService {
    * видає новий fencing-токен `lockToken`. Увесь час — за годинником БД, не процесу.
    */
   async claimNext(workerId: string): Promise<ClaimedJob | null> {
-    const [rows]: [ClaimedJob[], number] = await this.ds.query(
+    const leaseStartedAt = performance.now();
+    const [rows]: [(Job & { claimedAt: Date })[], number] = await this.ds.query(
       `UPDATE jobs
           SET status = 'running', "lockedBy" = $1, "lockToken" = gen_random_uuid(),
               "lockedUntil" = now() + make_interval(secs => $2),
@@ -181,7 +182,7 @@ export class JobQueueService {
         RETURNING *, now() AS "claimedAt"`,
       [workerId, this.leaseSeconds],
     );
-    return rows[0] ?? null;
+    return rows[0] ? { ...rows[0], leaseStartedAt } : null;
   }
 
   /**
@@ -312,15 +313,44 @@ export class JobQueueService {
     return reaped;
   }
 
+  /** Якщо всі кроки зі знімка вже закомічені, лишився лише запис кінцевого стану.
+   * Reaper тримає блокування job. Вихід останнього кроку копіюється всередині БД. */
+  private async finishCheckpointed(
+    em: EntityManager,
+    job: Job,
+  ): Promise<boolean> {
+    const [, finished]: [unknown[], number] = await em.query(
+      `UPDATE executions e SET status = 'succeeded', output = last.output, error = NULL, "finishedAt" = now()
+         FROM workflow_versions v, step_runs last
+        WHERE e.id = $1 AND v.id = e."workflowVersionId"
+          AND last."executionId" = e.id AND last."stepIndex" = jsonb_array_length(v.steps) - 1
+          AND NOT EXISTS (
+            SELECT FROM jsonb_array_elements(v.steps) WITH ORDINALITY AS step(definition, n)
+             WHERE NOT EXISTS (
+               SELECT FROM step_runs r WHERE r."executionId" = e.id AND r."stepIndex" = step.n - 1
+                 AND r."stepId" = step.definition->>'id' AND r.status = 'succeeded'
+             )
+          )`,
+      [job.executionId],
+    );
+    if (!finished) return false;
+    await this.completeIn(em, job);
+    return true;
+  }
+
   private async reapBatch(): Promise<ReapedJob[]> {
     return this.ds.transaction(async (em) => {
       const expired: Job[] = await em.query(EXPIRED_LEASES_SQL);
       const reaped: ReapedJob[] = [];
       for (const job of expired) {
         const error = `lease expired: worker ${job.lockedBy ?? '?'} stopped renewing it`;
-        const outcome: FailureOutcome =
-          job.attempts < job.maxAttempts ? 'retry' : 'dead';
-        await this.applyFailure(em, job, error, outcome);
+        let outcome: ReapedJob['outcome'];
+        if (await this.finishCheckpointed(em, job)) {
+          outcome = 'done';
+        } else {
+          outcome = job.attempts < job.maxAttempts ? 'retry' : 'dead';
+          await this.applyFailure(em, job, error, outcome);
+        }
         if (outcome === 'dead') {
           const final = `${error}; no attempts left (${job.attempts}/${job.maxAttempts})`;
           await em.query(

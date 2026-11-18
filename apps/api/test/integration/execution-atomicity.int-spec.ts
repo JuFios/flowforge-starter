@@ -1,6 +1,6 @@
 import { DataSource } from 'typeorm';
 import { AppModule } from '../../src/app.module';
-import { Execution, StepRun } from '../../src/entities';
+import { Execution, Job, StepRun } from '../../src/entities';
 import { RunningApp, startApp } from '../helpers/app';
 import { createTenant, openTestDataSource, truncateAll } from '../helpers/db';
 import { api, sleep, startWorker, waitFor } from '../helpers/queue';
@@ -63,6 +63,7 @@ describe('finishing an execution is atomic', () => {
       {},
     );
     const id = run.body.id;
+    await ds.getRepository(Job).update({ executionId: id }, { maxAttempts: 1 });
 
     // Спостерігач фіксує кожен проміжний стан пари execution/job.
     const inconsistent: string[] = [];

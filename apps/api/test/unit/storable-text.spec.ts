@@ -52,6 +52,20 @@ describe('text that Postgres can store', () => {
     expect(replaced).toBe(4);
   });
 
+  it('preserves literal JSON escape sequences and resolves normalized key collisions in order', () => {
+    const literals = [
+      String.raw`\u0000`,
+      String.raw`\\ud800`,
+      '😀',
+      '\\\u0000',
+    ];
+    const data = { literals, ['k\u0000']: 1, [`k${R}`]: 2 };
+    expect(toStorable(data)).toEqual({
+      value: { literals: [...literals.slice(0, 3), '\\' + R], [`k${R}`]: 2 },
+      replaced: 2,
+    });
+  });
+
   it('returns exactly what JSON stores for values JSON changes on the way', () => {
     expect(toStorable(undefined)).toEqual({ value: null, replaced: 0 });
     expect(

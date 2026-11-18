@@ -3,11 +3,14 @@ import { ConfigService } from '@nestjs/config';
 import { Repository } from 'typeorm';
 import { EnvironmentVariables } from '../../src/config/env.validation';
 import { CheckpointService } from '../../src/engine/checkpoint.service';
-import { JobQueueService } from '../../src/engine/job-queue.service';
+import {
+  ClaimedJob,
+  JobQueueService,
+} from '../../src/engine/job-queue.service';
 import { JobRunnerService } from '../../src/engine/job-runner.service';
 import { QueueMetrics } from '../../src/engine/queue.metrics';
 import { StepExecutor } from '../../src/engine/step-executor';
-import { Execution, Job, Workflow, WorkflowVersion } from '../../src/entities';
+import { Execution, Workflow, WorkflowVersion } from '../../src/entities';
 import { ExecutionsService } from '../../src/executions/executions.service';
 import { getCorrelationId } from '../../src/observability/correlation';
 import { SchedulerService } from '../../src/scheduler/scheduler.service';
@@ -61,7 +64,7 @@ describe('background error logs keep the correlation context', () => {
       executions,
       {} as Repository<WorkflowVersion>,
       {} as CheckpointService,
-      config({ WORKER_CONCURRENCY: 1 }),
+      config({ WORKER_CONCURRENCY: 1, JOB_LEASE_MS: 60000 }),
       {} as QueueMetrics,
     );
     const job = {
@@ -69,7 +72,8 @@ describe('background error logs keep the correlation context', () => {
       executionId: 'exec-1',
       correlationId: 'origin-req-9',
       attempts: 1,
-    } as Job;
+      leaseStartedAt: performance.now(),
+    } as ClaimedJob;
 
     await runner.process(job).catch(() => undefined);
 
