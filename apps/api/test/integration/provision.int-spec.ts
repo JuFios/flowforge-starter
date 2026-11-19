@@ -2,6 +2,8 @@ import { randomBytes } from 'node:crypto';
 import { DataSource } from 'typeorm';
 import { LoginRole, provisionLoginRoles } from '../../src/database/provision';
 import { API_ROLE, WORKER_ROLE } from '../../src/tenancy/roles';
+import { waitForBlocked } from '../helpers/transaction-barrier';
+
 import { openTestDataSource } from '../helpers/db';
 import { clusterScopedName, testRoleUrl } from '../helpers/test-env';
 
@@ -73,6 +75,52 @@ describe('db:provision', () => {
       );
     await owner.destroy();
   });
+
+  it.each(['commit', 'rollback'])(
+    'provisions the same first logins after a concurrent %s',
+    async (outcome) => {
+      const desired = roles(passwords.first).map((role) => ({
+        ...role,
+        user: clusterScopedName(
+          'ff_race_' + (role.group === API_ROLE ? 'api' : 'worker'),
+        ),
+      }));
+      const holder = owner.createQueryRunner();
+      await holder.connect();
+      await holder.startTransaction();
+      try {
+        await provisionLoginRoles(
+          (sql, params) => holder.query(sql, params),
+          desired,
+        );
+        const other = owner.transaction((em) =>
+          provisionLoginRoles((sql, params) => em.query(sql, params), desired),
+        );
+        const result = Promise.allSettled([other]);
+        await waitForBlocked(owner, holder);
+        if (outcome === 'commit') await holder.commitTransaction();
+        else await holder.rollbackTransaction();
+        expect(await result).toEqual([
+          { status: 'fulfilled', value: undefined },
+        ]);
+        for (const role of desired)
+          expect(await canLogin(role.user, role.password)).toBe(true);
+      } finally {
+        if (holder.isTransactionActive) await holder.rollbackTransaction();
+        await holder.release();
+        for (const role of desired) {
+          const rows = await owner.query<unknown[]>(
+            'SELECT 1 FROM pg_roles WHERE rolname=$1',
+            [role.user],
+          );
+          if (rows.length) {
+            await owner.query(`DROP OWNED BY "${role.user}"`);
+            await owner.query(`DROP ROLE "${role.user}"`);
+          }
+        }
+      }
+    },
+  );
 
   it('creates both roles, which can log in with their passwords', async () => {
     await provisionLoginRoles(query, roles(passwords.first));
