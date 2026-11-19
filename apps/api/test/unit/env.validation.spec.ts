@@ -68,7 +68,7 @@ describe('validateEnv', () => {
         expect(
           validateEnv({
             ...base,
-            HTTP_STEP_TIMEOUT_MS: timeout,
+            HTTP_STEP_TIMEOUT_MS: String(timeout),
             OUTBOX_CONCURRENCY: concurrency,
           }).HTTP_STEP_TIMEOUT_MS,
         ).toBe(timeout);

@@ -49,6 +49,11 @@ describe('scheduler and outbox query plans', () => {
          FROM generate_series(1, 50000) g`,
       [tenantId],
     );
+    await ds.query(`WITH added AS (
+      INSERT INTO tenants(name,"apiKeyHash","webhookSecret")
+      SELECT 'future', 'plan-' || g, 'test' FROM generate_series(1,3000) g RETURNING id)
+      INSERT INTO notification_settings("tenantId",url,secret,"dueAt")
+      SELECT id,'https://receiver.example/hook',repeat('a',64),now()+interval '1 day' FROM added`);
     for (const table of ['workflows', 'outbox_events', 'notification_settings'])
       await ds.query(`ANALYZE ${table}`);
   });
@@ -66,6 +71,20 @@ describe('scheduler and outbox query plans', () => {
       seqScan: all.some((n) => n['Node Type'] === 'Seq Scan'),
     };
   }
+
+  it('selects eligible tenants using the due settings index in the installed claim function', async () => {
+    const [{ source }] = await ds.query<Array<{ source: string }>>(
+      "SELECT prosrc AS source FROM pg_proc WHERE oid='claim_outbox_event(text,integer,integer)'::regprocedure",
+    );
+    const select =
+      /FOR s IN[\s\S]*?(SELECT n\."tenantId"[\s\S]*?FOR NO KEY UPDATE SKIP LOCKED)/i.exec(
+        source,
+      )?.[1];
+    if (!select) throw new Error('missing tenant selection in claim function');
+    const plan = await indexesOf(select.replace('p_in_flight', '$1'), [1]);
+    expect(plan.indexes).toContain('IDX_notification_settings_due');
+    expect(plan.seqScan).toBe(false);
+  });
 
   it.each([
     [

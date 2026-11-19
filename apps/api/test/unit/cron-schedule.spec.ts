@@ -239,6 +239,28 @@ function reference(
   return [...result].sort((a, b) => a - b);
 }
 
+it('reuses formatters across case variants and evicts old zones', () => {
+  const make = jest.spyOn(Intl, 'DateTimeFormat');
+  try {
+    expect(isValidTimeZone('Pacific/Fakaofo')).toBe(true);
+    const before = make.mock.calls.length;
+    expect(isValidTimeZone('pACIFIC/fAKAOFO')).toBe(true);
+    expect(make.mock.calls).toHaveLength(before);
+    const zones = (
+      Intl as typeof Intl & { supportedValuesOf(key: string): string[] }
+    ).supportedValuesOf('timeZone');
+    for (const zone of zones
+      .filter((z) => z !== 'Pacific/Fakaofo')
+      .slice(0, 150))
+      expect(isValidTimeZone(zone)).toBe(true);
+    const filled = make.mock.calls.length;
+    expect(isValidTimeZone('Pacific/Fakaofo')).toBe(true);
+    expect(make.mock.calls).toHaveLength(filled + 1);
+  } finally {
+    make.mockRestore();
+  }
+});
+
 it('finds the last seasonal second after a dense month with bounded work', () => {
   const start = new Date('2026-01-01T00:00:00Z');
   const schedule = CronSchedule.parse('* * * * 1 *', 'UTC', start.getTime());
@@ -282,6 +304,13 @@ describe('cron schedule against an independent reference around transitions', ()
       );
       expect(expected.length).toBeGreaterThan(1);
       const s = CronSchedule.parse(cron, zone, start);
+      for (const offset of [-3600000, -1, 0, 1800000, 3600000]) {
+        const end = t + offset;
+        const last = expected.filter((at) => at > start && at <= end).pop();
+        expect(
+          s.lastAtOrBefore(new Date(end), new Date(start))?.getTime(),
+        ).toBe(last);
+      }
       // Старт із кожної хвилини (і з половини хвилини) в межах ±6 год від переходу.
       for (
         let from = t - 6 * 3_600_000;

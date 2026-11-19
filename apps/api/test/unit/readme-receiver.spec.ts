@@ -3,13 +3,21 @@ import { join } from 'node:path';
 import { signatureHeader } from '../../src/outbox/outbox-signature';
 
 type Headers = Record<string, string | undefined>;
+interface ReceiverTransaction {
+  insertIfAbsent(id: string): Promise<boolean>;
+  applyEvent(event: { id: string }): Promise<void>;
+}
 interface Receiver {
   verify(h: Headers, raw: Buffer, secrets: string[], now?: number): boolean;
   handle(
     h: Headers,
     raw: Buffer,
     secrets: string[],
-    store: { insertIfAbsent(id: string): Promise<boolean> },
+    store: {
+      transaction(
+        fn: (tx: ReceiverTransaction) => Promise<number>,
+      ): Promise<number>;
+    },
   ): Promise<number>;
 }
 
@@ -66,20 +74,42 @@ describe('the receiver example in README', () => {
   });
 
   it('processes a repeated delivery of the same event once', async () => {
-    const seen = new Set<string>();
+    let committed = new Set<string>();
+    let effects = 0;
+    let fail = true;
     const store = {
-      insertIfAbsent: (id: string) =>
-        Promise.resolve(seen.has(id) ? false : (seen.add(id), true)),
+      async transaction(fn: (tx: ReceiverTransaction) => Promise<number>) {
+        const pending = new Set(committed);
+        let applied = 0;
+        const result = await fn({
+          insertIfAbsent: (id) =>
+            Promise.resolve(pending.has(id) ? false : (pending.add(id), true)),
+          applyEvent: () => {
+            if (fail) return Promise.reject(new Error('write failed'));
+            applied++;
+            return Promise.resolve();
+          },
+        });
+        committed = pending;
+        effects += applied;
+        return result;
+      },
     };
     const nowSeconds = Math.floor(Date.now() / 1000);
     const first = delivery(['s'], nowSeconds);
     const again = delivery(['s'], nowSeconds + 1);
+    await expect(
+      receiver.handle(first.headers, first.raw, ['s'], store),
+    ).rejects.toThrow('write failed');
+    expect(committed.size).toBe(0);
+    fail = false;
     expect(await receiver.handle(first.headers, first.raw, ['s'], store)).toBe(
       204,
     );
     expect(await receiver.handle(again.headers, again.raw, ['s'], store)).toBe(
       200,
     );
+    expect(effects).toBe(1);
     expect(await receiver.handle(first.headers, first.raw, ['x'], store)).toBe(
       401,
     );

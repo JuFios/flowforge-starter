@@ -81,6 +81,7 @@ const FUNCTION_EXECUTE: Record<string, string[]> = {
     'claim_job(text,integer)',
     'claim_outbox_event(text,integer,integer)',
     'due_schedule_tenants(uuid,integer)',
+    'close_cancelled_attempt()',
     'execution_terminal_cycle()',
     'expired_lease_tenants(uuid[],integer)',
     'finish_outbox_event(uuid,uuid,double precision,text,integer)',

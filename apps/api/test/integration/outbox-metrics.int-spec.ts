@@ -125,9 +125,24 @@ describe('outbox and scheduler metrics', () => {
     await ds.query('UPDATE tenants SET "maxQueueSize" = 1 WHERE id = $1', [
       tenant.id,
     ]);
-    await sleep(1_100);
-    expect(await scheduler.tick()).toBe(0);
-    expect(held(await read()) - held(after)).toBe(1);
+    await ds.query(
+      `UPDATE workflows SET "scheduleCursor"=now()-interval '5 minutes', "nextFireAt"=now() WHERE id=$1`,
+      [wf.id],
+    );
+    const missed = (t: string) =>
+      sample(
+        t,
+        'flowforge_schedule_firings_total{outcome="missed_run_once"}',
+      ) ?? 0;
+    for (let i = 0; i < 2; i++) expect(await scheduler.tick()).toBe(0);
+    const blocked = await read();
+    expect(held(blocked) - held(after)).toBe(2);
+    expect(missed(blocked)).toBe(missed(after));
+    await ds.query('UPDATE tenants SET "maxQueueSize"=100 WHERE id=$1', [
+      tenant.id,
+    ]);
+    await scheduler.tick();
+    expect(missed(await read()) - missed(after)).toBe(1);
     expect(
       (await tenantCall(apiApp, apiKey, 'GET', `/workflows/${wf.id}`)).status,
     ).toBe(200);

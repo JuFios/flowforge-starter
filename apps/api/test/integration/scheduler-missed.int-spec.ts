@@ -7,6 +7,7 @@ import { SchedulerMetrics } from '../../src/scheduler/scheduler.metrics';
 import { SchedulerService } from '../../src/scheduler/scheduler.service';
 import { RunningApp, startApp } from '../helpers/app';
 import { createTenant, openTestDataSource, truncateAll } from '../helpers/db';
+import { waitForBlocked } from '../helpers/transaction-barrier';
 import { sleep } from '../helpers/queue';
 import { dbNow, scheduledTimes, tenantCall } from '../helpers/schedule';
 
@@ -64,6 +65,38 @@ describe('missed scheduled runs', () => {
     );
     return { id, cursor };
   }
+
+  it('anchors a re-enabled schedule after the update acquires the workflow lock', async () => {
+    const { id } = await stalled({ enabled: false }, 1000);
+    const holder = ds.createQueryRunner();
+    await holder.startTransaction();
+    let patch: Promise<Response> | undefined;
+    try {
+      await holder.query('SELECT id FROM workflows WHERE id=$1 FOR UPDATE', [
+        id,
+      ]);
+      patch = tenantCall(app, apiKey, 'PATCH', `/workflows/${id}`, {
+        enabled: true,
+      });
+      await waitForBlocked(ds, holder);
+      const beforeRelease = await dbNow(ds);
+      await holder.commitTransaction();
+      const response = await patch;
+      const state = (await response.json()) as {
+        scheduleCursor: string;
+        nextFireAt: string;
+      };
+      expect(response.status).toBe(200);
+      expect(Date.parse(state.scheduleCursor)).toBeGreaterThanOrEqual(
+        beforeRelease.getTime(),
+      );
+      expect(state.nextFireAt).toBe(state.scheduleCursor);
+    } finally {
+      if (holder.isTransactionActive) await holder.rollbackTransaction();
+      await holder.release();
+      await patch;
+    }
+  });
 
   it('clears all scheduler hints when a schedule is removed', async () => {
     const { id } = await stalled({}, 1000);
