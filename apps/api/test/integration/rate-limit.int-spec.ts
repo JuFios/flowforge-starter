@@ -4,7 +4,7 @@ import { LimitsMetrics } from '../../src/limits/limits.metrics';
 import { RateLimitPurger } from '../../src/limits/rate-limit.purger';
 import { RunningApp, startApp } from '../helpers/app';
 import { createTenant, openTestDataSource, truncateAll } from '../helpers/db';
-import { sleep } from '../helpers/queue';
+import { sleep, waitFor } from '../helpers/queue';
 import { provisionTestDatabase } from '../helpers/test-provision';
 
 /**
@@ -194,20 +194,41 @@ describe('tenant request rate limit', () => {
       const runner = owner.createQueryRunner();
       await runner.connect();
       await runner.startTransaction();
-      let waited: Promise<Array<{ hits: number; resetMs: number }>>;
+      // Обробник результату — одразу: помилка виклику під час очікування не стає необробленою.
+      let waited:
+        | Promise<
+            | { rows: Array<{ hits: number; resetMs: number }> }
+            | { error: unknown }
+          >
+        | undefined;
       try {
         await runner.query(`SELECT * FROM rate_limit_hit($1, 300, 1)`, [key]);
-        waited = owner.query(
-          `SELECT hits, "resetMs" FROM rate_limit_hit($1, 300, 1)`,
-          [key],
-        );
+        waited = owner
+          .query(`SELECT hits, "resetMs" FROM rate_limit_hit($1, 300, 1)`, [
+            key,
+          ])
+          .then(
+            (rows: Array<{ hits: number; resetMs: number }>) => ({ rows }),
+            (error: unknown) => ({ error }),
+          );
+        // Другий виклик справді чекає на вставку першої транзакції, а не стартує вже після неї.
+        await waitFor('the second hit to wait for the bucket', async () => {
+          const rows: unknown[] = await owner.query(
+            `SELECT 1 FROM pg_stat_activity
+              WHERE wait_event_type = 'Lock' AND query LIKE '%rate_limit_hit%'
+                AND pid <> pg_backend_pid()`,
+          );
+          return rows.length > 0;
+        });
         await sleep(500);
       } finally {
         if (outcome === 'rollback') await runner.rollbackTransaction();
         else await runner.commitTransaction();
         await runner.release();
       }
-      const [row] = await waited;
+      const result = await waited;
+      if (!result || 'error' in result) throw result?.error;
+      const [row] = result.rows;
       expect(row.hits).toBe(1);
       expect(row.resetMs).toBeGreaterThan(200);
       expect(row.resetMs).toBeLessThanOrEqual(300);
