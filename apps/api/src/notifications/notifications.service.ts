@@ -75,7 +75,13 @@ function decodeCursor(raw: string): { createdAt: string; id: string } {
     /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z)\|([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/.exec(
       text,
     );
-  if (!match || Number.isNaN(Date.parse(match[1])))
+  const time = match ? Date.parse(match[1]) : NaN;
+  if (
+    !match ||
+    !Number.isFinite(time) ||
+    match[1].startsWith('0000-') ||
+    new Date(time).toISOString().slice(0, 23) !== match[1].slice(0, 23)
+  )
     throw new BadRequestException(['cursor is invalid']);
   return { createdAt: match[1], id: match[2] };
 }
