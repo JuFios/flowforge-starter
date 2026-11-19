@@ -50,6 +50,30 @@ describe('webhook input is validated only after the signature', () => {
       body: JSON.stringify(body),
     });
 
+  it('authenticates the bytes sent by the client, including whitespace', async () => {
+    const body = '{ "order" : 42 }';
+    const res = await fetch(`${running.baseUrl}/hooks/${workflowId}`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-signature': createHmac('sha256', secret).update(body).digest('hex'),
+      },
+      body,
+    });
+    expect(res.status).toBe(202);
+  });
+
+  it('enqueues one execution and one job after a sender repeats a delivery', async () => {
+    const body = { order: 42 };
+    const signature = sign(body);
+    expect((await deliver(body, signature)).status).toBe(202);
+    expect((await deliver(body, signature)).status).toBe(202);
+    const counts: unknown = await ds.query(
+      'SELECT (SELECT count(*)::int FROM executions) AS executions, (SELECT count(*)::int FROM jobs) AS jobs',
+    );
+    expect(counts).toEqual([{ executions: 1, jobs: 1 }]);
+  });
+
   const invalidInputs: Array<[string, unknown]> = [
     ['an array', [1, 2]],
     ['an object above 64 KiB', { data: 'x'.repeat(64 * 1024) }],
