@@ -114,6 +114,7 @@ export class SchedulerService
   private readonly logger = new Logger(SchedulerService.name);
   private timer?: NodeJS.Timeout;
   private activeTick?: Promise<number>;
+  private tickNumber = 0;
   /** Процес завершується: тік, що триває, зупиняється після поточного спрацювання. */
   private stopping = false;
   /** Помилки, уже залоговані в контексті спрацювання (щоб не логувати вдруге без нього). */
@@ -156,6 +157,7 @@ export class SchedulerService
 
   /** Обробляє всі належні моменти розкладів; повертає кількість створених виконань. */
   tick(): Promise<number> {
+    this.tickNumber++;
     this.activeTick ??= this.runTick().finally(() => {
       this.activeTick = undefined;
     });
@@ -173,12 +175,21 @@ export class SchedulerService
     let fired = 0;
     try {
       let continuing = new Map<string, Cursor>();
+      const finished = new Set<string>();
+      let observedTick = this.tickNumber;
       do {
+        // Навіть якщо попередній тік триває, сигнал таймера дозволяє наступну спробу
+        // завершених, заблокованих та тимчасово помилкових обходів.
+        if (observedTick !== this.tickNumber) {
+          finished.clear();
+          observedTick = this.tickNumber;
+        }
         const next = new Map<string, Cursor>();
         const turn = async (cursor: Cursor) => {
           const result = await this.tenantTurn(cursor);
           fired += result.fired;
           if (result.next) next.set(cursor.tenantId, result.next);
+          else finished.add(cursor.tenantId);
         };
         // Між квантами перевіряємо нові належні розклади за годинником БД.
         // Спершу обслуговуємо тих, хто не мав продовження з попереднього раунду.
@@ -190,7 +201,8 @@ export class SchedulerService
           );
           for (const { tenantId } of tenants) {
             if (this.stopping) return fired;
-            if (!continuing.has(tenantId)) await turn({ tenantId });
+            if (!continuing.has(tenantId) && !finished.has(tenantId))
+              await turn({ tenantId });
           }
           if (tenants.length < SCHEDULE_PAGE) break;
           after = tenants[tenants.length - 1].tenantId;
