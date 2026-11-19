@@ -5,8 +5,11 @@ import type { IncomingMessage } from 'node:http';
 /** Заголовок, через який кореляційний ID приходить у запиті і повертається у відповіді. */
 export const CORRELATION_HEADER = 'x-request-id';
 
-/** Звідки взявся контекст: HTTP-запит, задача воркера чи спрацювання планувальника. */
-export type CorrelationSource = 'http' | 'job' | 'cron';
+/**
+ * Звідки взявся контекст: HTTP-запит, задача воркера, спрацювання планувальника чи спроба
+ * доставки сповіщення (ID — трасування, що завершило виконання).
+ */
+export type CorrelationSource = 'http' | 'job' | 'cron' | 'outbox';
 
 interface CorrelationStore {
   correlationId: string;

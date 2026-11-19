@@ -414,6 +414,58 @@ export class EnvironmentVariables extends DatabaseEnvironment {
   @Min(1_000)
   @Max(MAX_TIMER_MS)
   SCHEDULER_MISFIRE_GRACE_MS = 60_000;
+
+  /** Циклів доставки сповіщень на воркер (README 3.3.9); 0 — воркер сповіщень не надсилає. */
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(64)
+  OUTBOX_CONCURRENCY = 4;
+
+  /** Скільки спроб доставки одного тенанта можуть іти одночасно в усьому кластері. */
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(64)
+  OUTBOX_TENANT_IN_FLIGHT = 2;
+
+  /** Пауза опитування, коли надсилати нічого, мс (з відхиленням ±50%). */
+  @Type(() => Number)
+  @IsInt()
+  @Min(10)
+  @Max(60_000)
+  OUTBOX_POLL_INTERVAL_MS = 1_000;
+
+  /** Таймаут однієї спроби доставки, мс; не більше за HTTP_STEP_TIMEOUT_MS. */
+  @Type(() => Number)
+  @IsInt()
+  @Min(100)
+  @Max(60_000)
+  OUTBOX_HTTP_TIMEOUT_MS = 10_000;
+
+  /** Нижня межа backoff між спробами доставки, мс. */
+  @Type(() => Number)
+  @IsInt()
+  @Min(10)
+  @Max(MAX_TIMER_MS)
+  OUTBOX_BACKOFF_BASE_MS = 5_000;
+
+  /**
+   * Стеля backoff, мс. Спроб без ліміту: недоставлена подія не видаляється й повторюється не рідше
+   * за цю стелю, доки отримувач не відповість 2xx (гарантія «щонайменше один раз»).
+   */
+  @Type(() => Number)
+  @IsInt()
+  @Min(10)
+  @Max(MAX_TIMER_MS)
+  OUTBOX_BACKOFF_MAX_MS = 3_600_000;
+
+  /** Скільки днів зберігати доставлені події (недоставлені не видаляються), 1..3650. */
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(3650)
+  OUTBOX_RETENTION_DAYS = 7;
 }
 
 /** Конфігурація процесу API: спільна плюс обов'язковий ADMIN_TOKEN. */
@@ -441,14 +493,27 @@ export function validateEnv(
 ): EnvironmentVariables {
   rejectOwnerCredentials(raw);
   outboundSettings(raw);
-  return checkSchedulerWindow(validateAs(EnvironmentVariables, raw));
+  return checkRelations(validateAs(EnvironmentVariables, raw));
 }
 
-/** Межа пропуску не коротша за інтервал тіку (SCHEDULER_MISFIRE_GRACE_MS). */
-function checkSchedulerWindow<T extends EnvironmentVariables>(env: T): T {
+/** Узгодженість пов'язаних параметрів: межа пропуску, таймаут і backoff сповіщень. */
+function checkRelations<T extends EnvironmentVariables>(env: T): T {
+  const problems: string[] = [];
   if (env.SCHEDULER_MISFIRE_GRACE_MS < env.SCHEDULER_TICK_MS)
+    problems.push(
+      'SCHEDULER_MISFIRE_GRACE_MS: не може бути меншим за SCHEDULER_TICK_MS',
+    );
+  if (env.OUTBOX_HTTP_TIMEOUT_MS > env.HTTP_STEP_TIMEOUT_MS)
+    problems.push(
+      'OUTBOX_HTTP_TIMEOUT_MS: не може бути більшим за HTTP_STEP_TIMEOUT_MS',
+    );
+  if (env.OUTBOX_BACKOFF_MAX_MS < env.OUTBOX_BACKOFF_BASE_MS)
+    problems.push(
+      'OUTBOX_BACKOFF_MAX_MS: не може бути меншим за OUTBOX_BACKOFF_BASE_MS',
+    );
+  if (problems.length)
     throw new Error(
-      'Невалідна конфігурація оточення:\n  SCHEDULER_MISFIRE_GRACE_MS: не може бути меншим за SCHEDULER_TICK_MS',
+      `Невалідна конфігурація оточення:\n  ${problems.join('\n  ')}`,
     );
   return env;
 }
@@ -457,7 +522,7 @@ function checkSchedulerWindow<T extends EnvironmentVariables>(env: T): T {
 export function validateApiEnv(raw: Record<string, unknown>): ApiEnvironment {
   rejectOwnerCredentials(raw);
   outboundSettings(raw);
-  const env = checkSchedulerWindow(validateAs(EnvironmentVariables, raw));
+  const env = checkRelations(validateAs(EnvironmentVariables, raw));
   // Явна перевірка: @IsOptional спільної схеми вимикає для цієї властивості будь-які інші
   // декоратори, зокрема @IsDefined.
   if (env.ADMIN_TOKEN === undefined)

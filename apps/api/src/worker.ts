@@ -5,6 +5,7 @@ import { WorkerModule } from './app.module';
 import { configureApp } from './bootstrap';
 import { EnvironmentVariables } from './config/env.validation';
 import { JobRunnerService } from './engine/job-runner.service';
+import { OutboxSender } from './outbox/outbox-sender.service';
 
 async function bootstrap() {
   const app = configureApp(
@@ -16,6 +17,7 @@ async function bootstrap() {
   await app.listen(port);
   app.get(Logger).log(`flowforge-worker service endpoints on ${port}`);
   app.get(JobRunnerService).start();
+  app.get(OutboxSender).start();
 }
 // Помилка старту (невалідна конфігурація, недоступна БД) має завершувати процес з ненульовим
 // кодом явно, а не через необроблене відхилення промісу.

@@ -72,6 +72,30 @@ export function checkAddress(
   }
 }
 
+/**
+ * URL endpoint-а сповіщень під час збереження налаштувань: схема `https:` (або тестовий приймач
+ * HTTP_FIXTURE_ORIGIN), без облікових даних, у межах довжини, і кожна адреса з DNS — дозволена.
+ * Це рання відмова тенанту; кожна спроба доставки однаково перевіряє адресу під час з'єднання.
+ */
+export async function assertNotificationUrl(
+  raw: string,
+  signal: AbortSignal = AbortSignal.timeout(5_000),
+): Promise<URL> {
+  if (!URL.canParse(raw)) throw denied();
+  const url = new URL(raw);
+  const settings = settingsNow();
+  if (url.protocol !== 'https:' && url.origin !== settings.origin)
+    throw denied();
+  checkUrl(url);
+  const host = url.hostname.replace(/^\[|\]$/g, '');
+  if (!isIP(host)) {
+    const own = hostAddresses();
+    for (const { address } of await resolveAll(host, signal))
+      checkAddress(address, url.origin, settings, own);
+  }
+  return url;
+}
+
 function checkUrl(url: URL): void {
   if (
     !['http:', 'https:'].includes(url.protocol) ||
@@ -183,17 +207,33 @@ async function readLimited(response: Response): Promise<string> {
   return Buffer.concat(parts, size).toString('utf8');
 }
 
+/** Як запит поводиться з відповіддю, крім спільної політики адрес. */
+export interface OutboundOptions {
+  /**
+   * `follow` — до п'яти переходів із перевіркою кожного (кроки `http`); `reject` — будь-яка 3xx
+   * повертається як є. Сповіщення не йдуть за редиректами: 301/302/303 перетворили б POST на GET
+   * без тіла, і отримувач із 200 на такий запит зарахувався б як доставка.
+   */
+  redirects?: 'follow' | 'reject';
+  /** Таймаут усього запиту, мс; не більше за HTTP_STEP_TIMEOUT_MS. */
+  timeoutMs?: number;
+  /** false — тіло відповіді не читається (лише скасовується). */
+  readBody?: boolean;
+}
+
 export async function outboundHttp(
   url: URL,
   method: string,
   headers: Headers,
   body: string | undefined,
   signal?: AbortSignal,
+  { redirects = 'follow', timeoutMs, readBody = true }: OutboundOptions = {},
 ) {
   const controller = new AbortController();
+  const limit = settingsNow().timeoutMs;
   const deadlines = [
     controller.signal,
-    AbortSignal.timeout(settingsNow().timeoutMs),
+    AbortSignal.timeout(Math.min(timeoutMs ?? limit, limit)),
   ];
   if (signal) deadlines.push(signal);
   const operation = AbortSignal.any(deadlines);
@@ -214,11 +254,23 @@ export async function outboundHttp(
       };
       const response = await outboundTransport.fetch(url, init);
       const location = response.headers.get('location');
-      if (!REDIRECTS.has(response.status) || !location) {
+      if (
+        !REDIRECTS.has(response.status) ||
+        !location ||
+        redirects === 'reject'
+      ) {
+        if (!readBody || !response.ok) {
+          await response.body?.cancel();
+          return {
+            status: response.status,
+            headers: response.headers,
+            body: '',
+          };
+        }
         return {
           status: response.status,
           headers: response.headers,
-          body: response.ok ? await readLimited(response) : '',
+          body: await readLimited(response),
         };
       }
       if (hops >= 5 || !URL.canParse(location, url))

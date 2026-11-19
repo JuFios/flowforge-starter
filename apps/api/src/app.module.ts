@@ -22,6 +22,10 @@ import { ExecutionsController } from './executions/executions.controller';
 import { ExecutionsService } from './executions/executions.service';
 import { LimitsModule } from './limits/limits.module';
 import { MetricsController } from './observability/metrics.controller';
+import { NotificationsController } from './notifications/notifications.controller';
+import { NotificationsService } from './notifications/notifications.service';
+import { OutboxMetrics } from './outbox/outbox.metrics';
+import { OutboxSender } from './outbox/outbox-sender.service';
 import { MetricsServer } from './observability/metrics-server';
 import { ObservabilityModule } from './observability/observability.module';
 import { SchedulerMetrics } from './scheduler/scheduler.metrics';
@@ -87,6 +91,7 @@ class ApiEnvironmentCheck implements OnModuleInit {
     ExecutionsController,
     WebhooksController,
     WebhookKeysController,
+    NotificationsController,
   ],
   providers: [
     ApiEnvironmentCheck,
@@ -94,6 +99,7 @@ class ApiEnvironmentCheck implements OnModuleInit {
     WorkflowsService,
     ExecutionsService,
     WebhookKeysService,
+    NotificationsService,
     SchedulerService,
     SchedulerMetrics,
     MetricsServer,
@@ -112,6 +118,8 @@ export class AppModule {}
     StepExecutor,
     QueueMetrics,
     QueueDepthMetrics,
+    OutboxSender,
+    OutboxMetrics,
   ],
 })
 export class WorkerModule {}

@@ -137,6 +137,79 @@ export class SystemDb {
     return row.deleted;
   }
 
+  /**
+   * Справедливе захоплення спроби доставки сповіщення (`claim_outbox_event`, README 3.3.9):
+   * подія (лише ідентифікатори й fencing-токен) або null, і скільки підказок `dueAt` перераховано.
+   */
+  async claimOutboxEvent(
+    senderId: string,
+    leaseMs: number,
+    inFlight: number,
+  ): Promise<{
+    event: {
+      id: string;
+      tenantId: string;
+      leaseToken: string;
+      attempt: number;
+      correlationId: string | null;
+    } | null;
+    repaired: number;
+  }> {
+    const [row]: Array<{
+      id: string | null;
+      tenantId: string;
+      leaseToken: string;
+      attempt: number;
+      correlationId: string | null;
+      repaired: number;
+    }> = await this.ds.query('SELECT * FROM claim_outbox_event($1, $2, $3)', [
+      senderId,
+      leaseMs,
+      inFlight,
+    ]);
+    const { repaired, ...event } = row;
+    return {
+      event: event.id ? { ...event, id: event.id } : null,
+      repaired,
+    };
+  }
+
+  /** Одна пачка очищення доставлених подій; кількість видалених. */
+  async purgeDeliveredEvents(days: number, batch: number): Promise<number> {
+    const [row]: Array<{ deleted: number }> = await this.ds.query(
+      'SELECT purge_delivered_events($1, $2) AS deleted',
+      [days, batch],
+    );
+    return row.deleted;
+  }
+
+  /** Недоставлені події за тенантом (кількості й найстаріша), з межею часу як у глибини черги. */
+  outboxBacklog(): Promise<
+    Array<{
+      tenantId: string;
+      pending: number;
+      sending: number;
+      oldest: Date;
+    }>
+  > {
+    return this.ds.transaction(async (em) => {
+      await em.query(
+        `SELECT pg_catalog.set_config('statement_timeout',
+                  (CASE WHEN s.setting::int = 0 THEN $1 ELSE least(s.setting::int, $1) END)::text, true)
+           FROM pg_catalog.pg_settings s WHERE s.name = 'statement_timeout'`,
+        [QUEUE_DEPTH_TIMEOUT_MS],
+      );
+      return em.query<
+        Array<{
+          tenantId: string;
+          pending: number;
+          sending: number;
+          oldest: Date;
+        }>
+      >('SELECT * FROM outbox_backlog()');
+    });
+  }
+
   /** Одна пачка очищення завершених задач; кількість видалених. */
   async purgeFinishedJobs(days: number, batch: number): Promise<number> {
     const [row]: Array<{ deleted: number }> = await this.ds.query(

@@ -38,6 +38,8 @@ export interface ReceivedRequest {
   path: string;
   headers: IncomingMessage['headers'];
   body: string;
+  /** Точні байти тіла, як вони надійшли. */
+  raw: Buffer;
 }
 
 export type Responder = (
@@ -75,6 +77,7 @@ export class Receiver {
           path: (req.url ?? '').split('?')[0],
           headers: req.headers,
           body: Buffer.concat(chunks).toString('utf8'),
+          raw: Buffer.concat(chunks),
         };
         this.requests.push(received);
         void Promise.resolve(this.respond(received, res)).catch(() => {
