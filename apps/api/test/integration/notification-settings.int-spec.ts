@@ -1,0 +1,397 @@
+import { DataSource } from 'typeorm';
+import { WorkerModule } from '../../src/app.module';
+import { OutboxSender } from '../../src/outbox/outbox-sender.service';
+import { SchedulerService } from '../../src/scheduler/scheduler.service';
+import { RunningApp, startApp } from '../helpers/app';
+import {
+  createExecution,
+  createTenant,
+  createWorkflow,
+  openTestDataSource,
+  TestTenant,
+  truncateAll,
+} from '../helpers/db';
+import { verifyNotification } from '../helpers/notifications';
+import { api, Receiver } from '../helpers/queue';
+import { testApiDatabaseUrl } from '../helpers/test-env';
+
+/**
+ * Налаштування сповіщень тенанта (ТЗ 3.3.9, 4): секрет показується один раз, ротація без простою,
+ * зміна адреси, пауза й скасування для подій, що вже чекають; ізоляція тенантів у API і в БД;
+ * секрети не потрапляють у відповіді, логи й метрики.
+ */
+describe('notification settings', () => {
+  let ds: DataSource;
+  let apiApp: RunningApp;
+  let worker: RunningApp;
+  let sender: OutboxSender;
+  const receiver = new Receiver();
+  let a: TestTenant;
+  let b: TestTenant;
+
+  beforeAll(async () => {
+    ds = await openTestDataSource();
+    await receiver.start();
+    apiApp = await startApp(undefined, { captureLogs: true });
+    apiApp.app.get(SchedulerService).onApplicationShutdown();
+    worker = await startApp(WorkerModule, { captureLogs: true });
+    sender = worker.app.get(OutboxSender);
+  });
+  beforeEach(async () => {
+    await truncateAll(ds);
+    receiver.requests.length = 0;
+    a = await createTenant(ds, 'a');
+    b = await createTenant(ds, 'b');
+  });
+  afterAll(async () => {
+    await worker.close();
+    await apiApp.close();
+    await receiver.stop();
+    await truncateAll(ds);
+    await ds.destroy();
+  });
+
+  const call = <T = Record<string, unknown>>(
+    tenant: TestTenant,
+    method: string,
+    path: string,
+    body?: unknown,
+  ) => api<T>(apiApp.baseUrl, tenant.apiKey, method, path, body);
+
+  async function setup(tenant: TestTenant, path = '/notify') {
+    const res = await fetch(`${apiApp.baseUrl}/tenants/me/notifications`, {
+      method: 'PUT',
+      headers: {
+        'x-api-key': tenant.apiKey,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ url: receiver.url(path) }),
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('cache-control')).toBe('no-store');
+    return (await res.json()) as {
+      secret: string;
+      keys: Array<{ id: string; role: string }>;
+    };
+  }
+
+  /** Завершене виконання тенанта → подія в outbox. */
+  async function completed(tenant: TestTenant): Promise<string> {
+    const wf = await createWorkflow(ds, tenant.tenant.id);
+    const execution = await createExecution(ds, wf);
+    await ds.query(
+      `UPDATE executions SET status = 'succeeded', "finishedAt" = now() WHERE id = $1`,
+      [execution.id],
+    );
+    const [event]: Array<{ id: string }> = await ds.query(
+      'SELECT id FROM outbox_events WHERE "executionId" = $1',
+      [execution.id],
+    );
+    return event.id;
+  }
+
+  async function status(id: string): Promise<string> {
+    const rows: Array<{ status: string }> = await ds.query(
+      'SELECT status FROM outbox_events WHERE id = $1',
+      [id],
+    );
+    return rows[0].status;
+  }
+
+  it('shows the signing secret once and never again', async () => {
+    const created = await setup(a);
+    expect(created.secret).toMatch(/^[0-9a-f]{64}$/);
+    expect(created.keys).toEqual([
+      { id: expect.any(String) as unknown, role: 'current' },
+    ]);
+    const read = await call(a, 'GET', '/tenants/me/notifications');
+    expect(read.status).toBe(200);
+    expect(read.body).toEqual({
+      url: receiver.url('/notify'),
+      enabled: true,
+      revision: 1,
+      keys: created.keys,
+    });
+    const updated = await call(a, 'PUT', '/tenants/me/notifications', {
+      url: receiver.url('/other'),
+    });
+    expect(updated.body).not.toHaveProperty('secret');
+    expect(updated.body).toMatchObject({ revision: 2 });
+    expect(JSON.stringify([read.body, updated.body])).not.toContain(
+      created.secret,
+    );
+  });
+
+  it.each([
+    ['plain http to another host', 'http://example.com/hook'],
+    ['credentials in the URL', 'https://user:pass@example.com/hook'],
+    ['a private address', 'https://10.0.0.5/hook'],
+    ['the cloud metadata address', 'https://169.254.169.254/latest'],
+    ['loopback by name', 'https://localhost/hook'],
+    ['another scheme', 'ftp://example.com/hook'],
+    ['not a URL', 'not a url'],
+    ['an overly long URL', `https://example.com/${'a'.repeat(2050)}`],
+  ])('rejects %s with 400 and stores nothing', async (_case, url) => {
+    const res = await call(a, 'PUT', '/tenants/me/notifications', { url });
+    expect(res.status).toBe(400);
+    expect(await ds.query('SELECT 1 FROM notification_settings')).toEqual([]);
+  });
+
+  it.each([
+    [{ url: 'https://example.com', enabled: 'yes' }],
+    [{ url: 'https://example.com', secret: 'mine' }],
+    [{}],
+  ])('rejects the malformed body %j with 400', async (body) => {
+    const res = await call(a, 'PUT', '/tenants/me/notifications', body);
+    expect(res.status).toBe(400);
+  });
+
+  it('rotates without downtime: both keys sign pending events until the old one is revoked', async () => {
+    const created = await setup(a);
+    const rotated = await call<{ id: string; secret: string }>(
+      a,
+      'POST',
+      '/tenants/me/notifications/secrets',
+    );
+    expect(rotated.status).toBe(201);
+    expect(
+      (await call(a, 'POST', '/tenants/me/notifications/secrets')).status,
+    ).toBe(409);
+    await completed(a);
+    await sender.deliverNext();
+    const [during] = receiver.hits('/notify');
+    // Отримувач зі старим і з новим секретом однаково перевіряє підпис.
+    expect(verifyNotification(during.headers, during.raw, created.secret)).toBe(
+      true,
+    );
+    expect(
+      verifyNotification(during.headers, during.raw, rotated.body.secret),
+    ).toBe(true);
+    expect(
+      (
+        await call(
+          a,
+          'DELETE',
+          `/tenants/me/notifications/secrets/${created.keys[0].id}`,
+        )
+      ).status,
+    ).toBe(204);
+    await completed(a);
+    await sender.deliverNext();
+    const after = receiver.hits('/notify')[1];
+    expect(verifyNotification(after.headers, after.raw, created.secret)).toBe(
+      false,
+    );
+    expect(
+      verifyNotification(after.headers, after.raw, rotated.body.secret),
+    ).toBe(true);
+    // Останній ключ не відкликається.
+    expect(
+      (
+        await call(
+          a,
+          'DELETE',
+          `/tenants/me/notifications/secrets/${rotated.body.id}`,
+        )
+      ).status,
+    ).toBe(409);
+    const attempts: Array<{ keyIds: string[] }> = await ds.query(
+      'SELECT "keyIds" FROM outbox_attempts ORDER BY "startedAt"',
+    );
+    expect(attempts.map((r) => r.keyIds.length)).toEqual([2, 1]);
+  });
+
+  it('sends a pending event to the address that is current at the attempt', async () => {
+    await setup(a, '/old');
+    const event = await completed(a);
+    // Подія вже чекає, коли тенант призупиняє сповіщення й переносить endpoint.
+    await call(a, 'PUT', '/tenants/me/notifications', {
+      url: receiver.url('/old'),
+      enabled: false,
+    });
+    expect(await sender.deliverNext()).toBe(false);
+    await call(a, 'PUT', '/tenants/me/notifications', {
+      url: receiver.url('/new'),
+      enabled: true,
+    });
+    expect(await sender.deliverNext()).toBe(true);
+    expect(receiver.hits('/old')).toEqual([]);
+    expect(receiver.hits('/new')).toHaveLength(1);
+    expect(receiver.hits('/new')[0].headers['x-flowforge-event-id']).toBe(
+      event,
+    );
+    const [attempt]: Array<{ revision: number }> = await ds.query(
+      'SELECT revision FROM outbox_attempts WHERE "eventId" = $1',
+      [event],
+    );
+    expect(attempt.revision).toBe(2);
+  });
+
+  it('pauses pending events while disabled and cancels them when the settings are deleted', async () => {
+    await setup(a);
+    await call(a, 'PUT', '/tenants/me/notifications', {
+      url: receiver.url('/notify'),
+      enabled: false,
+    });
+    // Вимкнено до завершення: події немає. Увімкнено після — подія є й чекає, поки знову вимкнуть.
+    await call(a, 'PUT', '/tenants/me/notifications', {
+      url: receiver.url('/notify'),
+      enabled: true,
+    });
+    const event = await completed(a);
+    await call(a, 'PUT', '/tenants/me/notifications', {
+      url: receiver.url('/notify'),
+      enabled: false,
+    });
+    expect(await sender.deliverNext()).toBe(false);
+    expect(await status(event)).toBe('pending');
+    expect((await call(a, 'DELETE', '/tenants/me/notifications')).status).toBe(
+      204,
+    );
+    expect(await status(event)).toBe('cancelled');
+    expect(receiver.requests).toEqual([]);
+    // Подія лишається в журналі й доставляється повторно після нового налаштування.
+    await setup(a);
+    expect(
+      (
+        await call(
+          a,
+          'POST',
+          `/tenants/me/notifications/events/${event}/redeliver`,
+        )
+      ).status,
+    ).toBe(202);
+    expect(await sender.deliverNext()).toBe(true);
+    expect(await status(event)).toBe('delivered');
+  });
+
+  it('lists only the own events with their attempts and validates the page parameters', async () => {
+    await setup(a);
+    await setup(b);
+    const own = await completed(a);
+    const foreign = await completed(b);
+    await sender.deliverNext();
+    await sender.deliverNext();
+    const list = await call<{ items: Array<{ id: string }>; nextCursor: null }>(
+      a,
+      'GET',
+      '/tenants/me/notifications/events',
+    );
+    expect(list.body.items.map((e) => e.id)).toEqual([own]);
+    expect(
+      (await call(a, 'GET', `/tenants/me/notifications/events/${foreign}`))
+        .status,
+    ).toBe(404);
+    expect(
+      (
+        await call(
+          a,
+          'POST',
+          `/tenants/me/notifications/events/${foreign}/redeliver`,
+        )
+      ).status,
+    ).toBe(404);
+    const detail = await call<{ payload: string; attempts: unknown[] }>(
+      a,
+      'GET',
+      `/tenants/me/notifications/events/${own}`,
+    );
+    expect(detail.body.attempts).toHaveLength(1);
+    expect(JSON.parse(detail.body.payload)).toMatchObject({ id: own });
+    for (const query of [
+      'limit=abc',
+      'limit=0',
+      'limit=101',
+      'limit=1.5',
+      'status=lost',
+      'cursor=garbage',
+      'owner=b',
+    ])
+      expect(
+        (await call(a, 'GET', `/tenants/me/notifications/events?${query}`))
+          .status,
+      ).toBe(400);
+  });
+
+  it('pages through events with a cursor without gaps or repeats', async () => {
+    await setup(a);
+    const ids: string[] = [];
+    for (let i = 0; i < 5; i++) ids.push(await completed(a));
+    const seen: string[] = [];
+    let cursor: string | null = null;
+    do {
+      const page: {
+        body: { items: Array<{ id: string }>; nextCursor: string | null };
+      } = await call(
+        a,
+        'GET',
+        `/tenants/me/notifications/events?limit=2${cursor ? `&cursor=${cursor}` : ''}`,
+      );
+      seen.push(...page.body.items.map((e) => e.id));
+      cursor = page.body.nextCursor;
+    } while (cursor);
+    expect([...seen].sort()).toEqual([...ids].sort());
+    expect(new Set(seen).size).toBe(seen.length);
+  });
+
+  it('isolates the new tables in the database itself (RLS), not only in the services', async () => {
+    await setup(a);
+    await completed(a);
+    await sender.deliverNext();
+    const role = new DataSource({
+      type: 'postgres',
+      url: testApiDatabaseUrl(),
+    });
+    await role.initialize();
+    try {
+      for (const table of [
+        'notification_settings',
+        'outbox_events',
+        'outbox_attempts',
+      ]) {
+        // Без контексту тенанта — нічого; у контексті B — нічого з рядків A.
+        const unscoped: unknown[] = await role.query(`SELECT * FROM ${table}`);
+        expect(unscoped).toEqual([]);
+        const rows: unknown[] = await role.transaction(async (em) => {
+          await em.query(`SELECT set_config('app.tenant_id', $1, true)`, [
+            b.tenant.id,
+          ]);
+          return em.query(`SELECT * FROM ${table}`);
+        });
+        expect(rows).toEqual([]);
+      }
+      // Запис чужого рядка з контексту B відхиляє WITH CHECK.
+      await expect(
+        role.transaction(async (em) => {
+          await em.query(`SELECT set_config('app.tenant_id', $1, true)`, [
+            b.tenant.id,
+          ]);
+          await em.query(
+            `INSERT INTO notification_settings ("tenantId", url, secret) VALUES ($1, 'https://x.example', $2)`,
+            [a.tenant.id, 'f'.repeat(64)],
+          );
+        }),
+      ).rejects.toThrow(/row-level security/);
+    } finally {
+      await role.destroy();
+    }
+  });
+
+  it('keeps secrets out of logs, errors and metrics', async () => {
+    const created = await setup(a);
+    const rotated = await call<{ secret: string }>(
+      a,
+      'POST',
+      '/tenants/me/notifications/secrets',
+    );
+    await completed(a);
+    receiver.respond = (_req, res) => {
+      res.writeHead(500).end();
+    };
+    await sender.deliverNext();
+    const text = JSON.stringify([apiApp.logs, worker.logs]);
+    for (const secret of [created.secret, rotated.body.secret])
+      expect(text).not.toContain(secret);
+    expect(text).not.toContain(receiver.url('/notify'));
+  });
+});
