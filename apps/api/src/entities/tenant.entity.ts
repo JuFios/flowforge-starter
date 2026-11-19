@@ -3,11 +3,16 @@ import {
   Column,
   CreateDateColumn,
   Entity,
+  Generated,
   PrimaryGeneratedColumn,
 } from 'typeorm';
 import { TENANT_LIMIT_CHECKS } from '../tenancy/limits';
 
 @Entity('tenants')
+@Check(
+  'CHK_webhook_key_pair',
+  '("nextWebhookKeyId" IS NULL) = ("nextWebhookSecret" IS NULL) AND "webhookKeyId" IS DISTINCT FROM "nextWebhookKeyId"',
+)
 @Check(
   'CHK_tenants_max_concurrent_executions',
   TENANT_LIMIT_CHECKS.CHK_tenants_max_concurrent_executions,
@@ -35,6 +40,16 @@ export class Tenant {
   /** Секрет для підпису вхідних webhook-ів цього тенанта. */
   @Column()
   webhookSecret: string;
+
+  @Generated('uuid')
+  @Column({ type: 'uuid', select: false })
+  webhookKeyId: string;
+
+  @Column({ type: 'uuid', nullable: true, select: false })
+  nextWebhookKeyId: string | null;
+
+  @Column({ type: 'varchar', nullable: true, select: false })
+  nextWebhookSecret: string | null;
 
   /**
    * Перевизначення лімітів тенанта (NULL — значення за замовчуванням з `limit_defaults`): задачі в

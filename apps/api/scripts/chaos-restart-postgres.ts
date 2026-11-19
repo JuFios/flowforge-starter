@@ -74,6 +74,53 @@ function countLogLines(id: string, since: string, text: string): number {
     .filter((l) => l.includes(text)).length;
 }
 
+/** Утримуємо один HTTP-чекпоінт до моменту, коли воркер справді чекає на його запис. */
+async function restartAtCheckpoint(
+  batch: string[],
+  observed: Map<string, CheckpointObservation>,
+): Promise<{ checkpoint: string; started: number }> {
+  const db = await openDatabase();
+  const gate = db.createQueryRunner();
+  try {
+    await gate.startTransaction();
+    await gate.query("SET LOCAL statement_timeout = '3s'");
+    const deadline = Date.now() + 15_000;
+    let checkpoint: string | undefined;
+    while (Date.now() < deadline) {
+      if (!checkpoint) {
+        const rows = (await gate.query(
+          `SELECT id FROM step_runs WHERE "executionId"=ANY($1)
+           AND "stepId"='charge' AND status='running'
+           AND EXISTS (SELECT FROM step_runs WHERE "executionId"=ANY($1)
+             AND "stepId"='charge' AND status='succeeded')
+           LIMIT 1 FOR UPDATE SKIP LOCKED`,
+          [batch],
+        )) as { id: string }[];
+        checkpoint = rows[0]?.id;
+      }
+      if (checkpoint) {
+        const [row] = (await gate.query(
+          `SELECT EXISTS(SELECT FROM pg_stat_activity
+           WHERE pg_backend_pid()=ANY(pg_blocking_pids(pid))) AS waiting`,
+        )) as { waiting: boolean }[];
+        if (row.waiting) {
+          await captureCheckpoints(batch, observed);
+          log(`restarting postgres during write to checkpoint ${checkpoint}`);
+          const started = Date.now();
+          docker([...COMPOSE, 'restart', 'postgres']);
+          return { checkpoint, started };
+        }
+      }
+      await sleep(25);
+    }
+    throw new Error('no worker blocked on the selected HTTP checkpoint');
+  } finally {
+    // Після рестарту сервер уже скасував транзакцію. На решті шляхів закриття виділеного пулу звільняє її блокування.
+    await gate.release();
+    await db.destroy();
+  }
+}
+
 async function main(): Promise<void> {
   const before = await sinkStats();
   const workers = containers('worker');
@@ -93,15 +140,28 @@ async function main(): Promise<void> {
   for (let round = 0; round < RESTARTS; round++) {
     const batch = await enqueueRound(round, RESTARTS);
     ids.push(...batch);
-    await sleep(750);
-    await captureCheckpoints(batch, observed);
-    log('restarting postgres');
-    const t0 = Date.now();
-    docker([...COMPOSE, 'restart', 'postgres']);
+    const { checkpoint, started: t0 } = await restartAtCheckpoint(
+      batch,
+      observed,
+    );
     await waitHealthy([postgres], 60_000);
     downtimeMs += Date.now() - t0;
     log(`postgres is healthy again after ${Date.now() - t0} ms`);
     interrupted.push(await finishRound(batch, TIMEOUT_MS));
+    const verification = await openDatabase();
+    try {
+      const [step]: { attempts: number; status: string }[] =
+        await verification.query(
+          'SELECT attempts, status FROM step_runs WHERE id=$1',
+          [checkpoint],
+        );
+      if (step.status !== 'succeeded' || step.attempts < 2)
+        throw new Error(
+          `round ${round + 1}: observed HTTP checkpoint did not retry and succeed`,
+        );
+    } finally {
+      await verification.destroy();
+    }
   }
 
   const db = await openDatabase();

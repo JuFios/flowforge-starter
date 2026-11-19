@@ -50,6 +50,8 @@ export type Responder = (
  * (за замовчуванням 200 з JSON `{ ok: true }`).
  */
 export class Receiver {
+  /** Приймач, що тримає дозвіл тестового приймача (HTTP_FIXTURE_*) у цьому реєстрі модулів. */
+  private static active?: Receiver;
   readonly requests: ReceivedRequest[] = [];
   private server?: Server;
   respond: Responder = (_req, res) => {
@@ -58,6 +60,12 @@ export class Receiver {
   };
 
   async start(): Promise<void> {
+    // Дозвіл тестового приймача один на процес: другий приймач мовчки перебрав би його в першого.
+    if (Receiver.active)
+      throw new Error(
+        `another receiver holds the HTTP fixture: ${Receiver.active.url('')}`,
+      );
+    Receiver.active = this;
     this.server = createServer((req, res) => {
       const chunks: Buffer[] = [];
       req.on('data', (c: Buffer) => chunks.push(c));
@@ -78,6 +86,8 @@ export class Receiver {
     await new Promise<void>((resolve) =>
       this.server!.listen(0, '127.0.0.1', resolve),
     );
+    process.env.HTTP_FIXTURE_ORIGIN = this.url('');
+    process.env.HTTP_FIXTURE_ADDRESS = '127.0.0.1';
   }
 
   url(path: string): string {
@@ -92,6 +102,11 @@ export class Receiver {
   async stop(): Promise<void> {
     const server = this.server;
     if (!server) return;
+    if (Receiver.active === this) {
+      Receiver.active = undefined;
+      delete process.env.HTTP_FIXTURE_ORIGIN;
+      delete process.env.HTTP_FIXTURE_ADDRESS;
+    }
     this.server = undefined;
     server.closeAllConnections();
     await new Promise((resolve) => server.close(resolve));

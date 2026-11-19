@@ -1,4 +1,10 @@
 import 'reflect-metadata';
+import {
+  DEFAULT_HTTP_TIMEOUT_MS,
+  MAX_HTTP_TIMEOUT_MS,
+  MAX_RESPONSE_BYTES,
+  outboundSettings,
+} from './outbound';
 import { isIP } from 'node:net';
 import { plainToInstance, Type } from 'class-transformer';
 import {
@@ -208,6 +214,21 @@ export class EnvironmentVariables extends DatabaseEnvironment {
   @Max(MAX_HTTP_BODY_LIMIT)
   HTTP_BODY_LIMIT = 100 * 1024;
 
+  @IsString()
+  HTTP_DENY_CIDRS = '';
+
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(MAX_HTTP_TIMEOUT_MS)
+  HTTP_STEP_TIMEOUT_MS = DEFAULT_HTTP_TIMEOUT_MS;
+
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(MAX_RESPONSE_BYTES)
+  HTTP_RESPONSE_BYTES = MAX_RESPONSE_BYTES;
+
   /**
    * Токен службових ендпоінтів `/tenants…`. Потрібен лише API (ApiEnvironment): воркер його не
    * отримує, щоб компрометація воркера не давала адмін-доступу. Якщо заданий — перевіряється.
@@ -409,12 +430,14 @@ export function validateEnv(
   raw: Record<string, unknown>,
 ): EnvironmentVariables {
   rejectOwnerCredentials(raw);
+  outboundSettings(raw);
   return validateAs(EnvironmentVariables, raw);
 }
 
 /** Схема API: спільна плюс обов'язковий ADMIN_TOKEN. */
 export function validateApiEnv(raw: Record<string, unknown>): ApiEnvironment {
   rejectOwnerCredentials(raw);
+  outboundSettings(raw);
   const env = validateAs(EnvironmentVariables, raw);
   // Явна перевірка: @IsOptional спільної схеми вимикає для цієї властивості будь-які інші
   // декоратори, зокрема @IsDefined.

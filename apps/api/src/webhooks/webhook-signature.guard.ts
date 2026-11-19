@@ -6,10 +6,14 @@ import {
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
-import { createHmac } from 'crypto';
+import {
+  KeyRow,
+  readClock,
+  VerifiedDelivery,
+  verifyDelivery,
+} from './webhook-signature';
 import { isUUID } from 'class-validator';
 import type { Request } from 'express';
-import { safeEqual } from '../common/safe-equal';
 import { Tenant, Workflow } from '../entities';
 import { AuthFailureLimiter } from '../limits/auth-failure.limiter';
 import { effectiveLimits } from '../limits/effective-limits';
@@ -22,31 +26,9 @@ export interface WebhookRequest extends Request {
   tenant: Tenant;
   limits: EffectiveLimits;
   webhookWorkflow: Workflow;
+  delivery: VerifiedDelivery;
 }
 
-/**
- * Очікуваний підпис тіла або undefined, якщо тіло неможливо серіалізувати: на надглибокій
- * вкладеності JSON.stringify переповнює стек (RangeError). Такий підпис не підтверджується —
- * відповідь 401, як і на будь-який непідтверджений запит, а не 500.
- */
-function expectedSignature(secret: string, body: unknown): string | undefined {
-  let serialized: string;
-  try {
-    serialized = JSON.stringify(body);
-  } catch (err) {
-    if (err instanceof RangeError) return undefined;
-    throw err;
-  }
-  return createHmac('sha256', secret).update(serialized).digest('hex');
-}
-
-/**
- * Підпис webhook-а: hex HMAC-SHA256 від тіла запиту секретом тенанта (`x-signature`). Guard, а не
- * код обробника, — щоб ліміт частоти webhook-ів (наступний guard) рахувався лише після
- * підтвердженого підпису й на тенанта адресата. Невірний підпис і невідомий адресат рахуються лімітом невдалих
- * автентифікацій з IP. Тіло на цей момент уже розібране (body-parser), але ще не перевірене:
- * неавтентифікований запит отримує 401, а не пояснення формату.
- */
 @Injectable()
 export class WebhookSignatureGuard implements CanActivate {
   constructor(
@@ -61,33 +43,50 @@ export class WebhookSignatureGuard implements CanActivate {
     // Як ParseUUIDPipe: guard виконується раніше за пайпи параметрів.
     if (!isUUID(workflowId))
       throw new BadRequestException('Validation failed (uuid is expected)');
-    // Тенант адресата — вузькою SECURITY DEFINER-функцією; workflow, секрет і ліміти читаються
+    // Тенант адресата (і вимкненого workflow: повтор прийнятої доставки повертає її виконання) —
+    // вузькою SECURITY DEFINER-функцією; workflow, секрет і ліміти читаються
     // вже в контексті цього тенанта (RLS), з явним предикатом tenantId.
     const tenantId = await this.system.webhookTenant(workflowId);
     const target =
       tenantId &&
       (await this.db.run(tenantId, async (em) => {
         const workflow = await em.findOne(Workflow, {
-          where: { id: workflowId, tenantId, enabled: true },
+          where: { id: workflowId, tenantId },
         });
-        const tenant = await em.findOne(Tenant, { where: { id: tenantId } });
-        return workflow && tenant
-          ? { workflow, tenant, limits: await effectiveLimits(em) }
-          : null;
+        if (!workflow) return null;
+        const tenant = await em.findOneOrFail(Tenant, {
+          where: { id: tenantId },
+          select: { id: true },
+        });
+        const [keys]: KeyRow[] = await em.query(
+          'SELECT "webhookKeyId","webhookSecret","nextWebhookKeyId","nextWebhookSecret" FROM tenants WHERE id=$1',
+          [tenantId],
+        );
+        const bytes = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+        const delivery = verifyDelivery(
+          req,
+          workflowId,
+          bytes,
+          keys,
+          await readClock(em),
+        );
+        return {
+          workflow,
+          tenant,
+          delivery,
+          limits: delivery ? await effectiveLimits(em) : undefined,
+        };
       }));
-    // Невідомий чи вимкнений адресат — теж невдала автентифікація (ліміт за IP): інакше перебір
+    // Невідомий адресат — теж невдала автентифікація (ліміт за IP): інакше перебір
     // випадкових UUID без жодного ліміту навантажував би БД пошуком тенанта.
     if (!target) return this.authFailures.reject(ctx, new NotFoundException());
 
-    const expected = expectedSignature(target.tenant.webhookSecret, req.body);
-    if (
-      expected === undefined ||
-      !safeEqual(req.headers['x-signature'], expected)
-    )
+    if (!target.delivery || !target.limits)
       return this.authFailures.reject(
         ctx,
         new UnauthorizedException('Невірний підпис'),
       );
+    req.delivery = target.delivery;
     req.tenant = target.tenant;
     req.limits = target.limits;
     req.webhookWorkflow = target.workflow;

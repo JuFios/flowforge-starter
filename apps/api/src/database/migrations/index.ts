@@ -32,6 +32,8 @@ import { RateLimitLockTime1795910000000 } from './1795910000000-RateLimitLockTim
  */
 import { RateLimitInsertTime1795920000000 } from './1795920000000-RateLimitInsertTime';
 
+import { WebhookDeliveries1796000000000 } from './1796000000000-WebhookDeliveries';
+
 export const MIGRATIONS = [
   InitialSchema1794920217603,
   AddCorrelationId1794920232623,
@@ -56,4 +58,5 @@ export const MIGRATIONS = [
   ClaimBusyReport1795900000000,
   RateLimitLockTime1795910000000,
   RateLimitInsertTime1795920000000,
+  WebhookDeliveries1796000000000,
 ];

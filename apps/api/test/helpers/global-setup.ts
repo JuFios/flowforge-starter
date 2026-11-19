@@ -7,6 +7,7 @@ import {
   testDatabaseEnv,
   testDatabaseUrl,
 } from './test-env';
+import freshTransformBuild from './fresh-transform-build';
 import { provisionTestDatabase } from './test-provision';
 
 async function ensureDatabaseExists(url: string): Promise<void> {
@@ -36,6 +37,7 @@ async function ensureDatabaseExists(url: string): Promise<void> {
  * власником схеми (суперкористувачем), як крок міграцій у compose.
  */
 export default async function globalSetup(): Promise<void> {
+  freshTransformBuild();
   const url = testDatabaseUrl();
   // До будь-якого тестового процесу: jest запускає їх уже з цим оточенням.
   generateTestRolePasswords();

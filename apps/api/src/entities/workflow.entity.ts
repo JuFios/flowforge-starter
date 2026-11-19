@@ -6,6 +6,7 @@ import {
   JoinColumn,
   ManyToOne,
   PrimaryGeneratedColumn,
+  Unique,
 } from 'typeorm';
 import { Tenant } from './tenant.entity';
 import { TENANT_ID_DEFAULT } from './tenant-column';
@@ -19,11 +20,12 @@ export type StepDefinition =
       headers?: Record<string, string>;
       body?: string;
     }
-  | { id: string; type: 'transform'; expr: string }
+  | { id: string; type: 'transform'; expr: string; language?: 'jsonata-v1' }
   | { id: string; type: 'log'; message: string }
   | { id: string; type: 'delay'; ms: number };
 
 @Entity('workflows')
+@Unique('UQ_workflows_id_tenant', ['id', 'tenantId'])
 @Index(['tenantId'])
 @Index('IDX_workflows_scheduled_tenant', { synchronize: false })
 export class Workflow {

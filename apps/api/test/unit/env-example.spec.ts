@@ -23,6 +23,13 @@ describe('apps/api/.env.example', () => {
       .map((m) => m.propertyName),
   );
 
+  it.each(['HTTP_DENY_CIDRS', 'HTTP_STEP_TIMEOUT_MS', 'HTTP_RESPONSE_BYTES'])(
+    'declares the outbound parameter %s on the shared schema',
+    (name) => {
+      expect(declared.has(name)).toBe(true);
+    },
+  );
+
   it('passes the runtime config validation once the process gets its own database URL', () => {
     expect(() =>
       validateEnv({

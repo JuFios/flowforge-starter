@@ -15,10 +15,12 @@ import { testDatabaseEnv } from '../helpers/test-env';
  * Абсолютні числа залежать від машини (раннер CI приблизно вдвічі повільніший за ноутбук), тож
  * критерій відносний: у тому самому прогоні на тій самій БД міряється й захоплення FIFO
  * попередньої версії (e2fadbf: один UPDATE … SKIP LOCKED без обліку тенантів, роль власника) з тим
- * самим навантаженням. За медіанами прогонів справедливе захоплення дає щонайменше
- * MIN_THROUGHPUT_SHARE пропускної здатності FIFO, p95 — не більше MAX_P95_RATIO × p95 FIFO, і в
- * кожному прогоні — не менше MIN_CLAIMS_PER_SECOND (ловить обвал на зразок черги на рядку одного
- * тенанта, README, 3.3.5).
+ * самим навантаженням. Прогони йдуть парами FIFO і справедливої черги впритул, з чергуванням
+ * порядку в парі: зміна швидкодії раннера за час тесту зачіпає обидві половини пари однаково, а
+ * не всі прогони однієї версії. За медіаною відношень у парах справедливе захоплення дає
+ * щонайменше MIN_THROUGHPUT_SHARE пропускної здатності FIFO, p95 — не більше MAX_P95_RATIO × p95
+ * FIFO, і в кожному прогоні — не менше MIN_CLAIMS_PER_SECOND (ловить обвал на зразок черги на
+ * рядку одного тенанта, README, 3.3.5).
  *
  *   npm run bench:claim
  */
@@ -26,7 +28,7 @@ const TENANTS = 50;
 const JOBS = 20_000;
 const PROCESSES = 2;
 const LOOPS_PER_PROCESS = 16;
-const RUNS = 3;
+const RUNS = 5;
 const MIN_THROUGHPUT_SHARE = 0.5;
 const MAX_P95_RATIO = 3;
 const MIN_CLAIMS_PER_SECOND = 300;
@@ -196,13 +198,9 @@ describe('claim throughput', () => {
     }
   };
 
-  /** FIFO попередньої версії на окремих пулах того самого розміру; завершення — як тоді. */
-  async function fifoRuns(completion: Completion): Promise<RunResult[]> {
-    const claimSql =
-      completion === 'execution'
-        ? FIFO_CLAIM_SQL + ', "executionId"'
-        : FIFO_CLAIM_SQL;
-    const pools = await Promise.all(
+  /** Окремі пули FIFO того самого розміру, що й у воркерів. */
+  function openFifoPools(): Promise<DataSource[]> {
+    return Promise.all(
       Array.from({ length: PROCESSES }, () =>
         new DataSource(
           buildDataSourceOptions(testDatabaseEnv(), {
@@ -211,6 +209,18 @@ describe('claim throughput', () => {
         ).initialize(),
       ),
     );
+  }
+
+  /**
+   * Один прогін FIFO попередньої версії; завершення — як тоді. Пули відкриваються на прогін і
+   * закриваються після нього: з’єднань одночасно не більше, ніж за послідовного порівняння.
+   */
+  async function fifoRun(completion: Completion): Promise<RunResult> {
+    const pools = await openFifoPools();
+    const claimSql =
+      completion === 'execution'
+        ? FIFO_CLAIM_SQL + ', "executionId"'
+        : FIFO_CLAIM_SQL;
     // Як на e2fadbf: частковий індекс черги за часом і жодних тригерів обліку тенантів.
     await owner.query(
       `CREATE INDEX "IDX_bench_fifo_claim" ON jobs ("runAt") WHERE status = 'queued'`,
@@ -248,10 +258,7 @@ describe('claim throughput', () => {
           });
         }
       };
-      const results: RunResult[] = [];
-      for (let run = 0; run < RUNS; run++)
-        results.push(await measure(loop, completion));
-      return results;
+      return await measure(loop, completion);
     } finally {
       await owner.query('ALTER TABLE jobs ENABLE TRIGGER USER');
       await owner.query('DROP INDEX "IDX_bench_fifo_claim"');
@@ -275,21 +282,22 @@ describe('claim throughput', () => {
   it.each<Completion>(['job', 'execution'])(
     `%s completion keeps at least ${MIN_THROUGHPUT_SHARE * 100}% of the FIFO throughput and p95 within ${MAX_P95_RATIO}× of it (${RUNS} runs each)`,
     async (completion) => {
-      const fifo = await fifoRuns(completion);
+      const fifo: RunResult[] = [];
       const fair: RunResult[] = [];
-      for (let run = 0; run < RUNS; run++)
+      for (let run = 0; run < RUNS; run++) {
+        // Парні прогони починає FIFO, непарні — справедлива черга.
+        if (run % 2 === 0) fifo.push(await fifoRun(completion));
         fair.push(await measure(fairLoop, completion));
-      const share =
-        median(fair.map((r) => r.perSecond)) /
-        median(fifo.map((r) => r.perSecond));
-      const p95Ratio =
-        median(fair.map((r) => r.p95)) / median(fifo.map((r) => r.p95));
+        if (run % 2 === 1) fifo.push(await fifoRun(completion));
+      }
+      const share = median(fair.map((r, i) => r.perSecond / fifo[i].perSecond));
+      const p95Ratio = median(fair.map((r, i) => r.p95 / fifo[i].p95));
       console.log(
         `claim bench, ${completion} completion (${PROCESSES}×${LOOPS_PER_PROCESS} loops, ${JOBS} jobs, ${TENANTS} tenants):\n` +
           describeRuns('fair (this version)', fair) +
           '\n' +
           describeRuns('FIFO (e2fadbf)', fifo) +
-          `\n  fair / FIFO: throughput ${(share * 100).toFixed(0)}%, p95 ×${p95Ratio.toFixed(2)}`,
+          `\n  fair / FIFO, median of ${RUNS} adjacent pairs: throughput ${(share * 100).toFixed(0)}%, p95 ×${p95Ratio.toFixed(2)}`,
       );
       expect(share).toBeGreaterThanOrEqual(MIN_THROUGHPUT_SHARE);
       expect(p95Ratio).toBeLessThanOrEqual(MAX_P95_RATIO);

@@ -5,6 +5,9 @@
 services:
   # Зовнішній отримувач http-кроків, що поважає Idempotency-Key і рахує ефекти.
   sink:
+    networks:
+      chaos-receiver:
+        ipv4_address: 10.213.45.10
     image: node:20-alpine
     command: ["node", "/sink/chaos-sink.js"]
     volumes: ["./apps/api/dist/scripts:/sink:ro"]
@@ -19,8 +22,17 @@ services:
       retries: 20
 
   worker:
+    networks: [default, chaos-receiver]
     environment:
       # Коротший lease: задачі вбитого воркера повертаються за секунди, а не за 30 с.
       JOB_LEASE_MS: "5000"
+      HTTP_FIXTURE_ORIGIN: "http://sink:8080"
+      HTTP_FIXTURE_ADDRESS: "10.213.45.10"
     depends_on:
       sink: { condition: service_healthy }
+
+networks:
+  chaos-receiver:
+    ipam:
+      config:
+        - subnet: 10.213.45.0/24

@@ -42,6 +42,10 @@ export const POSTURE: {
         [SYSTEM_ROLE]: ALL_TABLE,
       },
     },
+    webhook_deliveries: {
+      tenantColumn: 'tenantId',
+      grants: { [API_ROLE]: ['INSERT', 'SELECT'] },
+    },
     workflows: {
       tenantColumn: 'tenantId',
       grants: { [API_ROLE]: ALL_TABLE, [SYSTEM_ROLE]: ALL_TABLE },
@@ -391,8 +395,14 @@ export async function findPostureViolations(query: Query): Promise<string[]> {
   }>)
     problems.push(`${name} can create objects in schema public`);
 
-  for (const row of (await query(POLICIES_SQL)) as PolicyRow[])
-    checkPolicies(row, problems);
+  const policies = (await query(POLICIES_SQL)) as PolicyRow[];
+  const inspected = new Set(policies.map((row) => row.table));
+  for (const [name, table] of Object.entries(POSTURE.tables))
+    if (table.tenantColumn && !inspected.has(name))
+      problems.push(
+        `tenant relation ${name} is not a table inspected for row-level security`,
+      );
+  for (const row of policies) checkPolicies(row, problems);
 
   for (const { role, object } of (await query(FOREIGN_OBJECTS_SQL, [
     SERVICE_ROLES,

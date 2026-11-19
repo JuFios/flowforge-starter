@@ -1,3 +1,4 @@
+import { compileProfile, LEGACY_PATH } from '../engine/transform-profile';
 import { BadRequestException } from '@nestjs/common';
 import { exceedsJsonDepth, jsonTooDeepMessage } from '../common/json-depth';
 import { findUnstorable } from '../common/storable-text';
@@ -32,7 +33,7 @@ export const HTTP_METHODS = [
 /** Дозволені поля кожного типу кроку; будь-яке інше поле — помилка, а не мовчазне збереження. */
 const STEP_FIELDS: Record<StepType, readonly string[]> = {
   http: ['id', 'type', 'url', 'method', 'headers', 'body'],
-  transform: ['id', 'type', 'expr'],
+  transform: ['id', 'type', 'expr', 'language'],
   log: ['id', 'type', 'message'],
   delay: ['id', 'type', 'ms'],
 };
@@ -45,9 +46,12 @@ const HEADER_VALUE = /^[\t\x20-\x7e\x80-\xff]*$/;
  * Заголовки, які тенант не задає: `Idempotency-Key` ставить платформа (стабільний для всіх спроб
  * кроку), а службові заголовки з'єднання визначає HTTP-клієнт.
  */
-const RESERVED_HEADERS = new Set([
+export const RESERVED_HEADERS = new Set([
   'idempotency-key',
   'host',
+  'x-request-id',
+  'accept-encoding',
+  'proxy-authorization',
   'content-length',
   'transfer-encoding',
   'connection',
@@ -158,12 +162,19 @@ function validateStep(
   switch (type) {
     case 'http':
       return validateHttp(step, where);
-    case 'transform':
-      return {
-        id,
-        type,
-        expr: stringField(step, 'expr', where, MAX_EXPRESSION_LENGTH),
-      };
+    case 'transform': {
+      const expr = stringField(step, 'expr', where, MAX_EXPRESSION_LENGTH);
+      if (step.language === undefined && LEGACY_PATH.test(expr))
+        return { id, type, expr };
+      if (step.language !== undefined && step.language !== 'jsonata-v1')
+        fail(where + '.language: невідома мова виразу');
+      try {
+        compileProfile(expr);
+      } catch {
+        fail(where + '.expr: вираз поза підтримуваним профілем JSONata');
+      }
+      return { id, type, expr, language: 'jsonata-v1' };
+    }
     case 'log':
       return {
         id,

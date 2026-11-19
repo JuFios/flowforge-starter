@@ -12,19 +12,42 @@ import { buildDataSourceOptions } from './database.options';
 export const MIGRATION_LOCK_KEY = 0x666c6f77;
 
 /**
+ * Скільки `db:migrate` чекає на лок, який тримає інший запуск. Без межі завислий попередній запуск
+ * (чи сесія, що тримає лок) мовчки зупиняв би кожне наступне розгортання.
+ */
+export const MIGRATION_LOCK_WAIT_MS = 10 * 60_000;
+const MIGRATION_LOCK_POLL_MS = 500;
+
+/**
  * Усі невиконані міграції й звірка інваріантів безпеки — в одній транзакції (README, «Міграції БД»).
  * Якщо каталог після міграцій не відповідає `POSTURE` (чужий грант, політика, роль із входом чи
  * сесією), транзакція відкочується: жодне надання, зокрема BYPASSRLS системній ролі, не набуває
  * чинності. Звірка виконується й тоді, коли міграцій немає, тож кожен запуск виявляє дрейф.
  */
-export async function migrate(ds: DataSource): Promise<Migration[]> {
+export async function migrate(
+  ds: DataSource,
+  { lockWaitMs = MIGRATION_LOCK_WAIT_MS }: { lockWaitMs?: number } = {},
+): Promise<Migration[]> {
   const runner = ds.createQueryRunner();
   await runner.connect();
   try {
     await runner.startTransaction();
-    await runner.query('SELECT pg_catalog.pg_advisory_xact_lock($1)', [
-      MIGRATION_LOCK_KEY,
-    ]);
+    // Спроба без очікування в циклі з межею (lock_timeout діяв би й на блокування DDL міграцій).
+    const deadline = Date.now() + lockWaitMs;
+    for (;;) {
+      const [{ locked }] = (await runner.query(
+        'SELECT pg_catalog.pg_try_advisory_xact_lock($1) AS locked',
+        [MIGRATION_LOCK_KEY],
+      )) as Array<{ locked: boolean }>;
+      if (locked) break;
+      if (Date.now() >= deadline)
+        throw new Error(
+          `another db:migrate has held the migration lock for over ${Math.round(lockWaitMs / 1000)} s; check for a stuck migration session`,
+        );
+      await new Promise((resolve) =>
+        setTimeout(resolve, Math.min(MIGRATION_LOCK_POLL_MS, lockWaitMs)),
+      );
+    }
     const executor = new MigrationExecutor(ds, runner);
     // Транзакцію вже відкрито тут: виконавець не відкриває й не завершує власних.
     executor.transaction = 'none';

@@ -1,4 +1,4 @@
-import { createHmac } from 'node:crypto';
+import { signedHeaders } from '../helpers/webhook';
 import { DataSource } from 'typeorm';
 import { WorkerModule } from '../../src/app.module';
 import { JobQueueService } from '../../src/engine/job-queue.service';
@@ -155,9 +155,11 @@ describe('every operation works with the runtime roles', () => {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
-        'x-signature': createHmac('sha256', tenant.webhookSecret)
-          .update(JSON.stringify(body))
-          .digest('hex'),
+        ...signedHeaders(
+          wf.body.id,
+          tenant.webhookSecret,
+          JSON.stringify(body),
+        ),
       },
       body: JSON.stringify(body),
     });

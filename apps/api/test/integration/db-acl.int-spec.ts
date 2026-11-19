@@ -19,6 +19,7 @@ const TABLE_PRIVILEGES: Record<string, Record<string, string>> = {
     step_runs: 'SELECT',
     tenants: 'INSERT,SELECT,UPDATE',
     workflow_versions: 'INSERT,SELECT',
+    webhook_deliveries: 'INSERT,SELECT',
     workflows: 'DELETE,INSERT,SELECT,UPDATE',
   },
   flowforge_worker_role: {

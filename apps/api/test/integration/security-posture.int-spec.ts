@@ -1,7 +1,7 @@
 import { DataSource, MigrationExecutor } from 'typeorm';
 import { validateDatabaseEnv } from '../../src/config/env.validation';
 import { buildDataSourceOptions } from '../../src/database/database.options';
-import { migrate } from '../../src/database/migrate';
+import { MIGRATION_LOCK_KEY, migrate } from '../../src/database/migrate';
 import { findPostureViolations } from '../../src/tenancy/security-posture';
 import { SYSTEM_ROLE, WORKER_ROLE } from '../../src/tenancy/roles';
 import { openTestDataSource } from '../helpers/db';
@@ -67,6 +67,19 @@ describe('db:migrate refuses a catalog that FlowForge did not shape', () => {
     await owner.destroy();
   });
 
+  it('requires a tenant relation to be a table covered by the policy inspection', async () => {
+    const ds = await freshScratch();
+    await migrate(ds);
+    await ds.query('DROP TABLE webhook_deliveries');
+    await ds.query(
+      'CREATE VIEW webhook_deliveries AS SELECT NULL::uuid AS "tenantId" WHERE false',
+    );
+    await ds.query(
+      'GRANT SELECT,INSERT ON webhook_deliveries TO flowforge_api_role',
+    );
+    await expect(migrate(ds)).rejects.toThrow(/webhook_deliveries/);
+  });
+
   it('applies every migration to an empty database and accepts a repeated run', async () => {
     const ds = await freshScratch();
     expect(await migrate(ds)).toHaveLength(ds.migrations.length);
@@ -89,6 +102,21 @@ describe('db:migrate refuses a catalog that FlowForge did not shape', () => {
       `SELECT count(*)::int AS count FROM migrations`,
     );
     expect(count).toBe(ds.migrations.length);
+  });
+
+  it('gives up with a clear error instead of waiting forever for a stuck migration lock', async () => {
+    const ds = await freshScratch();
+    const holder = await openScratch();
+    try {
+      await holder.query('SELECT pg_advisory_lock($1)', [MIGRATION_LOCK_KEY]);
+      await expect(migrate(ds, { lockWaitMs: 300 })).rejects.toThrow(
+        /another db:migrate has held the migration lock/,
+      );
+      expect(await tableExists(ds, 'migrations')).toBe(false);
+    } finally {
+      await holder.destroy();
+    }
+    await expect(migrate(ds)).resolves.toHaveLength(ds.migrations.length);
   });
 
   // ALTER DEFAULT PRIVILEGES того, хто мігрує: кожна нова функція чи таблиця одразу отримує грант

@@ -1,4 +1,4 @@
-import { createHmac } from 'node:crypto';
+import { signedHeaders } from '../helpers/webhook';
 import { DataSource } from 'typeorm';
 import { Execution, Job, StepRun } from '../../src/entities';
 import { LimitsMetrics } from '../../src/limits/limits.metrics';
@@ -116,9 +116,7 @@ describe('tenant queue size limit', () => {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
-          'x-signature': createHmac('sha256', tenant.webhookSecret)
-            .update(JSON.stringify(body))
-            .digest('hex'),
+          ...signedHeaders(wf, tenant.webhookSecret, JSON.stringify(body)),
         },
         body: JSON.stringify(body),
       });
