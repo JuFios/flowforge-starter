@@ -10,7 +10,6 @@ import { ExecutionsService } from '../../src/executions/executions.service';
 import { Execution, Job } from '../../src/entities';
 import { RunningApp, startApp } from '../helpers/app';
 import {
-  createExecution,
   createTenant,
   createWorkflow,
   openTestDataSource,
@@ -103,20 +102,41 @@ describe('webhook upgrade, concurrent acceptance and revocation', () => {
 
   it('keeps one receipt, execution and initial job across two APIs and rotates a migrated tenant without downtime', async () => {
     await truncateAll(db);
-    await db.undoLastMigration({ transaction: 'each' });
+    // До міграції WebhookDeliveries (і всіх новіших): схема попередньої версії.
+    for (;;) {
+      const [last]: Array<{ name: string }> = await db.query(
+        'SELECT name FROM migrations ORDER BY id DESC LIMIT 1',
+      );
+      await db.undoLastMigration({ transaction: 'each' });
+      if (last.name.startsWith('WebhookDeliveries')) break;
+    }
     const apiKey = randomUUID();
     const [tenant]: Array<{ id: string; webhookSecret: string }> =
       await db.query(
         'INSERT INTO tenants(name,"apiKeyHash","webhookSecret") VALUES ($1,$2,$3) RETURNING id,"webhookSecret"',
         ['legacy', hashApiKey(apiKey), randomUUID()],
       );
-    const workflow = await createWorkflow(db, tenant.id);
-    const old = await createExecution(db, workflow, {
-      input: { name: 'before update' },
-    });
-    await db
-      .getRepository(Job)
-      .save({ tenantId: tenant.id, executionId: old.id });
+    // Рядки старої схеми — прямим SQL: сутності описують уже найновішу схему.
+    const [workflow]: Array<{ id: string }> = await db.query(
+      `INSERT INTO workflows ("tenantId", name, steps)
+       VALUES ($1, 'wf', '[{"id":"say","type":"log","message":"hello {{ input.name }}"}]')
+       RETURNING id`,
+      [tenant.id],
+    );
+    const [version]: Array<{ id: string }> = await db.query(
+      `INSERT INTO workflow_versions ("workflowId", "tenantId", version, steps)
+       SELECT id, "tenantId", version, steps FROM workflows WHERE id = $1 RETURNING id`,
+      [workflow.id],
+    );
+    const [old]: Array<{ id: string }> = await db.query(
+      `INSERT INTO executions ("tenantId", "workflowId", "workflowVersionId", input)
+       VALUES ($1, $2, $3, '{"name":"before update"}') RETURNING id`,
+      [tenant.id, workflow.id, version.id],
+    );
+    await db.query(
+      'INSERT INTO jobs ("tenantId", "executionId") VALUES ($1, $2)',
+      [tenant.id, old.id],
+    );
     const report = await promisify(execFile)(
       process.execPath,
       [resolve(__dirname, '../../dist/database/webhook-preflight.js')],
