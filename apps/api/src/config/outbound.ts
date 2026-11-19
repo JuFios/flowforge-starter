@@ -1,5 +1,9 @@
 import ipaddr from 'ipaddr.js';
 
+export const DEFAULT_HTTP_TIMEOUT_MS = 15000;
+export const MAX_HTTP_TIMEOUT_MS = 60000;
+export const MAX_RESPONSE_BYTES = 1048576;
+
 function limit(
   env: Record<string, unknown>,
   name: string,
@@ -45,7 +49,17 @@ export function outboundSettings(env: Record<string, unknown>) {
     origin,
     address,
     ranges,
-    timeoutMs: limit(env, 'HTTP_STEP_TIMEOUT_MS', 15000, 60000),
-    bytes: limit(env, 'HTTP_RESPONSE_BYTES', 1048576, 1048576),
+    timeoutMs: limit(
+      env,
+      'HTTP_STEP_TIMEOUT_MS',
+      DEFAULT_HTTP_TIMEOUT_MS,
+      MAX_HTTP_TIMEOUT_MS,
+    ),
+    bytes: limit(
+      env,
+      'HTTP_RESPONSE_BYTES',
+      MAX_RESPONSE_BYTES,
+      MAX_RESPONSE_BYTES,
+    ),
   };
 }

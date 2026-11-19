@@ -1,5 +1,10 @@
 import 'reflect-metadata';
-import { outboundSettings } from './outbound';
+import {
+  DEFAULT_HTTP_TIMEOUT_MS,
+  MAX_HTTP_TIMEOUT_MS,
+  MAX_RESPONSE_BYTES,
+  outboundSettings,
+} from './outbound';
 import { isIP } from 'node:net';
 import { plainToInstance, Type } from 'class-transformer';
 import {
@@ -208,6 +213,21 @@ export class EnvironmentVariables extends DatabaseEnvironment {
   @Min(MIN_HTTP_BODY_LIMIT)
   @Max(MAX_HTTP_BODY_LIMIT)
   HTTP_BODY_LIMIT = 100 * 1024;
+
+  @IsString()
+  HTTP_DENY_CIDRS = '';
+
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(MAX_HTTP_TIMEOUT_MS)
+  HTTP_STEP_TIMEOUT_MS = DEFAULT_HTTP_TIMEOUT_MS;
+
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(MAX_RESPONSE_BYTES)
+  HTTP_RESPONSE_BYTES = MAX_RESPONSE_BYTES;
 
   /**
    * Токен службових ендпоінтів `/tenants…`. Потрібен лише API (ApiEnvironment): воркер його не
