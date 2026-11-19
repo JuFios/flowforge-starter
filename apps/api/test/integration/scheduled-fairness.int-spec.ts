@@ -319,6 +319,28 @@ describe('scheduled tenant fairness', () => {
     90000,
   );
 
+  it('retries a failed tenant on a new tick while still discovering other tenants between rounds', async () => {
+    const a = (await createTenant(ds, 'catch-up')).tenant.id;
+    const b = (await createTenant(ds, 'failed')).tenant.id;
+    await schedules(a, 1, 45_000, '00000000-0000-4000-9000-');
+    await schedules(b, 1, 1000, '00000000-0000-4000-a000-');
+    let failures = 0;
+    const log = recordFirings(async (id) => {
+      if (id.startsWith('00000000-0000-4000-a000-')) {
+        failures++;
+        throw new Error('scheduled enqueue failed');
+      }
+    });
+    try {
+      await scheduler.tick();
+      expect(failures).toBe(1);
+      await scheduler.tick();
+      expect(failures).toBe(2);
+    } finally {
+      log.restore();
+    }
+  });
+
   it('stops a schedule disabled between rounds of the same tick', async () => {
     const [a, b] = [
       (await createTenant(ds, 'busy')).tenant.id,
