@@ -111,11 +111,21 @@ export class CronSchedule {
       throw new InvalidScheduleError('cron expression is empty');
     if (expression.length > 100)
       throw new InvalidScheduleError('cron expression is too long');
+    const source = expression.trim();
+    const fields = source.split(/\s+/).length;
+    if (
+      fields !== 5 &&
+      fields !== 6 &&
+      !/^@(yearly|monthly|weekly|daily|hourly)$/.test(source)
+    )
+      throw new InvalidScheduleError(
+        'cron requires five or six fields or a supported alias',
+      );
     if (!isValidTimeZone(timeZone))
       throw new InvalidScheduleError('timezone is not a known IANA zone');
     let schedule: CronSchedule;
     try {
-      schedule = new CronSchedule(expression, timeZone);
+      schedule = new CronSchedule(source, timeZone);
     } catch {
       throw new InvalidScheduleError('cron expression is invalid');
     }
