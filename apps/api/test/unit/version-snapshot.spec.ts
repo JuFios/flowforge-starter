@@ -1,6 +1,5 @@
 import { Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Repository } from 'typeorm';
 import { EnvironmentVariables } from '../../src/config/env.validation';
 import { CheckpointService } from '../../src/engine/checkpoint.service';
 import {
@@ -10,7 +9,8 @@ import {
 import { JobRunnerService } from '../../src/engine/job-runner.service';
 import { QueueMetrics } from '../../src/engine/queue.metrics';
 import { StepExecutor } from '../../src/engine/step-executor';
-import { Execution, WorkflowVersion } from '../../src/entities';
+import { Execution } from '../../src/entities';
+import { fakeTenantDb } from '../helpers/fake-tenant-db';
 
 /**
  * Воркер виконує лише знімок версії, зафіксований у виконанні. Пошук `{ id: undefined }` TypeORM
@@ -39,17 +39,13 @@ describe('worker without a workflow version snapshot', () => {
         heartbeat: jest.fn().mockResolvedValue(true),
       } as unknown as JobQueueService,
       { execute: jest.fn() } as unknown as StepExecutor,
-      {
-        findOneOrFail: jest.fn().mockResolvedValue({
-          id: 'e-1',
-          input: {},
-          workflowVersionId: null,
-        }),
-      } as unknown as Repository<Execution>,
-      {
-        findOneOrFail: anyVersion,
-        findOneByOrFail: anyVersion,
-      } as unknown as Repository<WorkflowVersion>,
+      fakeTenantDb({
+        findOneOrFail: jest.fn((entity: unknown) =>
+          entity === Execution
+            ? Promise.resolve({ id: 'e-1', input: {}, workflowVersionId: null })
+            : (anyVersion() as Promise<unknown>),
+        ) as never,
+      }),
       {
         load: jest.fn().mockResolvedValue([]),
         startStep: jest.fn().mockRejectedValue(new Error('must not start')),

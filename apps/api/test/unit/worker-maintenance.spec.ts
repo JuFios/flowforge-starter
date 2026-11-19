@@ -1,5 +1,4 @@
 import { ConfigService } from '@nestjs/config';
-import { Repository } from 'typeorm';
 import {
   EnvironmentVariables,
   MAX_TIMER_MS,
@@ -9,7 +8,7 @@ import { JobQueueService } from '../../src/engine/job-queue.service';
 import { JobRunnerService } from '../../src/engine/job-runner.service';
 import { QueueMetrics } from '../../src/engine/queue.metrics';
 import { StepExecutor } from '../../src/engine/step-executor';
-import { Execution, WorkflowVersion } from '../../src/entities';
+import { fakeTenantDb } from '../helpers/fake-tenant-db';
 
 describe('worker maintenance', () => {
   beforeEach(() => {
@@ -32,8 +31,7 @@ describe('worker maintenance', () => {
     const runner = new JobRunnerService(
       { reapExpired, purgeFinished } as unknown as JobQueueService,
       {} as StepExecutor,
-      {} as Repository<Execution>,
-      {} as Repository<WorkflowVersion>,
+      fakeTenantDb(),
       {} as CheckpointService,
       {
         get: (key: keyof EnvironmentVariables) => values[key],

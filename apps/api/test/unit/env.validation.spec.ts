@@ -1,7 +1,44 @@
 import {
+  parseTrustProxy,
+  validateApiEnv,
   validateDatabaseEnv,
   validateEnv,
 } from '../../src/config/env.validation';
+
+describe('per-process configuration', () => {
+  const url = 'postgres://flowforge_worker:pw@localhost:5432/db';
+
+  it('lets the worker start without ADMIN_TOKEN', () => {
+    expect(validateEnv({ DATABASE_URL: url }).ADMIN_TOKEN).toBeUndefined();
+  });
+
+  it('requires ADMIN_TOKEN for the API', () => {
+    expect(() => validateApiEnv({ DATABASE_URL: url })).toThrow(/ADMIN_TOKEN/);
+    expect(
+      validateApiEnv({ DATABASE_URL: url, ADMIN_TOKEN: 'a-long-admin-token' })
+        .ADMIN_TOKEN,
+    ).toBe('a-long-admin-token');
+  });
+
+  it.each([validateEnv, validateApiEnv])(
+    'refuses the schema owner credentials in a runtime process (%p)',
+    (validate) => {
+      const owner = 'postgres://flowforge:owner-secret@localhost:5432/db';
+      let message = '';
+      try {
+        validate({
+          DATABASE_URL: url,
+          ADMIN_TOKEN: 'a-long-admin-token',
+          MIGRATION_DATABASE_URL: owner,
+        });
+      } catch (err) {
+        message = (err as Error).message;
+      }
+      expect(message).toContain('MIGRATION_DATABASE_URL');
+      expect(message).not.toContain('owner-secret');
+    },
+  );
+});
 
 describe('validateEnv', () => {
   const base = {
@@ -166,5 +203,40 @@ describe('validateDatabaseEnv (migration CLI)', () => {
     expect(() => validateDatabaseEnv({ DATABASE_URL: 'mysql://x' })).toThrow(
       /DATABASE_URL/,
     );
+  });
+});
+
+describe('TRUST_PROXY', () => {
+  it.each([
+    ['false', false],
+    ['1', 1],
+    ['10', 10],
+    ['loopback', ['loopback']],
+    ['10.0.0.1, 10.0.0.0/8', ['10.0.0.1', '10.0.0.0/8']],
+    ['fd00::/8,uniquelocal', ['fd00::/8', 'uniquelocal']],
+  ])('accepts %s', (value, parsed) => {
+    expect(parseTrustProxy(value)).toEqual(parsed);
+  });
+
+  // `true` дав би клієнту самому задавати свою IP через X-Forwarded-For.
+  it.each([
+    'true',
+    '0',
+    '11',
+    '0.0.0.0/0',
+    '::/0',
+    '10.0.0.0/33',
+    'fd00::/129',
+    'proxy.local',
+    '10.0.0.1/8/1',
+    '1.2.3',
+  ])('rejects %s', (value) => {
+    expect(parseTrustProxy(value)).toBeUndefined();
+    expect(() =>
+      validateEnv({
+        DATABASE_URL: 'postgres://u:p@localhost:5432/db',
+        TRUST_PROXY: value,
+      }),
+    ).toThrow(/TRUST_PROXY/);
   });
 });

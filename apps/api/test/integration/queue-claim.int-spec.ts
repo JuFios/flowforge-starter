@@ -72,7 +72,9 @@ describe('job queue with several workers', () => {
           const queue = w.app.get(JobQueueService);
           for (;;) {
             const job = await queue.claimNext(`claimer-${wi}-${slot}`);
-            if (!job) return;
+            // null — готових задач немає; undefined — кандидата щойно забрали інші, ще коло.
+            if (job === null) return;
+            if (!job) continue;
             claimed.push(job.id);
           }
         }),

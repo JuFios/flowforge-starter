@@ -1,7 +1,13 @@
 import 'reflect-metadata';
 import { DataSource } from 'typeorm';
 import { buildDataSourceOptions } from '../../src/database/database.options';
-import { testDatabaseEnv, testDatabaseUrl } from './test-env';
+import { migrate } from '../../src/database/migrate';
+import {
+  generateTestRolePasswords,
+  testDatabaseEnv,
+  testDatabaseUrl,
+} from './test-env';
+import { provisionTestDatabase } from './test-provision';
 
 async function ensureDatabaseExists(url: string): Promise<void> {
   const target = new URL(url);
@@ -26,10 +32,13 @@ async function ensureDatabaseExists(url: string): Promise<void> {
 
 /**
  * Один раз перед усіма інтеграційними тестами: тестова БД очищається повністю
- * і схема будується лише міграціями — так кожен прогін перевіряє міграції з нуля.
+ * і схема будується лише міграціями — так кожен прогін перевіряє міграції з нуля. Підключення —
+ * власником схеми (суперкористувачем), як крок міграцій у compose.
  */
 export default async function globalSetup(): Promise<void> {
   const url = testDatabaseUrl();
+  // До будь-якого тестового процесу: jest запускає їх уже з цим оточенням.
+  generateTestRolePasswords();
   await ensureDatabaseExists(url);
   // Як CLI міграцій: без statement_timeout.
   const ds = new DataSource(
@@ -39,7 +48,10 @@ export default async function globalSetup(): Promise<void> {
   try {
     await ds.query('DROP SCHEMA IF EXISTS public CASCADE');
     await ds.query('CREATE SCHEMA public');
-    await ds.runMigrations({ transaction: 'each' });
+    // Тим самим шляхом, що й `db:migrate` у compose: одна транзакція й звірка інваріантів безпеки.
+    await migrate(ds);
+    // Як db:provision у compose: застосунок у тестах ходить runtime-ролями без BYPASSRLS.
+    await provisionTestDatabase((sql, params) => ds.query(sql, params));
   } finally {
     await ds.destroy();
   }

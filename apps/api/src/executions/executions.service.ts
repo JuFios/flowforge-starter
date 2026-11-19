@@ -7,9 +7,8 @@ import {
 } from '@nestjs/common';
 import { Counter } from 'prom-client';
 import { ConfigService } from '@nestjs/config';
-import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { EnvironmentVariables } from '../config/env.validation';
-import { DataSource, EntityManager, Repository } from 'typeorm';
+import { EntityManager } from 'typeorm';
 import {
   Execution,
   Job,
@@ -21,7 +20,20 @@ import {
   getCorrelationId,
   newCorrelationId,
 } from '../observability/correlation';
+import { QueueFullException } from '../limits/limit-exceptions';
+import { LimitsMetrics } from '../limits/limits.metrics';
 import { MetricsService } from '../observability/metrics.service';
+import { TenantDb } from '../tenancy/tenant-db';
+
+/** Джерело постановки (мітка метрики відхилених постановок). */
+type EnqueueTrigger = Execution['trigger'] | 'retry';
+
+/** Лічильники й ліміт черги тенанта з його рядка обліку. */
+interface QueueUsage {
+  queued: number;
+  running: number;
+  maxQueueSize: number;
+}
 
 @Injectable()
 export class ExecutionsService {
@@ -29,12 +41,10 @@ export class ExecutionsService {
   private readonly retried: Counter;
 
   constructor(
-    @InjectDataSource() private readonly ds: DataSource,
-    @InjectRepository(Execution)
-    private readonly executions: Repository<Execution>,
-    @InjectRepository(StepRun) private readonly stepRuns: Repository<StepRun>,
+    private readonly db: TenantDb,
     private readonly config: ConfigService<EnvironmentVariables, true>,
     metrics: MetricsService,
+    private readonly limits: LimitsMetrics,
   ) {
     this.retried = new Counter({
       name: 'flowforge_executions_retried_total',
@@ -55,6 +65,13 @@ export class ExecutionsService {
     return (await this.create(workflow, input, trigger, null)).execution;
   }
 
+  async enqueueScheduled(
+    workflow: Workflow,
+    scheduledAt: Date,
+  ): Promise<boolean> {
+    return (await this.create(workflow, {}, 'cron', null, scheduledAt)).created;
+  }
+
   /**
    * Запуск через API з ключем ідемпотентності (`Idempotency-Key`): рівно одне виконання на ключ у
    * тенанті. Повтор того самого запиту (той самий workflow і вхід) повертає наявне виконання
@@ -69,22 +86,69 @@ export class ExecutionsService {
     return this.create(workflow, input, 'api', idempotencyKey);
   }
 
+  /**
+   * Блокує рядок обліку тенанта до кінця транзакції (`lock_tenant_usage`) і повертає його
+   * лічильники: постановки тенанта серіалізуються, тож перевірка ліміту черги й вставка задачі
+   * атомарні.
+   */
+  private async lockUsage(em: EntityManager): Promise<QueueUsage> {
+    const [usage]: QueueUsage[] = await em.query(
+      'SELECT queued, running, "maxQueueSize" FROM lock_tenant_usage()',
+    );
+    return usage;
+  }
+
+  /** Місце в черзі (README, «Контракт лімітів»); повна черга — 429 `queue_full`. */
+  private assertQueueSlot(usage: QueueUsage, trigger: EnqueueTrigger): void {
+    if (usage.queued + usage.running < usage.maxQueueSize) return;
+    this.limits.enqueueRejected.inc({ reason: 'queue_full', trigger });
+    throw new QueueFullException(usage.maxQueueSize);
+  }
+
   private create(
     workflow: Workflow,
     input: Record<string, unknown>,
     trigger: Execution['trigger'],
     idempotencyKey: string | null,
+    scheduledAt: Date | null = null,
   ): Promise<{ execution: Execution; created: boolean }> {
     const correlationId = getCorrelationId() ?? newCorrelationId();
-    return this.ds.transaction(async (em) => {
+    return this.db.run(workflow.tenantId, async (em) => {
+      // Порядок: облік тенанта (блокування) → пошук за ключем → ліміт → нові рядки. Ключ
+      // перевіряється після блокування: повтор уже прийнятого запиту повертає його виконання,
+      // навіть коли черга тим часом заповнилась, і два однакові запити не займуть два місця.
+      const usage = await this.lockUsage(em);
+      if (scheduledAt) {
+        const existing = await em.findOneBy(Execution, {
+          tenantId: workflow.tenantId,
+          workflowId: workflow.id,
+          scheduledAt,
+        });
+        if (existing) return { execution: existing, created: false };
+      }
+      if (idempotencyKey !== null) {
+        const existing = await this.findRun(
+          em,
+          workflow,
+          input,
+          idempotencyKey,
+        );
+        if (existing) return { execution: existing, created: false };
+      }
+      this.assertQueueSlot(usage, trigger);
       const version = await em.findOneOrFail(WorkflowVersion, {
-        where: { workflowId: workflow.id, version: workflow.version },
+        where: {
+          workflowId: workflow.id,
+          version: workflow.version,
+          tenantId: workflow.tenantId,
+        },
         select: { id: true },
       });
       const fields = {
         tenantId: workflow.tenantId,
         workflowId: workflow.id,
         workflowVersionId: version.id,
+        scheduledAt,
         input,
         trigger,
         correlationId,
@@ -93,6 +157,8 @@ export class ExecutionsService {
       if (idempotencyKey === null) {
         execution = await em.save(em.create(Execution, fields));
       } else {
+        // Постановки тенанта серіалізовані блокуванням обліку, тож конфлікт ключа тут неможливий;
+        // ON CONFLICT лишається страховкою унікального індексу.
         const [inserted]: Execution[] = await em.query(
           `INSERT INTO executions
              ("tenantId", "workflowId", "workflowVersionId", input, trigger, "correlationId",
@@ -135,30 +201,45 @@ export class ExecutionsService {
     });
   }
 
-  /** Виконання, уже створене з цим ключем; інший workflow чи вхід — 422. */
-  private async existingRun(
+  /**
+   * Виконання, уже створене з цим ключем, або undefined; той самий ключ з іншим workflow чи
+   * входом — 422.
+   */
+  private async findRun(
     em: EntityManager,
     workflow: Workflow,
     input: Record<string, unknown>,
     idempotencyKey: string,
-  ): Promise<Execution> {
+  ): Promise<Execution | undefined> {
     // Вхід порівнюється як jsonb: порядок ключів і пробіли не мають значення.
     const [row]: Array<Execution & { sameRequest: boolean }> = await em.query(
       `SELECT *, ("workflowId" = $3 AND input = $4::jsonb) AS "sameRequest"
          FROM executions WHERE "tenantId" = $1 AND "idempotencyKey" = $2`,
       [workflow.tenantId, idempotencyKey, workflow.id, JSON.stringify(input)],
     );
-    // Виконання з цим ключем щойно видалило очищення історії: запит варто повторити.
-    if (!row)
-      throw new ConflictException(
-        'виконання з цим Idempotency-Key щойно видалено, повторіть запит',
-      );
+    if (!row) return undefined;
     if (!row.sameRequest)
       throw new UnprocessableEntityException(
         'Idempotency-Key уже використано для іншого запуску (інший workflow або вхідні дані)',
       );
     // Службове поле порівняння у відповідь не потрапляє.
     delete (row as Partial<typeof row>).sameRequest;
+    return row;
+  }
+
+  /** Виконання, з яким щойно конфліктувала вставка за ключем; інший workflow чи вхід — 422. */
+  private async existingRun(
+    em: EntityManager,
+    workflow: Workflow,
+    input: Record<string, unknown>,
+    idempotencyKey: string,
+  ): Promise<Execution> {
+    const row = await this.findRun(em, workflow, input, idempotencyKey);
+    // Виконання з цим ключем щойно видалило очищення історії: запит варто повторити.
+    if (!row)
+      throw new ConflictException(
+        'виконання з цим Idempotency-Key щойно видалено, повторіть запит',
+      );
     return row;
   }
 
@@ -171,7 +252,7 @@ export class ExecutionsService {
    */
   async retry(tenantId: string, id: string): Promise<Execution> {
     const correlationId = getCorrelationId() ?? newCorrelationId();
-    const execution = await this.ds.transaction(async (em) => {
+    const execution = await this.db.run(tenantId, async (em) => {
       const [row]: Execution[] = await em.query(
         `SELECT * FROM executions WHERE id = $1 AND "tenantId" = $2 FOR UPDATE`,
         [id, tenantId],
@@ -185,14 +266,16 @@ export class ExecutionsService {
         throw new ConflictException(
           'виконання створене до появи знімків версій workflow і не може бути повторене',
         );
+      // Порядок блокувань: виконання → облік тенанта → задача (README, «Порядок блокувань»).
+      this.assertQueueSlot(await this.lockUsage(em), 'retry');
       const [{ started }]: Array<{ started: boolean }> = await em.query(
-        `SELECT EXISTS (SELECT 1 FROM step_runs WHERE "executionId" = $1) AS started`,
-        [id],
+        `SELECT EXISTS (SELECT 1 FROM step_runs WHERE "executionId" = $1 AND "tenantId" = $2) AS started`,
+        [id, tenantId],
       );
       const [updated]: [Execution[], number] = await em.query(
         `UPDATE executions SET status = $2, error = NULL, output = NULL, "finishedAt" = NULL
-          WHERE id = $1 RETURNING *`,
-        [id, started ? 'running' : 'pending'],
+          WHERE id = $1 AND "tenantId" = $3 RETURNING *`,
+        [id, started ? 'running' : 'pending', tenantId],
       );
       const maxAttempts = this.config.get('JOB_MAX_ATTEMPTS', { infer: true });
       // Задача — та сама (завершена), або нова, якщо її вже видалило очищення (JOB_RETENTION_DAYS).
@@ -201,8 +284,8 @@ export class ExecutionsService {
             SET status = 'queued', attempts = 0, "maxAttempts" = $2, "runAt" = now(),
                 "lastError" = NULL, "finishedAt" = NULL, "correlationId" = $3,
                 "lockedBy" = NULL, "lockedUntil" = NULL, "lockToken" = NULL
-          WHERE "executionId" = $1 AND status IN ('done', 'failed', 'dead')`,
-        [id, maxAttempts, correlationId],
+          WHERE "executionId" = $1 AND "tenantId" = $4 AND status IN ('done', 'failed', 'dead')`,
+        [id, maxAttempts, correlationId, tenantId],
       );
       if (requeued === 0)
         await em.save(
@@ -224,20 +307,30 @@ export class ExecutionsService {
   }
 
   list(tenantId: string, limit = 50): Promise<Execution[]> {
-    return this.executions.find({
-      where: { tenantId },
-      order: { createdAt: 'DESC' },
-      take: Math.min(limit, 200),
-    });
+    return this.db.run(tenantId, (em) =>
+      em.find(Execution, {
+        where: { tenantId },
+        order: { createdAt: 'DESC' },
+        take: Math.min(limit, 200),
+      }),
+    );
   }
 
-  async get(id: string): Promise<Execution & { steps: StepRun[] }> {
-    const execution = await this.executions.findOne({ where: { id } });
-    if (!execution) throw new NotFoundException('Execution не знайдено');
-    const steps = await this.stepRuns.find({
-      where: { executionId: id },
-      order: { stepIndex: 'ASC', startedAt: 'ASC' },
+  /** Виконання тенанта разом із кроками; чуже виконання — 404, як неіснуюче. */
+  async get(
+    tenantId: string,
+    id: string,
+  ): Promise<Execution & { steps: StepRun[] }> {
+    return this.db.run(tenantId, async (em) => {
+      const execution = await em.findOne(Execution, {
+        where: { id, tenantId },
+      });
+      if (!execution) throw new NotFoundException('Execution не знайдено');
+      const steps = await em.find(StepRun, {
+        where: { executionId: execution.id, tenantId },
+        order: { stepIndex: 'ASC', startedAt: 'ASC' },
+      });
+      return { ...execution, steps };
     });
-    return { ...execution, steps };
   }
 }

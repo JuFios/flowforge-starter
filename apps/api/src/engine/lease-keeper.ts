@@ -4,7 +4,9 @@ import { toSafeError } from '../observability/safe-error';
 import { JobQueueService } from './job-queue.service';
 
 /**
- * Тримає lease задачі, поки воркер над нею працює: продовжує його кожну третину тривалості.
+ * Тримає lease задачі, поки воркер над нею працює: продовжує його кожну третину тривалості, рахуючи
+ * від старту попереднього успішного продовження (тож запас дедлайну з'їдає лише затримка одного
+ * продовження, а не двох поспіль).
  *
  * - Продовження змінило 0 рядків — lease забрано (reaper повернув задачу або її захопив інший
  *   воркер): `signal` скасовується негайно, поточний крок переривається, записів далі не буде.
@@ -40,8 +42,7 @@ export class LeaseKeeper {
 
   start(): this {
     this.armDeadline();
-    const firstRenewal = this.validUntil - (2 * this.leaseMs) / 3;
-    this.schedule(Math.max(0, firstRenewal - performance.now()));
+    this.schedule(this.nextRenewalDelay());
     return this;
   }
 
@@ -88,6 +89,14 @@ export class LeaseKeeper {
     this.signal.throwIfAborted();
   }
 
+  /** До наступного продовження: третина lease від старту останнього успішного. */
+  private nextRenewalDelay(): number {
+    return Math.max(
+      0,
+      this.validUntil - (2 * this.leaseMs) / 3 - performance.now(),
+    );
+  }
+
   private schedule(delayMs = this.leaseMs / 3): void {
     if (this.stopped || this.controller.signal.aborted) return;
     this.timer = setTimeout(() => void this.renew(), delayMs);
@@ -104,6 +113,10 @@ export class LeaseKeeper {
         // надсилання — із запасом.
         this.validUntil = startedAt + this.leaseMs;
         this.armDeadline();
+        // Наступне — за третину lease від старту цього продовження, а не від його відповіді:
+        // інакше дві повільні відповіді поспіль з'їли б запас дедлайну (SAFETY).
+        this.schedule(this.nextRenewalDelay());
+        return;
       } else {
         this.logger.warn(
           { jobId: this.job.id, executionId: this.job.executionId },

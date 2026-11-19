@@ -3,8 +3,13 @@ import {
   CreateDateColumn,
   Entity,
   Index,
+  JoinColumn,
+  ManyToOne,
   PrimaryGeneratedColumn,
 } from 'typeorm';
+import { Execution } from './execution.entity';
+import { Tenant } from './tenant.entity';
+import { TENANT_ID_DEFAULT } from './tenant-column';
 
 /**
  * `failed` — неповторювана помилка; `dead` — повторювані помилки вичерпали ліміт спроб (окремий
@@ -13,9 +18,11 @@ import {
 export type JobStatus = 'queued' | 'running' | 'done' | 'failed' | 'dead';
 
 @Entity('jobs')
-// Захоплення: найраніша готова задача серед queued (часткий індекс не містить завершених задач,
-// яких з часом переважна більшість).
-@Index('IDX_jobs_claim', ['runAt'], { where: `"status" = 'queued'` })
+// Захоплення: найраніша готова задача тенанта-кандидата серед queued; облік — найраніша задача
+// тенанта в черзі. Частковий індекс не містить завершених задач, яких з часом переважна більшість.
+@Index('IDX_jobs_tenant_queue', ['tenantId', 'runAt'], {
+  where: `"status" = 'queued'`,
+})
 // Reaper: задачі в роботі з простроченим lease.
 @Index('IDX_jobs_lease', ['lockedUntil'], { where: `"status" = 'running'` })
 // Задача виконання: повтор виконання (POST /executions/:id/retry), видалення історії.
@@ -28,11 +35,31 @@ export class Job {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  @Column('uuid')
+  @Column({ type: 'uuid', default: TENANT_ID_DEFAULT })
   tenantId: string;
+
+  @ManyToOne(() => Tenant, { onDelete: 'NO ACTION' })
+  @JoinColumn({ name: 'tenantId', foreignKeyConstraintName: 'FK_jobs_tenant' })
+  tenant?: Tenant;
 
   @Column('uuid')
   executionId: string;
+
+  /** Виконання свого ж тенанта (композитний FK). */
+  @ManyToOne(() => Execution, { onDelete: 'NO ACTION' })
+  @JoinColumn([
+    {
+      name: 'executionId',
+      referencedColumnName: 'id',
+      foreignKeyConstraintName: 'FK_jobs_execution_tenant',
+    },
+    {
+      name: 'tenantId',
+      referencedColumnName: 'tenantId',
+      foreignKeyConstraintName: 'FK_jobs_execution_tenant',
+    },
+  ])
+  execution?: Execution;
 
   @Column({ type: 'varchar', default: 'queued' })
   status: JobStatus;

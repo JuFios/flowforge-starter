@@ -1,8 +1,10 @@
 import 'reflect-metadata';
+import { isIP } from 'node:net';
 import { plainToInstance, Type } from 'class-transformer';
 import {
   IsIn,
   IsInt,
+  IsOptional,
   IsString,
   Matches,
   Max,
@@ -91,6 +93,51 @@ function IsNotLessThan(other: string, extra = 0): PropertyDecorator {
     });
 }
 
+/** Іменовані підмережі, які розуміє Express `trust proxy`. */
+const TRUST_PROXY_NAMES = new Set(['loopback', 'linklocal', 'uniquelocal']);
+
+/**
+ * Значення TRUST_PROXY для Express `trust proxy`: false, кількість переходів або перелік адрес і
+ * підмереж проксі. `true` (довіряти будь-кому) не приймається: тоді клієнт сам задавав би свою IP
+ * через X-Forwarded-For і обходив би ліміти за IP. Невалідне значення — undefined.
+ */
+export function parseTrustProxy(
+  value: string,
+): false | number | string[] | undefined {
+  const trimmed = value.trim();
+  if (trimmed === 'false' || trimmed === '') return false;
+  if (/^\d+$/.test(trimmed)) {
+    const hops = Number(trimmed);
+    return hops >= 1 && hops <= 10 ? hops : undefined;
+  }
+  const entries = trimmed.split(',').map((e) => e.trim());
+  const valid = entries.every((entry) => {
+    if (TRUST_PROXY_NAMES.has(entry)) return true;
+    const [address, prefix, ...rest] = entry.split('/');
+    const family = isIP(address);
+    if (family === 0 || rest.length > 0) return false;
+    if (prefix === undefined) return true;
+    if (!/^\d{1,3}$/.test(prefix)) return false;
+    return Number(prefix) > 0 && Number(prefix) <= (family === 4 ? 32 : 128);
+  });
+  return valid ? entries : undefined;
+}
+
+function IsTrustProxy(): PropertyDecorator {
+  return (target, propertyName) =>
+    registerDecorator({
+      name: 'isTrustProxy',
+      target: target.constructor,
+      propertyName: propertyName as string,
+      validator: {
+        validate: (value: unknown) =>
+          typeof value === 'string' && parseTrustProxy(value) !== undefined,
+        defaultMessage: () =>
+          'має бути false, кількість проксі-переходів 1..10 або перелік IP/підмереж проксі через кому',
+      },
+    });
+}
+
 /**
  * Запас пулу понад WORKER_CONCURRENCY: heartbeat-и задач у роботі (паралельно з записами
  * циклів), reaper, очищення старих задач і перевірка /ready.
@@ -161,10 +208,56 @@ export class EnvironmentVariables extends DatabaseEnvironment {
   @Max(MAX_HTTP_BODY_LIMIT)
   HTTP_BODY_LIMIT = 100 * 1024;
 
+  /**
+   * Токен службових ендпоінтів `/tenants…`. Потрібен лише API (ApiEnvironment): воркер його не
+   * отримує, щоб компрометація воркера не давала адмін-доступу. Якщо заданий — перевіряється.
+   */
+  @IsOptional()
   @IsString()
   @MinLength(12)
   @IsSecureSecretInProduction()
-  ADMIN_TOKEN: string;
+  ADMIN_TOKEN?: string;
+
+  /**
+   * Скільки запитів до `/tenants…` приймається з однієї IP-адреси за вікно ADMIN_RATE_WINDOW_MS
+   * (захист адмін-токена від перебору; лічильник у Postgres, спільний для інстансів API).
+   */
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(10_000)
+  ADMIN_RATE_LIMIT = 30;
+
+  @Type(() => Number)
+  @IsInt()
+  @Min(1_000)
+  @Max(3_600_000)
+  ADMIN_RATE_WINDOW_MS = 60_000;
+
+  /**
+   * Скільки невдалих автентифікацій (невірний API-ключ, невірний підпис webhook-а) з однієї
+   * IP-адреси за вікно AUTH_FAILURE_RATE_WINDOW_MS; понад це — 429 замість 401. Успішні запити не
+   * рахуються.
+   */
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(10_000)
+  AUTH_FAILURE_RATE_LIMIT = 30;
+
+  @Type(() => Number)
+  @IsInt()
+  @Min(1_000)
+  @Max(3_600_000)
+  AUTH_FAILURE_RATE_WINDOW_MS = 60_000;
+
+  /**
+   * Довіра до X-Forwarded-For (Express `trust proxy`) для IP клієнта в лімітах за IP: `false` (за
+   * замовчуванням — API без проксі попереду), кількість проксі-переходів (1..10) або перелік
+   * адрес/підмереж проксі через кому. Довіра без проксі дала б клієнту підробляти свою IP-адресу.
+   */
+  @IsTrustProxy()
+  TRUST_PROXY = 'false';
 
   @IsIn(LOG_LEVELS)
   LOG_LEVEL: LogLevel = 'info';
@@ -292,10 +385,44 @@ export class EnvironmentVariables extends DatabaseEnvironment {
   SCHEDULER_TICK_MS = 30_000;
 }
 
+/** Конфігурація процесу API: спільна плюс обов'язковий ADMIN_TOKEN. */
+export type ApiEnvironment = EnvironmentVariables & { ADMIN_TOKEN: string };
+
+/**
+ * Облікові дані власника схеми (міграції) runtime-процесам заборонені: API і воркер ходять у БД
+ * лише своїми ролями без BYPASSRLS, а URL власника є тільки в кроці міграцій.
+ */
+const OWNER_CREDENTIALS = ['MIGRATION_DATABASE_URL'] as const;
+
+function rejectOwnerCredentials(raw: Record<string, unknown>): void {
+  const present = OWNER_CREDENTIALS.filter(
+    (name) => typeof raw[name] === 'string' && raw[name] !== '',
+  );
+  if (present.length > 0)
+    throw new Error(
+      `Невалідна конфігурація оточення:\n  ${present.join(', ')}: облікові дані власника БД не передаються API і воркеру (лише кроку міграцій)`,
+    );
+}
+
+/** Спільна схема API і воркера (ConfigModule). */
 export function validateEnv(
   raw: Record<string, unknown>,
 ): EnvironmentVariables {
+  rejectOwnerCredentials(raw);
   return validateAs(EnvironmentVariables, raw);
+}
+
+/** Схема API: спільна плюс обов'язковий ADMIN_TOKEN. */
+export function validateApiEnv(raw: Record<string, unknown>): ApiEnvironment {
+  rejectOwnerCredentials(raw);
+  const env = validateAs(EnvironmentVariables, raw);
+  // Явна перевірка: @IsOptional спільної схеми вимикає для цієї властивості будь-які інші
+  // декоратори, зокрема @IsDefined.
+  if (env.ADMIN_TOKEN === undefined)
+    throw new Error(
+      "Невалідна конфігурація оточення:\n  ADMIN_TOKEN: обов'язковий для API",
+    );
+  return env as ApiEnvironment;
 }
 
 /** Лише змінні підключення до БД — для CLI міграцій. */

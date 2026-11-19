@@ -1,15 +1,17 @@
 import { Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { QueryFailedError, Repository } from 'typeorm';
+import { QueryFailedError } from 'typeorm';
 import { EnvironmentVariables } from '../../src/config/env.validation';
 import { CheckpointService } from '../../src/engine/checkpoint.service';
 import { JobQueueService } from '../../src/engine/job-queue.service';
 import { JobRunnerService } from '../../src/engine/job-runner.service';
 import { QueueMetrics } from '../../src/engine/queue.metrics';
 import { StepExecutor } from '../../src/engine/step-executor';
-import { Execution, Workflow, WorkflowVersion } from '../../src/entities';
+import { Workflow } from '../../src/entities';
 import { ExecutionsService } from '../../src/executions/executions.service';
 import { SchedulerService } from '../../src/scheduler/scheduler.service';
+import { SystemDb } from '../../src/tenancy/system-db';
+import { fakeTenantDb } from '../helpers/fake-tenant-db';
 
 const SECRET = 'tenant-secret-value';
 
@@ -51,13 +53,12 @@ describe('background loops log errors without input values', () => {
 
   it('scheduler: a failing tick', async () => {
     jest.useFakeTimers();
-    const workflows = {
-      createQueryBuilder: () => {
-        throw dbError();
-      },
-    } as unknown as Repository<Workflow>;
+    const system = {
+      scheduledTenants: () => Promise.reject(dbError()),
+    } as unknown as SystemDb;
     const scheduler = new SchedulerService(
-      workflows,
+      system,
+      fakeTenantDb(),
       {} as ExecutionsService,
       config({ SCHEDULER_TICK_MS: 1000 }),
     );
@@ -72,17 +73,21 @@ describe('background loops log errors without input values', () => {
   });
 
   it('scheduler: a failing enqueue for one workflow', async () => {
-    const wf = { id: 'wf-1', cron: '* * * * * *' } as Workflow;
-    const workflows = {
-      createQueryBuilder: () => ({
-        where: () => ({ getMany: () => Promise.resolve([wf]) }),
-      }),
-    } as unknown as Repository<Workflow>;
+    const wf = {
+      id: 'wf-1',
+      tenantId: 't-1',
+      cron: '* * * * * *',
+    } as Workflow;
+    const system = {
+      scheduledTenants: (after: string | null) =>
+        Promise.resolve(after ? [] : [{ id: wf.id, tenantId: wf.tenantId }]),
+    } as unknown as SystemDb;
     const executions = {
-      enqueue: () => Promise.reject(dbError()),
+      enqueueScheduled: () => Promise.reject(dbError()),
     } as unknown as ExecutionsService;
     const scheduler = new SchedulerService(
-      workflows,
+      system,
+      fakeTenantDb({ find: () => Promise.resolve([wf]) } as never),
       executions,
       config({ SCHEDULER_TICK_MS: 1000 }),
     );
@@ -102,8 +107,7 @@ describe('background loops log errors without input values', () => {
     const runner = new JobRunnerService(
       queue,
       {} as StepExecutor,
-      {} as Repository<Execution>,
-      {} as Repository<WorkflowVersion>,
+      fakeTenantDb(),
       {} as CheckpointService,
       config({
         WORKER_CONCURRENCY: 1,

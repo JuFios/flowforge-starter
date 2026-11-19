@@ -1,8 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { InjectDataSource } from '@nestjs/typeorm';
-import { DataSource, EntityManager } from 'typeorm';
+import { EntityManager } from 'typeorm';
 import { toStorable, toStorableText } from '../common/storable-text';
 import { Job, StepRun } from '../entities';
+import { TenantDb } from '../tenancy/tenant-db';
 import { FailureOutcome, JobQueueService } from './job-queue.service';
 
 interface SavedCheckpoint {
@@ -12,7 +12,7 @@ interface SavedCheckpoint {
 
 /**
  * Записи про перебіг кроків. Кожен метод — одна транзакція, що спершу перевіряє lease задачі
- * (`assertLease` блокує рядок job): воркер, чий lease уже забрали, нічого не запише, а стан
+ * (перевірка токена під блокуванням рядка job): воркер, чий lease уже забрали, нічого не запише, а стан
  * кількох таблиць змінюється разом або ніяк.
  */
 @Injectable()
@@ -20,15 +20,16 @@ export class CheckpointService {
   private readonly logger = new Logger(CheckpointService.name);
 
   constructor(
-    @InjectDataSource() private readonly ds: DataSource,
+    private readonly db: TenantDb,
     private readonly queue: JobQueueService,
   ) {}
 
-  /** Чекпоінти виконання за порядком кроків. */
-  async load(executionId: string): Promise<StepRun[]> {
-    return this.ds
-      .getRepository(StepRun)
-      .find({ where: { executionId }, order: { stepIndex: 'ASC' } });
+  /** Чекпоінти виконання задачі за порядком кроків (у контексті тенанта задачі). */
+  load(em: EntityManager, job: Job): Promise<StepRun[]> {
+    return em.find(StepRun, {
+      where: { executionId: job.executionId, tenantId: job.tenantId },
+      order: { stepIndex: 'ASC' },
+    });
   }
 
   /**
@@ -40,22 +41,26 @@ export class CheckpointService {
     stepIndex: number,
     stepId: string,
   ): Promise<StepRun> {
-    const run = await this.ds.transaction(async (em) => {
+    const run = await this.db.run(job.tenantId, async (em) => {
       const locked = await this.queue.assertLease(em, job);
       if (locked.attempts === 0)
-        await em.query('UPDATE jobs SET attempts = 1 WHERE id = $1', [job.id]);
+        await em.query(
+          'UPDATE jobs SET attempts = 1 WHERE id = $1 AND "tenantId" = $2',
+          [job.id, job.tenantId],
+        );
       const [run]: StepRun[] = await em.query(
-        `INSERT INTO step_runs ("executionId", "stepIndex", "stepId", status, attempts)
-         VALUES ($1, $2, $3, 'running', 1)
+        `INSERT INTO step_runs ("executionId", "tenantId", "stepIndex", "stepId", status, attempts)
+         VALUES ($1, $4, $2, $3, 'running', 1)
          ON CONFLICT ("executionId", "stepIndex") DO UPDATE
             SET status = 'running', attempts = step_runs.attempts + 1, error = NULL,
                 "finishedAt" = NULL
          RETURNING *`,
-        [job.executionId, stepIndex, stepId],
+        [job.executionId, stepIndex, stepId, job.tenantId],
       );
       await em.query(
-        `UPDATE executions SET status = 'running' WHERE id = $1 AND status = 'pending'`,
-        [job.executionId],
+        `UPDATE executions SET status = 'running'
+          WHERE id = $1 AND "tenantId" = $2 AND status = 'pending'`,
+        [job.executionId, job.tenantId],
       );
       return run;
     });
@@ -73,7 +78,7 @@ export class CheckpointService {
     output: unknown,
   ): Promise<SavedCheckpoint> {
     const stored = this.storable(job, run.stepId, output);
-    const saved = await this.ds.transaction(async (em) => {
+    const saved = await this.db.run(job.tenantId, async (em) => {
       await this.queue.assertLease(em, job);
       return this.saveCheckpoint(em, job, run, stored);
     });
@@ -89,10 +94,13 @@ export class CheckpointService {
   ): Promise<SavedCheckpoint> {
     const [rows]: [SavedCheckpoint[], number] = await em.query(
       `UPDATE step_runs SET status = 'succeeded', output = $2, error = NULL, "finishedAt" = now()
-       WHERE id = $1 RETURNING output, "finishedAt"`,
-      [run.id, JSON.stringify(output)],
+       WHERE id = $1 AND "tenantId" = $3 RETURNING output, "finishedAt"`,
+      [run.id, JSON.stringify(output), job.tenantId],
     );
-    await em.query('UPDATE jobs SET attempts = 0 WHERE id = $1', [job.id]);
+    await em.query(
+      'UPDATE jobs SET attempts = 0 WHERE id = $1 AND "tenantId" = $2',
+      [job.id, job.tenantId],
+    );
     return rows[0];
   }
 
@@ -114,14 +122,10 @@ export class CheckpointService {
 
   /** Виконання успішне: виконання й задача завершуються разом або ніяк. */
   async finish(job: Job, output: unknown): Promise<void> {
-    await this.ds.transaction(async (em) => {
-      await this.queue.completeIn(em, job);
-      await em.query(
-        `UPDATE executions SET status = 'succeeded', output = $2, error = NULL, "finishedAt" = now()
-          WHERE id = $1`,
-        [job.executionId, JSON.stringify(toStorable(output).value)],
-      );
-    });
+    const result = { output: JSON.stringify(toStorable(output).value) ?? null };
+    await this.db.run(job.tenantId, (em) =>
+      this.queue.completeIn(em, job, result),
+    );
   }
 
   /**
@@ -142,10 +146,13 @@ export class CheckpointService {
   ): Promise<FailureOutcome | 'checkpointed'> {
     // Текст помилки кроку може містити дані тенанта чи отримувача (напр., U+0000).
     error = toStorableText(error);
-    return this.ds.transaction(async (em) => {
+    return this.db.run(job.tenantId, async (em) => {
       const locked = await this.queue.assertLease(em, job);
       if (run) {
-        const persisted = await em.findOneByOrFail(StepRun, { id: run.id });
+        const persisted = await em.findOneByOrFail(StepRun, {
+          id: run.id,
+          tenantId: job.tenantId,
+        });
         if (persisted.status === 'succeeded') {
           await this.release(em, job);
           return 'checkpointed';
@@ -155,16 +162,10 @@ export class CheckpointService {
       // його не знає (`run` = undefined). Кроки виконуються по черзі: такий рядок щонайбільше один.
       await em.query(
         `UPDATE step_runs SET status = 'failed', error = $2, "finishedAt" = now()
-          WHERE "executionId" = $1 AND status = 'running'`,
-        [job.executionId, error],
+          WHERE "executionId" = $1 AND "tenantId" = $3 AND status = 'running'`,
+        [job.executionId, error, job.tenantId],
       );
-      const outcome = await this.queue.failIn(
-        em,
-        job,
-        error,
-        retryable,
-        retryAfterMs,
-      );
+      const outcome = this.queue.failureOutcome(locked, retryable);
       if (outcome !== 'retry') {
         // Лічильник спроб — із БД: відповідь startStep, що зарахувала спробу, могла загубитися.
         const final =
@@ -172,10 +173,13 @@ export class CheckpointService {
             ? `${error}; no attempts left (${locked.attempts}/${locked.maxAttempts})`
             : error;
         await em.query(
-          `UPDATE executions SET status = 'failed', error = $2, "finishedAt" = now() WHERE id = $1`,
-          [job.executionId, final],
+          `UPDATE executions SET status = 'failed', error = $2, "finishedAt" = now()
+            WHERE id = $1 AND "tenantId" = $3`,
+          [job.executionId, final, job.tenantId],
         );
       }
+      // Задача — останньою: її оновлення зачіпає облік тенанта (порядок блокувань).
+      await this.queue.applyFailure(em, locked, error, outcome, retryAfterMs);
       return outcome;
     });
   }
@@ -186,12 +190,12 @@ export class CheckpointService {
    * перезапуск, бо час зберігається в БД. Пауза — не спроба: лічильник спроб обнуляється.
    */
   async park(job: Job, run: StepRun, ms: number): Promise<Date> {
-    return this.ds.transaction(async (em) => {
+    return this.db.run(job.tenantId, async (em) => {
       await this.queue.assertLease(em, job);
       const [rows]: [Array<{ wakeAt: Date }>, number] = await em.query(
         `UPDATE step_runs SET "wakeAt" = now() + make_interval(secs => $2)
-          WHERE id = $1 RETURNING "wakeAt"`,
-        [run.id, ms / 1000],
+          WHERE id = $1 AND "tenantId" = $3 RETURNING "wakeAt"`,
+        [run.id, ms / 1000, job.tenantId],
       );
       const { wakeAt } = rows[0];
       await this.release(em, job, wakeAt);
@@ -209,11 +213,11 @@ export class CheckpointService {
     run: StepRun,
     output: unknown,
   ): Promise<SavedCheckpoint | null> {
-    const saved = await this.ds.transaction(async (em) => {
+    const saved = await this.db.run(job.tenantId, async (em) => {
       await this.queue.assertLease(em, job);
       const [{ due }]: Array<{ due: boolean }> = await em.query(
-        `SELECT "wakeAt" <= now() AS due FROM step_runs WHERE id = $1`,
-        [run.id],
+        `SELECT "wakeAt" <= now() AS due FROM step_runs WHERE id = $1 AND "tenantId" = $2`,
+        [run.id, job.tenantId],
       );
       if (!due) {
         await this.release(em, job, run.wakeAt!);
@@ -235,8 +239,8 @@ export class CheckpointService {
       `UPDATE jobs
           SET status = 'queued', "runAt" = COALESCE($2, now()), attempts = 0,
               "lockedBy" = NULL, "lockedUntil" = NULL, "lockToken" = NULL
-        WHERE id = $1`,
-      [job.id, runAt ?? null],
+        WHERE id = $1 AND "tenantId" = $3`,
+      [job.id, runAt ?? null, job.tenantId],
     );
   }
 }

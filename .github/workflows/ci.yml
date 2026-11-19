@@ -29,9 +29,9 @@ jobs:
       - run: npm run build
 
   integration:
-    name: api integration (real Postgres)
+    name: api integration (real Postgres) and claim benchmark
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     defaults: { run: { working-directory: apps/api } }
     services:
       postgres:
@@ -57,6 +57,10 @@ jobs:
           cache-dependency-path: apps/api/package-lock.json
       - run: npm ci
       - run: npm run test:integration
+      # Пропускна здатність справедливого захоплення (README, «Бенчмарк захоплення»): відносно
+      # FIFO попередньої версії на тому самому раннері — ≥ 50% пропускної здатності, p95 ≤ 3×,
+      # і не менше 300 захоплень/с у кожному прогоні; інакше — провал.
+      - run: npm run bench:claim
 
   frontend:
     name: frontend (format, lint, build)
@@ -79,16 +83,19 @@ jobs:
     name: docker-compose smoke (migrations from scratch)
     runs-on: ubuntu-latest
     # Верхня межа на весь job: жоден крок, що завис, не чекає 6-годинного ліміту GitHub.
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      # Як у README «Запуск»: адмін-токен — випадковий, у .env поруч із docker-compose.yml.
-      - name: Generate the admin token
+      # Як у README «Запуск»: усі секрети — випадкові, у .env поруч із docker-compose.yml.
+      - name: Generate the secrets
         run: |
-          token="$(openssl rand -hex 24)"
-          echo "::add-mask::$token"
-          printf 'ADMIN_TOKEN=%s\n' "$token" > .env
-          echo "ADMIN_TOKEN=$token" >> "$GITHUB_ENV"
+          touch .env && chmod 600 .env && : > .env
+          for name in ADMIN_TOKEN POSTGRES_PASSWORD API_DB_PASSWORD WORKER_DB_PASSWORD; do
+            value="$(openssl rand -hex 24)"
+            echo "::add-mask::$value"
+            printf '%s=%s\n' "$name" "$value" >> .env
+            echo "$name=$value" >> "$GITHUB_ENV"
+          done
       - run: docker compose build
       # --wait: compose чекає, поки migrate завершиться з кодом 0, а api, обидва воркери й
       # фронтенд стануть healthy; не дочекався за --wait-timeout або сервіс впав — помилка.
@@ -107,6 +114,35 @@ jobs:
             state="$(docker inspect -f '{{.State.Status}}/{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$c")"
             [ "$state" = "running/healthy" ] || { echo "worker $c is $state"; exit 1; }
           done
+      # Кожен сервіс отримує лише свої секрети (README, «Запуск»): власника схеми — лише postgres і
+      # migrate, ADMIN_TOKEN — лише api, пароль ролі — лише її процес (і migrate, що створює ролі).
+      - name: Check that every service gets only its own secrets
+        run: |
+          env_of() { docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$1"; }
+          forbid() {  # контейнер, опис, заборонені змінні...; значення секретів шукаються всюди
+            c="$1"; what="$2"; shift 2
+            vars="$(env_of "$c")"
+            for name in "$@"; do
+              if printf '%s\n' "$vars" | grep -q "^$name="; then echo "$what gets $name"; exit 1; fi
+              value="$(printenv "$name" || true)"
+              if [ -n "$value" ] && printf '%s\n' "$vars" | grep -qF "$value"; then
+                echo "$what gets the value of $name"; exit 1
+              fi
+            done
+          }
+          api="$(docker compose ps -q api)"
+          forbid "$api" api POSTGRES_PASSWORD MIGRATION_DATABASE_URL WORKER_DB_PASSWORD
+          for c in $(docker compose ps -a -q worker); do
+            forbid "$c" worker ADMIN_TOKEN POSTGRES_PASSWORD MIGRATION_DATABASE_URL API_DB_PASSWORD
+          done
+          forbid "$(docker compose ps -a -q migrate)" migrate ADMIN_TOKEN
+          # Runtime-ролі — без суперкористувача й BYPASSRLS.
+          roles="$(docker compose exec -T postgres psql -U flowforge -d flowforge -tAc \
+            "SELECT rolname || '|' || rolsuper || '|' || rolbypassrls FROM pg_roles
+              WHERE rolname IN ('flowforge_api', 'flowforge_worker') ORDER BY 1")"
+          echo "$roles"
+          [ "$roles" = "$(printf 'flowforge_api|false|false\nflowforge_worker|false|false')" ] \
+            || { echo 'runtime database roles are not as expected'; exit 1; }
       - name: Run a workflow end to end through a worker
         run: |
           tenant="$(curl -fsS --max-time 10 -X POST localhost:3000/tenants -H "x-admin-token: $ADMIN_TOKEN" \
@@ -141,6 +177,11 @@ jobs:
       - name: Restart Postgres under load and verify workers survive with exactly-once effects
         working-directory: apps/api
         run: npm run chaos:postgres
+      # Справедливе планування (ТЗ 3.3.5): тенант B під backlog-ом 20 000 задач тенанта A — критерії
+      # у README, «Навантажувальний сценарій справедливого планування»; провал будь-якого — помилка.
+      - name: Measure fair scheduling under the backlog of another tenant
+        working-directory: apps/api
+        run: npm run load:fairness
       - name: Logs on failure
         if: failure()
         run: docker compose -f docker-compose.yml -f docker-compose.chaos.yml logs --no-color

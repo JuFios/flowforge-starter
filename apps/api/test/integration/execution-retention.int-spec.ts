@@ -61,8 +61,8 @@ describe('execution history is deleted after EXECUTION_RETENTION_DAYS when enabl
         [id, daysAgo],
       );
       await ds.query(
-        `INSERT INTO step_runs ("executionId", "stepIndex", "stepId", status)
-         VALUES ($1, 0, 'say', $2)`,
+        `INSERT INTO step_runs ("executionId", "tenantId", "stepIndex", "stepId", status)
+         SELECT id, "tenantId", 0, 'say', $2 FROM executions WHERE id = $1`,
         [id, status === 'failed' ? 'failed' : 'succeeded'],
       );
       // Незавершене виконання має задачу в черзі (на завтра, щоб воркер її не взяв).

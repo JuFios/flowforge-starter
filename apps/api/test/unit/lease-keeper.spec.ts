@@ -37,6 +37,25 @@ describe('LeaseKeeper', () => {
     expect(keeper.signal.aborted).toBe(false);
   });
 
+  // Повільна БД: кожне продовження триває чверть lease. Наступне мусить стартувати за розкладом
+  // від старту попереднього, а не через третину lease після його завершення — інакше дві повільні
+  // відповіді поспіль з'їдають запас дедлайну, і воркер кидає задачу з чинним lease.
+  it('keeps the lease when every renewal takes a quarter of it', async () => {
+    const heartbeat = jest.fn(
+      () =>
+        new Promise<boolean>((resolve) =>
+          setTimeout(() => resolve(true), LEASE_MS / 4),
+        ),
+    );
+    const keeper = keeperWith(heartbeat);
+
+    await jest.advanceTimersByTimeAsync(LEASE_MS * 5);
+    keeper.stop();
+
+    expect(keeper.signal.aborted).toBe(false);
+    expect(heartbeat.mock.calls.length).toBeGreaterThanOrEqual(14);
+  });
+
   it('counts time spent waiting for claim toward both the first renewal and the safety deadline', async () => {
     const sent = performance.now();
     await jest.advanceTimersByTimeAsync(1500);

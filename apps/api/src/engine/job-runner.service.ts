@@ -1,10 +1,8 @@
 import { BeforeApplicationShutdown, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'crypto';
 import { setMaxListeners } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
-import { Repository } from 'typeorm';
 import { EnvironmentVariables, MAX_TIMER_MS } from '../config/env.validation';
 import { Execution, Job, StepRun, WorkflowVersion } from '../entities';
 import {
@@ -12,6 +10,7 @@ import {
   runWithCorrelationId,
 } from '../observability/correlation';
 import { toSafeError } from '../observability/safe-error';
+import { TenantDb } from '../tenancy/tenant-db';
 import { CheckpointService } from './checkpoint.service';
 import {
   backoffMs,
@@ -43,6 +42,13 @@ const RELEASE_WAIT_MS = 5_000;
  */
 const CLAIM_BACKOFF = { baseMs: 1_000, maxMs: 30_000 };
 
+/**
+ * Пауза перед новою спробою, коли всіх кандидатів саме захоплюють інші (рядки тримають їхні
+ * короткі транзакції), мс, з відхиленням ±50%: набагато менша за інтервал опитування, бо готові
+ * задачі є, але без холостого циклу.
+ */
+const BUSY_RETRY_MS = 20;
+
 @Injectable()
 export class JobRunnerService implements BeforeApplicationShutdown {
   private readonly logger = new Logger(JobRunnerService.name);
@@ -66,10 +72,7 @@ export class JobRunnerService implements BeforeApplicationShutdown {
   constructor(
     private readonly queue: JobQueueService,
     private readonly executor: StepExecutor,
-    @InjectRepository(Execution)
-    private readonly executions: Repository<Execution>,
-    @InjectRepository(WorkflowVersion)
-    private readonly versions: Repository<WorkflowVersion>,
+    private readonly db: TenantDb,
     private readonly checkpoints: CheckpointService,
     private readonly config: ConfigService<EnvironmentVariables, true>,
     private readonly metrics: QueueMetrics,
@@ -258,7 +261,14 @@ export class JobRunnerService implements BeforeApplicationShutdown {
         if (job) await this.releaseOnShutdown(job);
         return;
       }
-      if (job === undefined) continue;
+      // undefined — задачу не захоплено (кандидатів чи їхні готові задачі тримають інші
+      // транзакції, промоцію дозрілих тенантів ще не завершено, відступ після збою або
+      // завершення): коротка пауза з відхиленням і нове коло, без повного
+      // інтервалу опитування — готові задачі є.
+      if (job === undefined) {
+        await this.pause(BUSY_RETRY_MS * (0.5 + Math.random()));
+        continue;
+      }
       if (!job) {
         await this.idle();
         continue;
@@ -402,28 +412,41 @@ export class JobRunnerService implements BeforeApplicationShutdown {
       { jobId: job.id, executionId: job.executionId, attempt: job.attempts },
       'processing job',
     );
-    const execution = await this.executions.findOneOrFail({
-      where: { id: job.executionId },
-    });
-    const ctx: StepContext = { input: execution.input, steps: {} };
     /** Крок, що виконується зараз (для запису провалу). */
     let current: StepRun | undefined;
     let delayAttemptStartedAt: number | undefined;
     let finalOutput: unknown;
     try {
+      // Виконання, його знімок і чекпоінти — одним читанням у контексті тенанта задачі, з явним
+      // предикатом tenantId (композитні FK гарантують, що вони належать тому самому тенанту).
+      const { execution, snapshot, history } = await this.db.run(
+        job.tenantId,
+        async (em) => {
+          const execution = await em.findOneOrFail(Execution, {
+            where: { id: job.executionId, tenantId: job.tenantId },
+          });
+          const snapshot = execution.workflowVersionId
+            ? await em.findOneOrFail(WorkflowVersion, {
+                where: {
+                  id: execution.workflowVersionId,
+                  tenantId: job.tenantId,
+                },
+              })
+            : null;
+          const history = await this.checkpoints.load(em, job);
+          return { execution, snapshot, history };
+        },
+      );
+      const ctx: StepContext = { input: execution.input, steps: {} };
       // Знімок версії, зафіксований під час створення виконання, а не поточний стан workflow.
       // Без знімку виконання запускати не можна: `{ id: undefined }` TypeORM виконав би без умови
       // й повернув першу-ліпшу версію. CHECK у БД такого стану не допускає — це остання лінія
       // захисту, і провал записується одразу, без повторів.
-      if (!execution.workflowVersionId)
+      if (!snapshot)
         throw new StepError(
           'execution has no workflow version snapshot',
           false,
         );
-      const snapshot = await this.versions.findOneByOrFail({
-        id: execution.workflowVersionId,
-      });
-      const history = await this.checkpoints.load(execution.id);
       if (
         history.some((run) => snapshot.steps[run.stepIndex]?.id !== run.stepId)
       )

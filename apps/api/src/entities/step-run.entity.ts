@@ -4,8 +4,12 @@ import {
   Entity,
   Generated,
   Index,
+  JoinColumn,
+  ManyToOne,
   PrimaryGeneratedColumn,
 } from 'typeorm';
+import { Execution } from './execution.entity';
+import { TENANT_ID_DEFAULT } from './tenant-column';
 
 export type StepRunStatus = 'running' | 'succeeded' | 'failed';
 
@@ -26,6 +30,28 @@ export class StepRun {
 
   @Column('uuid')
   executionId: string;
+
+  /**
+   * Тенант виконання (копія `executions.tenantId`): політика RLS фільтрує рядки за ним, а
+   * композитний FK не дає кроку посилатися на виконання іншого тенанта.
+   */
+  @Column({ type: 'uuid', default: TENANT_ID_DEFAULT })
+  tenantId: string;
+
+  @ManyToOne(() => Execution, { onDelete: 'NO ACTION' })
+  @JoinColumn([
+    {
+      name: 'executionId',
+      referencedColumnName: 'id',
+      foreignKeyConstraintName: 'FK_step_runs_execution_tenant',
+    },
+    {
+      name: 'tenantId',
+      referencedColumnName: 'tenantId',
+      foreignKeyConstraintName: 'FK_step_runs_execution_tenant',
+    },
+  ])
+  execution?: Execution;
 
   @Column('int')
   stepIndex: number;

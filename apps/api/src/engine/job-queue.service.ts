@@ -1,9 +1,11 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { InjectDataSource } from '@nestjs/typeorm';
-import { DataSource, EntityManager } from 'typeorm';
+import { EntityManager } from 'typeorm';
 import { EnvironmentVariables } from '../config/env.validation';
 import { Job } from '../entities';
+import { SystemDb } from '../tenancy/system-db';
+import { TenantDb } from '../tenancy/tenant-db';
+import { QueueMetrics } from './queue.metrics';
 
 export interface BackoffOptions {
   baseMs: number;
@@ -53,6 +55,20 @@ export class LeaseLostError extends Error {
   }
 }
 
+const HELD_JOB = `WHERE id = $1 AND "tenantId" = $2 AND "lockToken" = $3 AND status = 'running'`;
+const MARK_JOB_DONE = `UPDATE jobs SET status = 'done', attempts = GREATEST(attempts, 1),
+    "lockedBy" = NULL, "lockedUntil" = NULL, "lockToken" = NULL, "finishedAt" = now()`;
+
+/** Порядок блокувань: задача → виконання → облік тенанта. Обидва записи шукаємо за ключами. */
+export const FINISH_EXECUTION_SQL = `WITH held AS (
+    SELECT id FROM jobs ${HELD_JOB} AND "executionId" = $4 FOR UPDATE
+  ), finished AS (
+    UPDATE executions e SET status = 'succeeded', output = $5::jsonb, error = NULL, "finishedAt" = now()
+      WHERE e.id = $4 AND e."tenantId" = $2 AND EXISTS (SELECT 1 FROM held)
+    RETURNING e.id
+  )
+  ${MARK_JOB_DONE} ${HELD_JOB} AND EXISTS (SELECT 1 FROM finished)`;
+
 /** Захоплена задача: момент захоплення — за годинником БД (для метрики затримки захоплення). */
 export type ClaimedJob = Job & { claimedAt: Date; leaseStartedAt: number };
 
@@ -69,22 +85,13 @@ export type FailureOutcome = 'retry' | 'failed' | 'dead';
 
 /** Скільки прострочених задач reaper обробляє за одну транзакцію. */
 const REAP_BATCH = 100;
+/** Скільки тенантів із простроченими lease reaper бере за один запит. */
+const REAP_TENANTS = 100;
 
-/**
- * Найраніша готова задача (індекс IDX_jobs_claim). Винесено в константу, щоб тест плану запиту
- * перевіряв саме той SQL, що виконується.
- */
-export const CLAIM_CANDIDATE_SQL = `
-  SELECT id FROM jobs
-   WHERE status = 'queued' AND "runAt" <= now()
-   ORDER BY "runAt"
-   LIMIT 1
-   FOR UPDATE SKIP LOCKED`;
-
-/** Задачі з простроченим lease (індекс IDX_jobs_lease). */
+/** Задачі тенанта ($1) з простроченим lease (індекс IDX_jobs_lease); виконується під RLS. */
 export const EXPIRED_LEASES_SQL = `
   SELECT * FROM jobs
-   WHERE status = 'running' AND "lockedUntil" < now()
+   WHERE status = 'running' AND "lockedUntil" < now() AND "tenantId" = $1
    ORDER BY "lockedUntil"
    LIMIT ${REAP_BATCH}
    FOR UPDATE SKIP LOCKED`;
@@ -137,11 +144,18 @@ export const PURGE_EXECUTIONS_SQL = `
        queue AS (DELETE FROM jobs j USING batch b WHERE j."executionId" = ANY (b.ids))
   DELETE FROM executions e USING batch b WHERE e.id = ANY (b.ids)`;
 
+/**
+ * Черга задач. Кросс-тенантні кроки (пошук кандидата на захоплення, тенантів із простроченими
+ * lease, очищення) — вузькі SECURITY DEFINER-функції; усе інше — у транзакції з контекстом
+ * тенанта задачі (RLS) і з явним предикатом `tenantId`.
+ */
 @Injectable()
 export class JobQueueService {
   constructor(
-    @InjectDataSource() private readonly ds: DataSource,
+    private readonly db: TenantDb,
+    private readonly system: SystemDb,
     private readonly config: ConfigService<EnvironmentVariables, true>,
+    @Optional() private readonly metrics?: QueueMetrics,
   ) {}
 
   /** Затримка перед наступною спробою, у секундах (для make_interval). */
@@ -164,25 +178,30 @@ export class JobQueueService {
   }
 
   /**
-   * Атомарно захоплює наступну готову задачу, або повертає null.
+   * Захоплює наступну задачу справедливо між тенантами (README, 3.3.5) одним оператором
+   * (`claim_job`, FOR UPDATE SKIP LOCKED на рівні тенантів, потім задач): тенант із найменшою
+   * кількістю задач у роботі, а серед рівних — найдавніше обслужений; його найраніша готова
+   * задача. Повертає null (готових задач немає) або undefined (кандидати є, але їх чи їхні
+   * готові задачі саме тримають інші транзакції, або дозрілих тенантів більше, ніж одне захоплення
+   * просуває, — варто одразу спробувати знову).
    *
-   * Вибір і захоплення — один оператор: `FOR UPDATE SKIP LOCKED` блокує вибраний рядок до кінця
-   * оператора, а конкурентні воркери пропускають заблоковані рядки й беруть наступні, тож одну
-   * задачу не може отримати двоє. `RETURNING *` повертає вже оновлений рядок. Кожне захоплення
-   * видає новий fencing-токен `lockToken`. Увесь час — за годинником БД, не процесу.
+   * Кожне захоплення видає новий fencing-токен `lockToken`. Lease починається з захоплення
+   * (clock_timestamp у БД); локальний відлік — до надсилання оператора, тобто не пізніше за БД.
    */
-  async claimNext(workerId: string): Promise<ClaimedJob | null> {
-    const leaseStartedAt = performance.now();
-    const [rows]: [(Job & { claimedAt: Date })[], number] = await this.ds.query(
-      `UPDATE jobs
-          SET status = 'running', "lockedBy" = $1, "lockToken" = gen_random_uuid(),
-              "lockedUntil" = now() + make_interval(secs => $2),
-              attempts = attempts + 1
-        WHERE id = (${CLAIM_CANDIDATE_SQL})
-        RETURNING *, now() AS "claimedAt"`,
-      [workerId, this.leaseSeconds],
-    );
-    return rows[0] ? { ...rows[0], leaseStartedAt } : null;
+  async claimNext(workerId: string): Promise<ClaimedJob | null | undefined> {
+    const stop = this.metrics?.claimDuration.startTimer();
+    try {
+      const leaseStartedAt = performance.now();
+      const { job, repaired, busy } = await this.system.claimJob(
+        workerId,
+        this.config.get('JOB_LEASE_MS', { infer: true }),
+      );
+      if (repaired > 0) this.metrics?.claimUsageRepairs.inc(repaired);
+      if (job) return { ...job, leaseStartedAt };
+      return busy ? undefined : null;
+    } finally {
+      stop?.();
+    }
   }
 
   /**
@@ -190,11 +209,13 @@ export class JobQueueService {
    * воркер мусить припинити роботу над нею без жодних записів.
    */
   async heartbeat(job: Job): Promise<boolean> {
-    const [rows]: [unknown[], number] = await this.ds.query(
-      `UPDATE jobs SET "lockedUntil" = now() + make_interval(secs => $3)
-        WHERE id = $1 AND "lockToken" = $2 AND status = 'running'
-        RETURNING id`,
-      [job.id, job.lockToken, this.leaseSeconds],
+    const [rows]: [unknown[], number] = await this.db.run(job.tenantId, (em) =>
+      em.query(
+        `UPDATE jobs SET "lockedUntil" = now() + make_interval(secs => $3)
+          WHERE id = $1 AND "lockToken" = $2 AND status = 'running' AND "tenantId" = $4
+          RETURNING id`,
+        [job.id, job.lockToken, this.leaseSeconds, job.tenantId],
+      ),
     );
     return rows.length === 1;
   }
@@ -207,9 +228,9 @@ export class JobQueueService {
   async assertLease(em: EntityManager, job: Job): Promise<Job> {
     const rows: Job[] = await em.query(
       `SELECT * FROM jobs
-        WHERE id = $1 AND "lockToken" = $2 AND status = 'running'
+        WHERE id = $1 AND "lockToken" = $2 AND status = 'running' AND "tenantId" = $3
         FOR UPDATE`,
-      [job.id, job.lockToken],
+      [job.id, job.lockToken, job.tenantId],
     );
     if (rows.length !== 1) throw new LeaseLostError(job.id);
     return rows[0];
@@ -219,19 +240,30 @@ export class JobQueueService {
    * Позначає задачу виконаною в транзакції `em` викликача (разом із завершенням виконання).
    * Кидає LeaseLostError, якщо lease уже не наш.
    */
-  async completeIn(em: EntityManager, job: Job): Promise<void> {
-    await this.assertLease(em, job);
-    await this.markLockedJobDone(em, job);
+  async completeIn(
+    em: EntityManager,
+    job: Job,
+    execution?: { output: string | null },
+  ): Promise<void> {
+    const params = [job.id, job.tenantId, job.lockToken];
+    const sql = execution
+      ? FINISH_EXECUTION_SQL
+      : `${MARK_JOB_DONE} ${HELD_JOB}`;
+    if (execution) params.push(job.executionId, execution.output);
+    const [, affected]: [unknown[], number] = await em.query(sql, params);
+    if (affected !== 1) throw new LeaseLostError(job.id);
   }
 
-  /** Викликач уже заблокував рядок через assertLease або вибірку прострочених задач. */
+  /**
+   * Задача виконана; викликач уже заблокував рядок через assertLease або вибірку прострочених
+   * задач. Це оновлення `jobs` зачіпає облік тенанта (тригер), тож у транзакції воно — останнє
+   * (README, «Порядок блокувань»).
+   */
   private async markLockedJobDone(em: EntityManager, job: Job): Promise<void> {
-    await em.query(
-      `UPDATE jobs SET status = 'done', attempts = GREATEST(attempts, 1), "lockedBy" = NULL, "lockedUntil" = NULL, "lockToken" = NULL,
-                       "finishedAt" = now()
-        WHERE id = $1`,
-      [job.id],
-    );
+    await em.query(`${MARK_JOB_DONE} WHERE id = $1 AND "tenantId" = $2`, [
+      job.id,
+      job.tenantId,
+    ]);
   }
 
   /**
@@ -239,14 +271,14 @@ export class JobQueueService {
    * провалилась, її просто перервали. Продовження — з останнього чекпоінта.
    */
   async release(job: Job): Promise<void> {
-    await this.ds.transaction(async (em) => {
+    await this.db.run(job.tenantId, async (em) => {
       await this.assertLease(em, job);
       await em.query(
         `UPDATE jobs
             SET status = 'queued', "runAt" = now(), attempts = GREATEST(attempts - 1, 0),
                 "lockedBy" = NULL, "lockedUntil" = NULL, "lockToken" = NULL
-          WHERE id = $1`,
-        [job.id],
+          WHERE id = $1 AND "tenantId" = $2`,
+        [job.id, job.tenantId],
       );
     });
   }
@@ -265,16 +297,25 @@ export class JobQueueService {
     retryAfterMs?: number,
   ): Promise<FailureOutcome> {
     const current = await this.assertLease(em, job);
-    const outcome: FailureOutcome = !retryable
-      ? 'failed'
-      : current.attempts < current.maxAttempts
-        ? 'retry'
-        : 'dead';
+    const outcome = this.failureOutcome(current, retryable);
     await this.applyFailure(em, current, error, outcome, retryAfterMs);
     return outcome;
   }
 
-  private async applyFailure(
+  /** Наслідок провалу спроби для задачі в стані `locked` (рядок, заблокований assertLease). */
+  failureOutcome(locked: Job, retryable: boolean): FailureOutcome {
+    return !retryable
+      ? 'failed'
+      : locked.attempts < locked.maxAttempts
+        ? 'retry'
+        : 'dead';
+  }
+
+  /**
+   * Записує наслідок провалу в рядок задачі, вже заблокований викликачем. Оновлення `jobs`
+   * зачіпає облік тенанта (тригер), тож у транзакції воно — останнє.
+   */
+  async applyFailure(
     em: EntityManager,
     job: Job,
     error: string,
@@ -286,8 +327,13 @@ export class JobQueueService {
         `UPDATE jobs
             SET status = 'queued', "lockedBy" = NULL, "lockedUntil" = NULL, "lockToken" = NULL,
                 "lastError" = $2, "runAt" = now() + make_interval(secs => $3)
-          WHERE id = $1`,
-        [job.id, error, this.retryDelaySeconds(job.attempts, retryAfterMs)],
+          WHERE id = $1 AND "tenantId" = $4`,
+        [
+          job.id,
+          error,
+          this.retryDelaySeconds(job.attempts, retryAfterMs),
+          job.tenantId,
+        ],
       );
       return;
     }
@@ -295,8 +341,8 @@ export class JobQueueService {
       `UPDATE jobs
           SET status = $3, "lockedBy" = NULL, "lockedUntil" = NULL, "lockToken" = NULL,
               "lastError" = $2, "finishedAt" = now()
-        WHERE id = $1`,
-      [job.id, error, outcome],
+        WHERE id = $1 AND "tenantId" = $4`,
+      [job.id, error, outcome, job.tenantId],
     );
   }
 
@@ -310,10 +356,26 @@ export class JobQueueService {
    */
   async reapExpired(signal?: AbortSignal): Promise<ReapedJob[]> {
     const reaped: ReapedJob[] = [];
+    // Тенант, оброблений у цьому проході, але досі в переліку (його задачі тримає інший reaper,
+    // SKIP LOCKED), наступний прохід перевірить знову — тут не зациклюємося на ньому.
+    const visited = new Set<string>();
     while (!signal?.aborted) {
-      const batch = await this.reapBatch();
-      reaped.push(...batch);
-      if (batch.length < REAP_BATCH) break;
+      // Тенанти в сталому порядку (за id): reaper-и різних воркерів обробляють їх в одній
+      // послідовності.
+      const tenants = await this.system.expiredLeaseTenants(
+        [...visited],
+        REAP_TENANTS,
+      );
+      if (tenants.length === 0) break;
+      for (const tenantId of tenants) {
+        if (signal?.aborted) break;
+        visited.add(tenantId);
+        for (;;) {
+          const batch = await this.reapBatch(tenantId);
+          reaped.push(...batch);
+          if (batch.length < REAP_BATCH || signal?.aborted) break;
+        }
+      }
     }
     return reaped;
   }
@@ -327,7 +389,7 @@ export class JobQueueService {
     const [, finished]: [unknown[], number] = await em.query(
       `UPDATE executions e SET status = 'succeeded', output = last.output, error = NULL, "finishedAt" = now()
          FROM workflow_versions v, step_runs last
-        WHERE e.id = $1 AND v.id = e."workflowVersionId"
+        WHERE e.id = $1 AND e."tenantId" = $2 AND v.id = e."workflowVersionId"
           AND last."executionId" = e.id AND last."stepIndex" = jsonb_array_length(v.steps) - 1
           AND NOT EXISTS (
             SELECT FROM step_runs r WHERE r."executionId" = e.id
@@ -340,16 +402,16 @@ export class JobQueueService {
                  AND r."stepId" = step.definition->>'id' AND r.status = 'succeeded'
              )
           )`,
-      [job.executionId],
+      [job.executionId, job.tenantId],
     );
     if (!finished) return false;
     await this.markLockedJobDone(em, job);
     return true;
   }
 
-  private async reapBatch(): Promise<ReapedJob[]> {
-    return this.ds.transaction(async (em) => {
-      const expired: Job[] = await em.query(EXPIRED_LEASES_SQL);
+  private async reapBatch(tenantId: string): Promise<ReapedJob[]> {
+    return this.db.run(tenantId, async (em) => {
+      const expired: Job[] = await em.query(EXPIRED_LEASES_SQL, [tenantId]);
       const reaped: ReapedJob[] = [];
       for (const job of expired) {
         const error = `lease expired: worker ${job.lockedBy ?? '?'} stopped renewing it`;
@@ -358,21 +420,23 @@ export class JobQueueService {
           outcome = 'done';
         } else {
           outcome = job.attempts < job.maxAttempts ? 'retry' : 'dead';
-          await this.applyFailure(em, job, error, outcome);
         }
         if (outcome === 'dead') {
           const final = `${error}; no attempts left (${job.attempts}/${job.maxAttempts})`;
           await em.query(
             `UPDATE step_runs SET status = 'failed', error = $2, "finishedAt" = now()
-              WHERE "executionId" = $1 AND status = 'running'`,
-            [job.executionId, final],
+              WHERE "executionId" = $1 AND "tenantId" = $3 AND status = 'running'`,
+            [job.executionId, final, tenantId],
           );
           await em.query(
             `UPDATE executions SET status = 'failed', error = $2, "finishedAt" = now()
-              WHERE id = $1`,
-            [job.executionId, final],
+              WHERE id = $1 AND "tenantId" = $3`,
+            [job.executionId, final, tenantId],
           );
         }
+        // Задача — останньою: її оновлення зачіпає облік тенанта (порядок блокувань).
+        if (outcome !== 'done')
+          await this.applyFailure(em, job, error, outcome);
         reaped.push({
           id: job.id,
           executionId: job.executionId,
@@ -401,9 +465,9 @@ export class JobQueueService {
   ): Promise<number> {
     let total = 0;
     while (!signal?.aborted) {
-      const [, deleted]: [unknown[], number] = await this.ds.query(
-        PURGE_EXECUTIONS_SQL,
-        [retentionDays],
+      const deleted = await this.system.purgeExecutionHistory(
+        retentionDays,
+        HISTORY_PURGE_BATCH,
       );
       total += deleted;
       if (deleted < HISTORY_PURGE_BATCH) break;
@@ -417,9 +481,9 @@ export class JobQueueService {
   ): Promise<number> {
     let total = 0;
     while (!signal?.aborted) {
-      const [, deleted]: [unknown[], number] = await this.ds.query(
-        PURGE_FINISHED_SQL,
-        [retentionDays],
+      const deleted = await this.system.purgeFinishedJobs(
+        retentionDays,
+        PURGE_BATCH,
       );
       total += deleted;
       if (deleted < PURGE_BATCH) break;

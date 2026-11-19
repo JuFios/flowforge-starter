@@ -24,5 +24,33 @@
       }
     ]
   },
-  "ignorePatterns": ["dist", "node_modules", ".eslintrc.json"]
+  "ignorePatterns": ["dist", "node_modules", ".eslintrc.json"],
+  "overrides": [
+    {
+      "files": ["src/**/*.ts"],
+      "excludedFiles": [
+        "src/tenancy/**",
+        "src/database/**",
+        "src/app.module.ts"
+      ],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "paths": [
+              {
+                "name": "@nestjs/typeorm",
+                "message": "Доступ до БД — лише через TenantDb (контекст тенанта, RLS) або SystemDb (src/tenancy)."
+              },
+              {
+                "name": "typeorm",
+                "importNames": ["DataSource", "Repository", "QueryRunner"],
+                "message": "Доступ до БД — лише через TenantDb (контекст тенанта, RLS) або SystemDb (src/tenancy)."
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
 }

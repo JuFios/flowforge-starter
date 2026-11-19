@@ -27,6 +27,13 @@ export class QueueMetrics {
   readonly jobsPurged: Counter;
   /** Завершені виконання (з кроками й задачами), видалені після EXECUTION_RETENTION_DAYS. */
   readonly executionsPurged: Counter;
+  /** Тривалість одного захоплення (промоція, вибір кандидата, спроби) — за годинником воркера. */
+  readonly claimDuration: Histogram;
+  /**
+   * Рядки обліку тенантів, перераховані захопленням: облік казав, що готова задача є, а її не
+   * було (за інваріантами не трапляється; ненульове значення — привід розбиратися).
+   */
+  readonly claimUsageRepairs: Counter;
 
   constructor(metrics: MetricsService) {
     const registers = [metrics.registry];
@@ -34,6 +41,19 @@ export class QueueMetrics {
       name: 'flowforge_job_claim_latency_seconds',
       help: 'Time from a job becoming ready (runAt) to a worker claiming it',
       buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 300],
+      registers,
+    });
+    this.claimDuration = new Histogram({
+      name: 'flowforge_job_claim_duration_seconds',
+      help: 'Time one claim takes (promotion, tenant and job selection)',
+      buckets: [
+        0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5,
+      ],
+      registers,
+    });
+    this.claimUsageRepairs = new Counter({
+      name: 'flowforge_claim_usage_repairs_total',
+      help: 'Tenant usage rows recomputed by a claim because they disagreed with the jobs',
       registers,
     });
     this.stepDuration = new Histogram({

@@ -8,16 +8,16 @@ import {
   ParseUUIDPipe,
   Patch,
   Post,
-  UseGuards,
 } from '@nestjs/common';
 import { ApiKeyGuard } from '../auth/api-key.guard';
+import { RateLimit } from '../limits/rate-limit.guard';
 import { CurrentTenant } from '../auth/current-tenant.decorator';
 import { Tenant } from '../entities';
 import { CreateWorkflowDto, UpdateWorkflowDto } from './dto/workflow.dto';
 import { WorkflowsService } from './workflows.service';
 
 @Controller('workflows')
-@UseGuards(ApiKeyGuard)
+@RateLimit('tenant', { before: [ApiKeyGuard] })
 export class WorkflowsController {
   constructor(private readonly workflows: WorkflowsService) {}
 

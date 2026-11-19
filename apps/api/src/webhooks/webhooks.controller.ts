@@ -1,74 +1,33 @@
-import {
-  Body,
-  Controller,
-  Headers,
-  HttpCode,
-  NotFoundException,
-  Param,
-  ParseUUIDPipe,
-  Post,
-  UnauthorizedException,
-} from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { createHmac } from 'crypto';
-import { Repository } from 'typeorm';
-import { Tenant, Workflow } from '../entities';
+import { Controller, HttpCode, Post, Req } from '@nestjs/common';
 import { ExecutionsService } from '../executions/executions.service';
 import { parseRunInput } from '../executions/run-input.pipe';
+import { RateLimit } from '../limits/rate-limit.guard';
+import {
+  WebhookRequest,
+  WebhookSignatureGuard,
+} from './webhook-signature.guard';
 
 /**
- * Очікуваний підпис тіла або undefined, якщо тіло неможливо серіалізувати: на надглибокій
- * вкладеності JSON.stringify переповнює стек (RangeError). Такий підпис не підтверджується —
- * відповідь 401, як і на будь-який непідтверджений запит, а не 500.
- */
-function expectedSignature(secret: string, body: unknown): string | undefined {
-  let serialized: string;
-  try {
-    serialized = JSON.stringify(body);
-  } catch (err) {
-    if (err instanceof RangeError) return undefined;
-    throw err;
-  }
-  return createHmac('sha256', secret).update(serialized).digest('hex');
-}
-
-/**
- * Вхідні webhook-и. Підпис: hex HMAC-SHA256 від тіла запиту
- * секретом тенанта, у заголовку x-signature.
+ * Вхідні webhook-и. Підпис: hex HMAC-SHA256 від тіла запиту секретом тенанта, у заголовку
+ * x-signature (WebhookSignatureGuard); далі — ліміт частоти webhook-ів тенанта (окрема квота від
+ * API) і ліміт його черги.
  */
 @Controller('hooks')
+@RateLimit('webhook', { before: [WebhookSignatureGuard] })
 export class WebhooksController {
-  constructor(
-    @InjectRepository(Workflow)
-    private readonly workflows: Repository<Workflow>,
-    @InjectRepository(Tenant) private readonly tenants: Repository<Tenant>,
-    private readonly executions: ExecutionsService,
-  ) {}
+  constructor(private readonly executions: ExecutionsService) {}
 
   @Post(':workflowId')
   @HttpCode(202)
-  async receive(
-    @Param('workflowId', ParseUUIDPipe) workflowId: string,
-    // Без пайпа: вхід перевіряється лише після підпису, інакше неавтентифікований запит
-    // отримав би 400 з поясненням формату замість 401.
-    @Body() body: unknown,
-    @Headers('x-signature') signature?: string,
-  ) {
-    const workflow = await this.workflows.findOne({
-      where: { id: workflowId },
-    });
-    if (!workflow || !workflow.enabled) throw new NotFoundException();
-    const tenant = await this.tenants.findOneOrFail({
-      where: { id: workflow.tenantId },
-    });
-
-    const expected = expectedSignature(tenant.webhookSecret, body);
-    if (expected === undefined || signature !== expected) {
-      throw new UnauthorizedException('Невірний підпис');
-    }
-
-    const input = parseRunInput(body);
-    const execution = await this.executions.enqueue(workflow, input, 'webhook');
+  async receive(@Req() req: WebhookRequest) {
+    // Вхід перевіряється лише після підпису (guard), інакше неавтентифікований запит отримав би
+    // 400 з поясненням формату замість 401.
+    const input = parseRunInput(req.body);
+    const execution = await this.executions.enqueue(
+      req.webhookWorkflow,
+      input,
+      'webhook',
+    );
     return { executionId: execution.id };
   }
 }

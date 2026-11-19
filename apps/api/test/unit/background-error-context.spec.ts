@@ -1,6 +1,5 @@
 import { Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Repository } from 'typeorm';
 import { EnvironmentVariables } from '../../src/config/env.validation';
 import { CheckpointService } from '../../src/engine/checkpoint.service';
 import {
@@ -10,10 +9,12 @@ import {
 import { JobRunnerService } from '../../src/engine/job-runner.service';
 import { QueueMetrics } from '../../src/engine/queue.metrics';
 import { StepExecutor } from '../../src/engine/step-executor';
-import { Execution, Workflow, WorkflowVersion } from '../../src/entities';
+import { Workflow } from '../../src/entities';
 import { ExecutionsService } from '../../src/executions/executions.service';
 import { getCorrelationId } from '../../src/observability/correlation';
 import { SchedulerService } from '../../src/scheduler/scheduler.service';
+import { SystemDb } from '../../src/tenancy/system-db';
+import { fakeTenantDb } from '../helpers/fake-tenant-db';
 
 interface LogRecord {
   fields: { [key: string]: unknown };
@@ -55,14 +56,13 @@ describe('background error logs keep the correlation context', () => {
   afterEach(() => jest.restoreAllMocks());
 
   it('worker: a job that fails while being processed', async () => {
-    const executions = {
+    const db = fakeTenantDb({
       findOneOrFail: () => Promise.reject(new Error('Execution not found')),
-    } as unknown as Repository<Execution>;
+    });
     const runner = new JobRunnerService(
       {} as JobQueueService,
       {} as StepExecutor,
-      executions,
-      {} as Repository<WorkflowVersion>,
+      db,
       {} as CheckpointService,
       config({ WORKER_CONCURRENCY: 1, JOB_LEASE_MS: 60000 }),
       {} as QueueMetrics,
@@ -87,19 +87,20 @@ describe('background error logs keep the correlation context', () => {
   it('scheduler: a scheduled run that cannot be created', async () => {
     const seen: Array<string | undefined> = [];
     const wf = { id: 'wf-1', cron: '* * * * * *' } as Workflow;
-    const workflows = {
-      createQueryBuilder: () => ({
-        where: () => ({ getMany: () => Promise.resolve([wf]) }),
-      }),
-    } as unknown as Repository<Workflow>;
+    const system = {
+      scheduledTenants: (after: string | null) =>
+        Promise.resolve(after ? [] : [{ id: wf.id, tenantId: wf.tenantId }]),
+    } as unknown as SystemDb;
+    const db = fakeTenantDb({ find: () => Promise.resolve([wf]) } as never);
     const executions = {
-      enqueue: () => {
+      enqueueScheduled: () => {
         seen.push(getCorrelationId());
         return Promise.reject(new Error('db down'));
       },
     } as unknown as ExecutionsService;
     const scheduler = new SchedulerService(
-      workflows,
+      system,
+      db,
       executions,
       config({ SCHEDULER_TICK_MS: 1000 }),
     );

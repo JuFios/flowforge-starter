@@ -102,7 +102,7 @@ describe('database calls are bounded by timeouts', () => {
     it('gives up connecting to a server that never answers after DB_CONNECT_TIMEOUT_MS', async () => {
       const { port } = silent.address() as AddressInfo;
       restoreEnv = setEnv({
-        DATABASE_URL: `postgres://flowforge:flowforge@127.0.0.1:${port}/flowforge_test`,
+        MIGRATION_DATABASE_URL: `postgres://flowforge:flowforge@127.0.0.1:${port}/flowforge_test`,
         DB_CONNECT_TIMEOUT_MS: '300',
       });
       const { default: cliDataSource } =

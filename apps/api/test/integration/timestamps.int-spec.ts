@@ -3,6 +3,7 @@ import { DataSource } from 'typeorm';
 import { buildDataSourceOptions } from '../../src/database/database.options';
 import { Execution, Job, StepRun, Tenant, Workflow } from '../../src/entities';
 import { openTestDataSource, truncateAll } from '../helpers/db';
+import { provisionTestDatabase } from '../helpers/test-provision';
 import { testDatabaseEnv, testDatabaseUrl } from '../helpers/test-env';
 
 /** Підключення, сесія якого працює в заданому часовому поясі (як процес/сервер з іншим TimeZone). */
@@ -15,6 +16,26 @@ async function openSessionIn(timeZone: string): Promise<DataSource> {
       options: `-c TimeZone=${timeZone}`,
     },
   }).initialize();
+}
+
+/**
+ * Батьківські рядки для вставок: композитні FK (міграція TenantIsolation) вимагають наявних тенанта
+ * й виконання того самого тенанта.
+ */
+async function tenantIn(ds: DataSource): Promise<string> {
+  return (
+    await ds
+      .getRepository(Tenant)
+      .save({ name: 'parent', apiKeyHash: randomUUID(), webhookSecret: 's' })
+  ).id;
+}
+
+async function executionIn(ds: DataSource): Promise<Execution> {
+  return ds.getRepository(Execution).save({
+    tenantId: await tenantIn(ds),
+    workflowId: randomUUID(),
+    status: 'succeeded',
+  });
 }
 
 /** Кожна колонка «момент створення/старту», яку заповнює DEFAULT now(). */
@@ -37,7 +58,7 @@ const COLUMNS: Array<{
       (
         await ds
           .getRepository(Workflow)
-          .save({ tenantId: randomUUID(), name: 'w', steps: [] })
+          .save({ tenantId: await tenantIn(ds), name: 'w', steps: [] })
       ).createdAt,
   },
   {
@@ -48,7 +69,7 @@ const COLUMNS: Array<{
           .getRepository(Execution)
           // Завершене виконання може не мати знімку версії (CHK_executions_version_snapshot).
           .save({
-            tenantId: randomUUID(),
+            tenantId: await tenantIn(ds),
             workflowId: randomUUID(),
             status: 'succeeded',
           })
@@ -56,21 +77,29 @@ const COLUMNS: Array<{
   },
   {
     name: 'jobs.createdAt',
-    insert: async (ds) =>
-      (
-        await ds
-          .getRepository(Job)
-          .save({ tenantId: randomUUID(), executionId: randomUUID() })
-      ).createdAt,
+    insert: async (ds) => {
+      const execution = await executionIn(ds);
+      return (
+        await ds.getRepository(Job).save({
+          tenantId: execution.tenantId,
+          executionId: execution.id,
+        })
+      ).createdAt;
+    },
   },
   {
     name: 'step_runs.startedAt',
-    insert: async (ds) =>
-      (
-        await ds
-          .getRepository(StepRun)
-          .save({ executionId: randomUUID(), stepIndex: 0, stepId: 's' })
-      ).startedAt,
+    insert: async (ds) => {
+      const execution = await executionIn(ds);
+      return (
+        await ds.getRepository(StepRun).save({
+          executionId: execution.id,
+          tenantId: execution.tenantId,
+          stepIndex: 0,
+          stepId: 's',
+        })
+      ).startedAt;
+    },
   },
 ];
 
@@ -139,6 +168,7 @@ describe('TimestampsWithTimeZone migration', () => {
         );
 
       await session.runMigrations({ transaction: 'each' });
+      await provisionTestDatabase((sql, params) => session.query(sql, params));
 
       const [{ createdAt }]: Array<{ createdAt: Date }> = await session.query(
         `SELECT "createdAt" FROM "tenants" WHERE "id" = $1`,
