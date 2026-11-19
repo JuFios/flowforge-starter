@@ -1,3 +1,10 @@
+import { EnvironmentVariables } from '../../src/config/env.validation';
+import { SchedulerMetrics } from '../../src/scheduler/scheduler.metrics';
+import { TenantDb } from '../../src/tenancy/tenant-db';
+
+import { ConfigService } from '@nestjs/config';
+import { waitFor } from '../helpers/queue';
+
 import { DataSource, EntityManager } from 'typeorm';
 import { Workflow } from '../../src/entities';
 import { ExecutionsService } from '../../src/executions/executions.service';
@@ -220,6 +227,97 @@ describe('scheduled tenant fairness', () => {
       restore();
     }
   });
+
+  it.each(['new', 'existing'])(
+    'serves the first due moment of a %s tenant during live catch-up',
+    async (kind) => {
+      const live = new SchedulerService(
+        app.app.get(SystemDb),
+        app.app.get(TenantDb),
+        app.app.get(ExecutionsService),
+        new ConfigService<EnvironmentVariables, true>({
+          SCHEDULER_TICK_MS: 100,
+          SCHEDULER_MISFIRE_GRACE_MS: 1000,
+        }),
+        app.app.get(SchedulerMetrics),
+      );
+      const a = (await createTenant(ds, 'busy')).tenant.id;
+      await schedules(a, 1, 1_600_000, '00000000-0000-4000-9000-');
+      async function small() {
+        const b = (await createTenant(ds, 'small')).tenant.id;
+        const [wf] = await ds.query<Array<{ id: string; due: Date }>>(
+          `WITH t AS (SELECT date_trunc('second',clock_timestamp())+interval '2 seconds' AS due),
+           w AS (INSERT INTO workflows ("tenantId",name,steps,cron,"missedRunPolicy","scheduleCursor","nextFireAt")
+            SELECT $1,'small','[]','* * * * * *','skip',due-interval '1 second',due FROM t RETURNING *),
+           v AS (INSERT INTO workflow_versions ("tenantId","workflowId",version,steps) SELECT "tenantId",id,version,steps FROM w)
+           SELECT id,"nextFireAt" AS due FROM w`,
+          [b],
+        );
+        return wf;
+      }
+      let b = kind === 'existing' ? await small() : undefined;
+      const environment = jest.replaceProperty(process, 'env', {
+        ...process.env,
+        SCHEDULER_TICK_MS: '100',
+        SCHEDULER_MISFIRE_GRACE_MS: '1000',
+      });
+      live.onApplicationBootstrap();
+      try {
+        await waitFor(
+          'first completed round',
+          async () =>
+            (
+              await ds.query<Array<{ n: number }>>(
+                'SELECT count(*)::int n FROM executions WHERE "tenantId"=$1',
+                [a],
+              )
+            )[0].n >= 16,
+        );
+        b ??= await small();
+        const { id, due } = b;
+        await waitFor(
+          'small tenant firing',
+          async () =>
+            (
+              await ds.query<unknown[]>(
+                'SELECT 1 FROM executions WHERE "workflowId"=$1 LIMIT 1',
+                [id],
+              )
+            ).length > 0,
+          { timeoutMs: 45000 },
+        );
+        const [row] = await ds.query<
+          Array<{ first: Date; passed: number; before: number }>
+        >(
+          `WITH b AS (SELECT "scheduledAt", "createdAt" FROM executions WHERE "workflowId"=$2 ORDER BY "scheduledAt" LIMIT 1)
+         SELECT b."scheduledAt" AS first, count(a.id)::int AS before,
+          count(a.id) FILTER (WHERE a."createdAt">=$3)::int AS passed
+         FROM b LEFT JOIN executions a ON a."tenantId"=$1 AND a."createdAt"<b."createdAt"
+         GROUP BY b."scheduledAt"`,
+          [a, id, due],
+        );
+        expect(row.first).toEqual(due);
+        expect(row.before).toBeLessThan(1600);
+        expect(row.passed).toBeLessThanOrEqual(16);
+        live.onApplicationShutdown();
+        await live.tick();
+        const [all] = await ds.query<
+          Array<{ n: number; distinct: number; span: number }>
+        >(
+          `SELECT count(*)::int n,count(DISTINCT "scheduledAt")::int distinct,
+          extract(epoch FROM max("scheduledAt")-min("scheduledAt"))::int+1 span
+          FROM executions WHERE "tenantId"=$1`,
+          [a],
+        );
+        expect(all.n).toBeGreaterThanOrEqual(1600);
+        expect(all).toMatchObject({ distinct: all.n, span: all.n });
+      } finally {
+        await live.beforeApplicationShutdown();
+        environment.restore();
+      }
+    },
+    90000,
+  );
 
   it('stops a schedule disabled between rounds of the same tick', async () => {
     const [a, b] = [
