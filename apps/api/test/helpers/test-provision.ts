@@ -6,10 +6,9 @@ import {
 } from '../../src/database/provision';
 import { API_ROLE, WORKER_ROLE } from '../../src/tenancy/roles';
 import {
-  TEST_API_DB_PASSWORD,
   TEST_API_DB_USER,
-  TEST_WORKER_DB_PASSWORD,
   TEST_WORKER_DB_USER,
+  testRolePassword,
 } from './test-env';
 
 /**
@@ -19,10 +18,14 @@ import {
  */
 export async function provisionTestDatabase(query: Query): Promise<void> {
   await provisionLoginRoles(query, [
-    { user: TEST_API_DB_USER, password: TEST_API_DB_PASSWORD, group: API_ROLE },
+    {
+      user: TEST_API_DB_USER,
+      password: testRolePassword(TEST_API_DB_USER),
+      group: API_ROLE,
+    },
     {
       user: TEST_WORKER_DB_USER,
-      password: TEST_WORKER_DB_PASSWORD,
+      password: testRolePassword(TEST_WORKER_DB_USER),
       group: WORKER_ROLE,
     },
   ]);
@@ -32,4 +35,20 @@ export async function provisionTestDatabase(query: Query): Promise<void> {
     query,
     limitDefaultsFromEnv({ TENANT_MAX_RUNNING: '1000' }),
   );
+}
+
+/**
+ * Видаляє login-ролі тестів: їхні права в тестовій БД (CONNECT) і самі ролі. Ролі db:provision
+ * нічим не володіють, тож DROP OWNED прибирає лише гранти. Роль, якої немає, пропускається.
+ */
+export async function dropTestLoginRoles(query: Query): Promise<void> {
+  for (const user of [TEST_API_DB_USER, TEST_WORKER_DB_USER]) {
+    const rows = (await query(
+      'SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = $1',
+      [user],
+    )) as unknown[];
+    if (!rows.length) continue;
+    await query(`DROP OWNED BY "${user}"`);
+    await query(`DROP ROLE "${user}"`);
+  }
 }

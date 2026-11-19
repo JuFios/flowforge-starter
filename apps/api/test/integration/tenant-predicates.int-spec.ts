@@ -124,6 +124,63 @@ describe('tenant predicates in the services (row-level security bypassed)', () =
     expect(steps).toEqual([]);
   });
 
+  it('finishes the execution and fenced job in one statement after entering the tenant transaction', async () => {
+    const statements: string[] = [];
+    const observer = {
+      afterQuery: (event: { query: string }) => {
+        if (
+          !/^(?:START TRANSACTION|COMMIT|SELECT set_config\()/i.test(
+            event.query.trim(),
+          )
+        )
+          statements.push(event.query);
+      },
+    };
+    owner.subscribers.push(observer);
+    try {
+      await checkpoints.finish(jobA, { ok: true });
+      expect(statements).toHaveLength(1);
+      expect(
+        await owner
+          .getRepository(Execution)
+          .findOneByOrFail({ id: jobA.executionId }),
+      ).toMatchObject({ status: 'succeeded', output: { ok: true } });
+      await expect(checkpoints.finish(jobA, { ok: false })).rejects.toThrow(
+        /no longer held/,
+      );
+      expect(
+        await owner
+          .getRepository(Execution)
+          .findOneByOrFail({ id: jobA.executionId }),
+      ).toMatchObject({ output: { ok: true } });
+    } finally {
+      owner.subscribers.splice(owner.subscribers.indexOf(observer), 1);
+    }
+  });
+
+  it('rejects a different tenant, token or execution before finishing either row', async () => {
+    const other = await createExecution(owner, wfA, { status: 'running' });
+    for (const invalid of [
+      { ...jobA, tenantId: b },
+      { ...jobA, lockToken: other.id },
+      { ...jobA, executionId: other.id },
+    ]) {
+      await expect(checkpoints.finish(invalid, 'incorrect')).rejects.toThrow(
+        /no longer held/,
+      );
+    }
+    const executions = owner.getRepository(Execution);
+    expect(
+      await executions.findOneByOrFail({ id: jobA.executionId }),
+    ).toMatchObject({ status: 'failed' });
+    expect(await executions.findOneByOrFail({ id: other.id })).toMatchObject({
+      status: 'running',
+    });
+    expect(
+      await owner.getRepository(Job).findOneByOrFail({ id: jobA.id }),
+    ).toMatchObject({ status: 'running', lockToken: jobA.lockToken });
+  });
+
   it('a lease of A is not renewed, asserted or released in the name of B', async () => {
     const asB = { ...jobA, tenantId: b };
     expect(await queue.heartbeat(asB)).toBe(false);

@@ -1,4 +1,9 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
+import {
+  assertRolesUnclaimed,
+  assertServiceRolesPristine,
+  MIN_SERVER_VERSION,
+} from '../../tenancy/login-role-check';
 import { API_ROLE, SYSTEM_ROLE, WORKER_ROLE } from '../../tenancy/roles';
 
 /** Тенантні таблиці: на кожній — RLS з FORCE і політика за тенантом. */
@@ -201,6 +206,13 @@ export class TenantIsolation1795100000000 implements MigrationInterface {
       throw new Error(
         'migrations must run as a PostgreSQL superuser: they create a BYPASSRLS role and backfill tables under FORCE ROW LEVEL SECURITY',
       );
+    const [{ version }] = (await queryRunner.query(
+      `SELECT current_setting('server_version_num')::int AS version`,
+    )) as Array<{ version: number }>;
+    if (version < MIN_SERVER_VERSION)
+      throw new Error(
+        'PostgreSQL 16 or newer is required: tenant isolation relies on its role membership rules',
+      );
 
     for (const [what, sql] of ORPHAN_CHECKS) {
       const [{ count }] = (await queryRunner.query(sql)) as Array<{
@@ -224,17 +236,16 @@ export class TenantIsolation1795100000000 implements MigrationInterface {
           CREATE ROLE ${SYSTEM_ROLE} NOLOGIN;
         END IF;
       END $$`);
-    // Атрибути задаються явно навіть для наявних ролей: групові ролі без входу й привілеїв,
-    // системна — лише BYPASSRLS (щоб тіла її функцій бачили всі рядки).
-    await queryRunner.query(
-      `ALTER ROLE ${API_ROLE} NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION`,
-    );
-    await queryRunner.query(
-      `ALTER ROLE ${WORKER_ROLE} NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION`,
-    );
-    await queryRunner.query(
-      `ALTER ROLE ${SYSTEM_ROLE} NOLOGIN NOSUPERUSER BYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION`,
-    );
+    // Ролі спільні для кластера: наявні могли створити чи «засвоїти» інші користувачі. Сторонній
+    // член отримав би BYPASSRLS або змогу виставити собі будь-який app.tenant_id.
+    const query = (sql: string, params?: unknown[]): Promise<unknown> =>
+      queryRunner.query(sql, params);
+    await assertRolesUnclaimed(query);
+    // Наявні ролі не «лагодяться»: атрибути мають бути саме такими, з якими їх створює ця міграція,
+    // і жодної сесії під ними. Єдина зміна — BYPASSRLS системній ролі (щоб тіла її функцій бачили
+    // всі рядки); для ролі, що вже його має (інша БД кластера), вона нічого не змінює.
+    await assertServiceRolesPristine(query);
+    await queryRunner.query(`ALTER ROLE ${SYSTEM_ROLE} BYPASSRLS`);
 
     // Ніхто, крім власника, не створює об'єктів у public (захист від підміни імен у search_path).
     await queryRunner.query(`REVOKE CREATE ON SCHEMA public FROM PUBLIC`);

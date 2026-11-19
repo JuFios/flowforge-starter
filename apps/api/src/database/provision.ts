@@ -3,6 +3,11 @@ import { createHash, createHmac, pbkdf2Sync, randomBytes } from 'node:crypto';
 import { DataSource } from 'typeorm';
 import { BUILT_IN_LIMIT_DEFAULTS, LIMIT_BOUNDS } from '../tenancy/limits';
 import { API_ROLE, SYSTEM_ROLE, WORKER_ROLE } from '../tenancy/roles';
+import {
+  assertNoForeignMembers,
+  UNSAFE_GROUP_SQL,
+  UNSAFE_LOGIN_SQL,
+} from '../tenancy/login-role-check';
 import { loadDotEnvIfPresent } from './cli-env';
 import { buildDataSourceOptions } from './database.options';
 import { validateDatabaseEnv } from '../config/env.validation';
@@ -57,7 +62,7 @@ export type Query = (sql: string, params?: unknown[]) => Promise<unknown>;
 
 /**
  * Створює або оновлює login-ролі процесів (ідемпотентно): роль без суперкористувача й BYPASSRLS,
- * член лише своєї групової ролі, з правом підключення лише до цієї БД. Пароль — SCRAM verifier.
+ * член лише своєї групової ролі, з явним правом підключення до цільової БД. Пароль — SCRAM verifier.
  * Відмовляється керувати суперкористувачем, власником схеми чи службовими груповими ролями.
  */
 export async function provisionLoginRoles(
@@ -80,27 +85,62 @@ export async function provisionLoginRoles(
   if (!superuser)
     throw new Error('db:provision must run as a PostgreSQL superuser');
 
+  const existingUsers = new Set<string>();
   for (const role of roles) {
-    const [existing] = (await query(
-      `SELECT r.rolsuper AS superuser, r.rolname = current_user AS self,
-              r.rolname = ANY ($2) AS reserved
-         FROM pg_roles r WHERE r.rolname = $1`,
-      [role.user, [API_ROLE, WORKER_ROLE, SYSTEM_ROLE]],
-    )) as Array<{ superuser: boolean; self: boolean; reserved: boolean }>;
-    if (existing && (existing.superuser || existing.self || existing.reserved))
+    const unsafeGroup = (await query(UNSAFE_GROUP_SQL, [
+      role.group,
+    ])) as unknown[];
+    if (unsafeGroup.length)
       throw new Error(
-        `refusing to manage ${role.user}: it is a superuser, the schema owner or a group role`,
+        `refusing to manage ${role.user}: unexpected group privileges`,
       );
+    const rows = (await query(
+      'SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = $1',
+      [role.user],
+    )) as unknown[];
+    if (!rows.length) continue;
+    existingUsers.add(role.user);
+    const unsafe = (await query(UNSAFE_LOGIN_SQL, [
+      role.user,
+      role.group,
+    ])) as unknown[];
+    if (
+      unsafe.length ||
+      [API_ROLE, WORKER_ROLE, SYSTEM_ROLE].some((name) => name === role.user)
+    )
+      throw new Error(
+        `refusing to manage ${role.user}: unexpected privileges, ownership or membership`,
+      );
+    // Свій логін — лише той, що вже входить у свою групу: CREATE ROLE і GRANT виконуються в одній
+    // транзакції, тож роль від db:provision без членства не буває. Чужому логіну з тим самим ім'ям
+    // пароль не змінюємо і прав застосунку не даємо.
+    const provisioned = (await query(
+      `SELECT 1 FROM pg_catalog.pg_auth_members am
+         JOIN pg_catalog.pg_roles g ON g.oid = am.roleid
+         JOIN pg_catalog.pg_roles m ON m.oid = am.member
+        WHERE m.rolname = $1 AND g.rolname = $2`,
+      [role.user, role.group],
+    )) as unknown[];
+    if (!provisioned.length)
+      throw new Error(
+        `refusing to manage ${role.user}: the role exists but is not a member of ${role.group}, so db:provision did not create it; drop the role or choose another name`,
+      );
+  }
+
+  // Пароль і членство не видаються, поки службовою роллю може діяти хтось сторонній (перевірка —
+  // після власних перевірок логінів, щоб їхні проблеми мали точніше повідомлення).
+  await assertNoForeignMembers(query, [
+    SYSTEM_ROLE,
+    ...new Set(roles.map((role) => role.group)),
+  ]);
+
+  for (const role of roles) {
     const attributes = `LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION INHERIT PASSWORD '${scramVerifier(role.password)}'`;
     await query(
-      existing
+      existingUsers.has(role.user)
         ? `ALTER ROLE "${role.user}" ${attributes}`
         : `CREATE ROLE "${role.user}" ${attributes}`,
     );
-    // Лише своя групова роль: роль іншого процесу чи системна — відкликаються, якщо були.
-    for (const other of [API_ROLE, WORKER_ROLE, SYSTEM_ROLE])
-      if (other !== role.group)
-        await query(`REVOKE ${other} FROM "${role.user}"`);
     await query(`GRANT ${role.group} TO "${role.user}"`);
   }
   const db = `"${database.replace(/"/g, '""')}"`;

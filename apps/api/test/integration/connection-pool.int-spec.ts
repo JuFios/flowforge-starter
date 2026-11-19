@@ -135,6 +135,7 @@ describe('connection pool under the largest worker concurrency', () => {
     await ds.query(`
       CREATE FUNCTION test_slow_jobs() RETURNS trigger AS $$
       BEGIN PERFORM pg_sleep(0.15); RETURN NEW; END $$ LANGUAGE plpgsql;
+      REVOKE ALL ON FUNCTION test_slow_jobs() FROM PUBLIC;
       CREATE TRIGGER test_slow_jobs BEFORE UPDATE ON jobs
         FOR EACH ROW EXECUTE FUNCTION test_slow_jobs();`);
     await runAll();

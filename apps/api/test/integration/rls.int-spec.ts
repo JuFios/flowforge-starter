@@ -209,9 +209,7 @@ const ROLES: Array<{
       `UPDATE step_runs SET status = 'failed'`,
       `DELETE FROM executions`,
       `DELETE FROM jobs`,
-      `SELECT * FROM claim_candidate('{}')`,
-      `SELECT promote_ready_tenants(1)`,
-      `SELECT refresh_tenant_usage()`,
+      `SELECT * FROM claim_job('api', 1000)`,
       `SELECT * FROM queue_depth_by_tenant()`,
       `SELECT * FROM tenant_usage`,
       `SELECT * FROM limit_defaults`,
@@ -237,6 +235,7 @@ const ROLES: Array<{
       `SELECT * FROM limit_defaults`,
       `SELECT * FROM rate_limit_hit('k', 1000, 1)`,
       `SELECT * FROM tenant_limits()`,
+      `SELECT * FROM lock_tenant_usage()`,
     ],
     update: `UPDATE executions SET error = 'touched' WHERE id = $1`,
   },
@@ -376,7 +375,7 @@ describe('SECURITY DEFINER functions', () => {
     }
   });
 
-  it('lock and refresh only the usage row of the tenant in context, and refuse without one', async () => {
+  it('lock and read only the usage row and limits of the tenant in context, and refuse without one', async () => {
     await truncateAll(owner);
     const a = (await createTenant(owner, 'a')).tenant.id;
     const b = (await createTenant(owner, 'b')).tenant.id;
@@ -385,35 +384,42 @@ describe('SECURITY DEFINER functions', () => {
       tenantId: b,
       executionId: (await createExecution(owner, wfB)).id,
     });
+    await expect(
+      apiRole.query('SELECT * FROM lock_tenant_usage()'),
+    ).rejects.toThrow(/tenant context is required/);
+    await expect(
+      apiRole.query('SELECT * FROM tenant_limits()'),
+    ).rejects.toThrow(/tenant context is required/);
+    // У контексті A: лише рядок A (задача B не видна й не рахується).
+    const usage = await apiRole.transaction(async (em) => {
+      await em.query(`SELECT set_config('app.tenant_id', $1, true)`, [a]);
+      return em.query<unknown[]>(
+        'SELECT queued, running FROM lock_tenant_usage()',
+      );
+    });
+    expect(usage).toEqual([{ queued: 0, running: 0 }]);
+    const [rowB]: Array<{ queued: number }> = await owner.query(
+      `SELECT queued FROM tenant_usage WHERE "tenantId" = $1`,
+      [b],
+    );
+    expect(rowB.queued).toBe(1);
+  });
+
+  it('claim a job only with valid arguments', async () => {
     const worker = await new DataSource({
       type: 'postgres',
       url: testWorkerDatabaseUrl(),
     }).initialize();
     try {
-      for (const role of [apiRole, worker])
+      for (const [who, lease] of [
+        ['', 1000],
+        ['x'.repeat(201), 1000],
+        ['w', 99],
+        ['w', 3_600_001],
+      ] as const)
         await expect(
-          role.query('SELECT * FROM lock_tenant_usage()'),
-        ).rejects.toThrow(/tenant context is required/);
-      await expect(
-        worker.query('SELECT refresh_tenant_usage()'),
-      ).rejects.toThrow(/tenant context is required/);
-      await expect(
-        apiRole.query('SELECT * FROM tenant_limits()'),
-      ).rejects.toThrow(/tenant context is required/);
-      // У контексті A: лише рядок A (задача B не видна й не рахується), навіть після перерахунку.
-      const usage = await worker.transaction(async (em) => {
-        await em.query(`SELECT set_config('app.tenant_id', $1, true)`, [a]);
-        await em.query('SELECT refresh_tenant_usage()');
-        return em.query<unknown[]>(
-          'SELECT queued, running FROM lock_tenant_usage()',
-        );
-      });
-      expect(usage).toEqual([{ queued: 0, running: 0 }]);
-      const [rowB]: Array<{ queued: number }> = await owner.query(
-        `SELECT queued FROM tenant_usage WHERE "tenantId" = $1`,
-        [b],
-      );
-      expect(rowB.queued).toBe(1);
+          worker.query('SELECT * FROM claim_job($1, $2)', [who, lease]),
+        ).rejects.toThrow(/invalid claim arguments/);
     } finally {
       await worker.destroy();
     }

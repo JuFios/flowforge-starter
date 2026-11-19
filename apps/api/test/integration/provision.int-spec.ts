@@ -1,15 +1,23 @@
+import { randomBytes } from 'node:crypto';
 import { DataSource } from 'typeorm';
 import { LoginRole, provisionLoginRoles } from '../../src/database/provision';
 import { API_ROLE, WORKER_ROLE } from '../../src/tenancy/roles';
 import { openTestDataSource } from '../helpers/db';
-import { testRoleUrl } from '../helpers/test-env';
+import { clusterScopedName, testRoleUrl } from '../helpers/test-env';
 
-const API_USER = 'flowforge_api_provision_test';
-const WORKER_USER = 'flowforge_worker_provision_test';
+/** Допоміжні ролі сценаріїв (спільні для кластера, тож з суфіксом прогону). */
+const FOREIGN_ROLE = clusterScopedName('ff_foreign_test');
+const EXTRA_GROUP = clusterScopedName('provision_extra_group');
+const EXTRA_MEMBER = clusterScopedName('provision_member');
+
+const API_USER = clusterScopedName('flowforge_api_provision_test');
+const WORKER_USER = clusterScopedName('flowforge_worker_provision_test');
+/** Випадкові на кожен прогін: якщо прибирання не встигне, на кластері не лишиться відомого пароля. */
+const randomPassword = (): string => randomBytes(24).toString('hex');
 const passwords = {
-  first: 'firstApiPassword0123456789',
-  second: 'secondApiPassword0123456789',
-  worker: 'workerPassword0123456789abc',
+  first: randomPassword(),
+  second: randomPassword(),
+  worker: randomPassword(),
 };
 
 /**
@@ -85,6 +93,55 @@ describe('db:provision', () => {
     expect(stored[0].rolpassword).toMatch(/^SCRAM-SHA-256\$4096:/);
   });
 
+  it.each([
+    'membership',
+    'column grant',
+    'schema ownership',
+    'login member',
+    'session setting',
+    'group column grant',
+  ] as const)(
+    'rejects unexpected %s before rotating credentials',
+    async (kind) => {
+      await provisionLoginRoles(query, roles(passwords.first));
+      const runner = owner.createQueryRunner();
+      await runner.connect();
+      await runner.startTransaction();
+      try {
+        if (kind === 'membership') {
+          await runner.query(`CREATE ROLE ${EXTRA_GROUP}`);
+          await runner.query(`GRANT ${EXTRA_GROUP} TO ${WORKER_USER}`);
+        } else if (kind === 'login member') {
+          await runner.query(`CREATE ROLE ${EXTRA_MEMBER}`);
+          await runner.query(`GRANT ${WORKER_USER} TO ${EXTRA_MEMBER}`);
+        } else if (kind === 'session setting') {
+          await runner.query(
+            `ALTER ROLE ${WORKER_USER} SET app.tenant_id = 'configuration-marker'`,
+          );
+        } else if (kind === 'group column grant') {
+          await runner.query(`GRANT SELECT(name) ON tenants TO ${WORKER_ROLE}`);
+        } else if (kind === 'column grant') {
+          await runner.query(`GRANT SELECT(name) ON tenants TO ${WORKER_USER}`);
+        } else {
+          await runner.query(`ALTER SCHEMA public OWNER TO ${WORKER_USER}`);
+        }
+        const sent: string[] = [];
+        await expect(
+          provisionLoginRoles((sql, params) => {
+            sent.push(sql);
+            return runner.query(sql, params);
+          }, roles(passwords.second)),
+        ).rejects.toThrow(/refusing to manage/);
+        expect(sent.some((sql) => /^(ALTER|CREATE) ROLE /.test(sql))).toBe(
+          false,
+        );
+      } finally {
+        await runner.rollbackTransaction();
+        await runner.release();
+      }
+    },
+  );
+
   it('is idempotent and rotates the password', async () => {
     await provisionLoginRoles(query, roles(passwords.first));
     await provisionLoginRoles(query, roles(passwords.second));
@@ -94,6 +151,13 @@ describe('db:provision', () => {
 
   it('gives each role only its own group, no superuser or BYPASSRLS, and closes CONNECT to PUBLIC', async () => {
     await owner.query(`GRANT ${WORKER_ROLE} TO ${API_USER}`);
+    try {
+      await expect(
+        provisionLoginRoles(query, roles(passwords.second)),
+      ).rejects.toThrow(/refusing to manage/);
+    } finally {
+      await owner.query(`REVOKE ${WORKER_ROLE} FROM ${API_USER}`);
+    }
     await provisionLoginRoles(query, roles(passwords.second));
     const rows: Array<Record<string, unknown>> = await owner.query(
       `SELECT r.rolname, r.rolsuper, r.rolbypassrls, r.rolcreaterole, r.rolcreatedb,
@@ -159,6 +223,27 @@ describe('db:provision', () => {
     },
   );
 
+  it('refuses to provision while the API group can execute a worker function', async () => {
+    await owner.query(
+      'GRANT EXECUTE ON FUNCTION claim_job(text,integer) TO flowforge_api_role',
+    );
+    try {
+      sent.length = 0;
+      await expect(
+        provisionLoginRoles(query, roles(passwords.first)),
+      ).rejects.toThrow(
+        `refusing to manage ${API_USER}: unexpected group privileges`,
+      );
+      expect(
+        sent.filter((s) => /^(ALTER|CREATE|GRANT|REVOKE)/.test(s)),
+      ).toEqual([]);
+    } finally {
+      await owner.query(
+        'REVOKE EXECUTE ON FUNCTION claim_job(text,integer) FROM flowforge_api_role',
+      );
+    }
+  });
+
   it.each([
     ['the schema owner', 'flowforge'],
     ['a group role', API_ROLE],
@@ -172,6 +257,76 @@ describe('db:provision', () => {
         { user: target, password: passwords.first, group: API_ROLE },
       ]),
     ).rejects.toThrow(/refusing to manage/);
+  });
+
+  it.each([
+    [
+      'flowforge_system',
+      `GRANT flowforge_system TO ${FOREIGN_ROLE}`,
+      `unexpected members of flowforge_system: ${FOREIGN_ROLE}`,
+    ],
+    [
+      'the API group with ADMIN OPTION',
+      `GRANT flowforge_api_role TO ${FOREIGN_ROLE} WITH ADMIN OPTION`,
+      `unexpected members of flowforge_api_role: ${FOREIGN_ROLE}`,
+    ],
+  ])(
+    'refuses to provision while a foreign role can act as %s',
+    async (_case, grant, reason) => {
+      await owner.query(`CREATE ROLE ${FOREIGN_ROLE} LOGIN`);
+      try {
+        await owner.query(grant);
+        sent.length = 0;
+        await expect(
+          provisionLoginRoles(query, roles(passwords.first)),
+        ).rejects.toThrow(reason);
+        expect(
+          sent.filter((s) => /^(ALTER|CREATE|GRANT|REVOKE)/.test(s)),
+        ).toEqual([]);
+      } finally {
+        await owner.query(`DROP ROLE ${FOREIGN_ROLE}`);
+      }
+    },
+  );
+
+  // Ім'я з env збіглося з чужим логіном кластера: ротація пароля відібрала б у нього вхід, а
+  // членство (за іншого способу входу, напр. cert або peer) дало б йому права застосунку.
+  it('leaves alone an existing login that it did not provision', async () => {
+    const bystander = clusterScopedName('ff_bystander_test');
+    await owner.query(
+      `CREATE ROLE ${bystander} LOGIN PASSWORD '${randomPassword()}'`,
+    );
+    try {
+      const password = async (): Promise<string> => {
+        const [row]: Array<{ rolpassword: string }> = await owner.query(
+          'SELECT rolpassword FROM pg_authid WHERE rolname = $1',
+          [bystander],
+        );
+        return row.rolpassword;
+      };
+      const before = await password();
+      sent.length = 0;
+      await expect(
+        provisionLoginRoles(query, [
+          { user: bystander, password: passwords.first, group: API_ROLE },
+        ]),
+      ).rejects.toThrow(
+        `refusing to manage ${bystander}: the role exists but is not a member of ${API_ROLE}`,
+      );
+      expect(
+        sent.filter((s) => /^(ALTER|CREATE|GRANT|REVOKE)/.test(s)),
+      ).toEqual([]);
+      expect(await password()).toBe(before);
+      const [{ member }]: Array<{ member: boolean }> = await owner.query(
+        `SELECT pg_has_role($1, $2, 'MEMBER') AS member`,
+        [bystander, API_ROLE],
+      );
+      expect(member).toBe(false);
+    } finally {
+      // Без виправлення provision встигає видати ролі CONNECT: спершу прибрати її права в цій БД.
+      await owner.query(`DROP OWNED BY ${bystander}`);
+      await owner.query(`DROP ROLE ${bystander}`);
+    }
   });
 
   it('refuses the same role for both processes', async () => {
