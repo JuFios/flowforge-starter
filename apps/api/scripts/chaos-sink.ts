@@ -6,6 +6,9 @@
  *
  *   POST /effect  — виконати ефект (заголовок Idempotency-Key обов'язковий)
  *   GET  /stats   — { requests, effects, repeatedKeys, missingKey }
+ *   POST /notifications — прийняти сповіщення FlowForge; перша доставка кожної події «губить»
+ *                    підтвердження (з'єднання обривається після прийому тіла)
+ *   GET  /notifications — усі прийняті доставки: заголовки й сирі байти тіла (base64)
  */
 import { createServer } from 'node:http';
 
@@ -15,6 +18,21 @@ const DELAY_MS = Number(process.env.SINK_DELAY_MS ?? 300);
 const effects = new Map<string, number>(); // ключ → скільки разів запит із ним приходив
 let requests = 0;
 let missingKey = 0;
+
+interface Delivery {
+  id: string;
+  attempt: string;
+  timestamp: string;
+  signature: string;
+  requestId: string;
+  body: string;
+}
+/** Не більше стількох записів: сценарій короткий, а пам'ять отримувача — обмежена. */
+const MAX_DELIVERIES = 10_000;
+const deliveries: Delivery[] = [];
+const seen = new Set<string>();
+const header = (value: string | string[] | undefined) =>
+  typeof value === 'string' ? value : '';
 
 createServer((req, res) => {
   const path = (req.url ?? '').split('?')[0];
@@ -34,6 +52,38 @@ createServer((req, res) => {
         missingKey,
       }),
     );
+    return;
+  }
+  if (req.method === 'GET' && path === '/notifications') {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify(deliveries));
+    return;
+  }
+  if (req.method === 'POST' && path === '/notifications') {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    req.on('data', (c: Buffer) => {
+      size += c.length;
+      if (size <= 65_536) chunks.push(c);
+    });
+    req.on('end', () => {
+      const id = header(req.headers['x-flowforge-event-id']);
+      if (deliveries.length < MAX_DELIVERIES)
+        deliveries.push({
+          id,
+          attempt: header(req.headers['x-flowforge-attempt']),
+          timestamp: header(req.headers['x-flowforge-timestamp']),
+          signature: header(req.headers['x-flowforge-signature']),
+          requestId: header(req.headers['x-request-id']),
+          body: Buffer.concat(chunks).toString('base64'),
+        });
+      if (!seen.has(id)) {
+        seen.add(id);
+        req.socket.destroy();
+        return;
+      }
+      res.writeHead(204).end();
+    });
     return;
   }
   if (req.method === 'POST' && path === '/effect') {

@@ -181,6 +181,11 @@ jobs:
       - name: Restart Postgres under load and verify workers survive with exactly-once effects
         working-directory: apps/api
         run: npm run chaos:postgres
+      # Вихідні сповіщення (ТЗ 3.3.9): рестарт Postgres під час доставки й втрачені підтвердження —
+      # одна подія на завершення, повторна підписана доставка тих самих байтів із тим самим ID.
+      - name: Deliver signed notifications through a database restart and lost acknowledgements
+        working-directory: apps/api
+        run: npm run chaos:notifications
       # Справедливе планування (ТЗ 3.3.5): тенант B під backlog-ом 20 000 задач тенанта A — критерії
       # у README, «Навантажувальний сценарій справедливого планування»; провал будь-якого — помилка.
       - name: Measure fair scheduling under the backlog of another tenant

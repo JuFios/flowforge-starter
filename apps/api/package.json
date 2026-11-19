@@ -27,6 +27,7 @@
     "format:check": "prettier --check .",
     "chaos": "tsc -p scripts/tsconfig.json && node dist/scripts/chaos-kill-worker.js",
     "chaos:postgres": "tsc -p scripts/tsconfig.json && node dist/scripts/chaos-restart-postgres.js",
+    "chaos:notifications": "tsc -p scripts/tsconfig.json && node dist/scripts/chaos-notifications.js",
     "load:fairness": "tsc -p scripts/tsconfig.json && node dist/scripts/load-fairness.js",
     "chaos:sink:build": "tsc -p scripts/tsconfig.json",
     "webhook:preflight": "node dist/database/webhook-preflight.js",
