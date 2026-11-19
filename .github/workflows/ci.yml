@@ -29,9 +29,9 @@ jobs:
       - run: npm run build
 
   integration:
-    name: api integration (real Postgres)
+    name: api integration (real Postgres) and claim benchmark
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     defaults: { run: { working-directory: apps/api } }
     services:
       postgres:
@@ -57,6 +57,10 @@ jobs:
           cache-dependency-path: apps/api/package-lock.json
       - run: npm ci
       - run: npm run test:integration
+      # Пропускна здатність справедливого захоплення (README, «Бенчмарк захоплення»): відносно
+      # FIFO попередньої версії на тому самому раннері — ≥ 50% пропускної здатності, p95 ≤ 3×,
+      # і не менше 300 захоплень/с у кожному прогоні; інакше — провал.
+      - run: npm run bench:claim
 
   frontend:
     name: frontend (format, lint, build)
@@ -79,13 +83,13 @@ jobs:
     name: docker-compose smoke (migrations from scratch)
     runs-on: ubuntu-latest
     # Верхня межа на весь job: жоден крок, що завис, не чекає 6-годинного ліміту GitHub.
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       # Як у README «Запуск»: усі секрети — випадкові, у .env поруч із docker-compose.yml.
       - name: Generate the secrets
         run: |
-          : > .env
+          touch .env && chmod 600 .env && : > .env
           for name in ADMIN_TOKEN POSTGRES_PASSWORD API_DB_PASSWORD WORKER_DB_PASSWORD; do
             value="$(openssl rand -hex 24)"
             echo "::add-mask::$value"
@@ -173,6 +177,11 @@ jobs:
       - name: Restart Postgres under load and verify workers survive with exactly-once effects
         working-directory: apps/api
         run: npm run chaos:postgres
+      # Справедливе планування (ТЗ 3.3.5): тенант B під backlog-ом 20 000 задач тенанта A — критерії
+      # у README, «Навантажувальний сценарій справедливого планування»; провал будь-якого — помилка.
+      - name: Measure fair scheduling under the backlog of another tenant
+        working-directory: apps/api
+        run: npm run load:fairness
       - name: Logs on failure
         if: failure()
         run: docker compose -f docker-compose.yml -f docker-compose.chaos.yml logs --no-color
