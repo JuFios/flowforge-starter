@@ -16,6 +16,10 @@ import { WorkflowVersion } from './workflow-version.entity';
 export type ExecutionStatus = 'pending' | 'running' | 'succeeded' | 'failed';
 
 @Entity('executions')
+@Index('UQ_executions_scheduled', ['tenantId', 'workflowId', 'scheduledAt'], {
+  unique: true,
+  where: '"scheduledAt" IS NOT NULL',
+})
 @Index(['tenantId', 'createdAt'])
 // Ціль композитних FK із jobs і step_runs: задача чи крок можуть посилатися лише на виконання
 // свого тенанта.
@@ -100,6 +104,9 @@ export class Execution {
    */
   @Column({ type: 'varchar', length: 255, nullable: true })
   idempotencyKey: string | null;
+
+  @Column({ type: 'timestamptz', nullable: true })
+  scheduledAt: Date | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;

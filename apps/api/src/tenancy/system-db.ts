@@ -36,12 +36,12 @@ export class SystemDb {
     return row?.id ?? null;
   }
 
-  /** Сторінка workflow з розкладом після `after` (за id), до `limit` рядків. */
-  scheduledWorkflows(
+  /** Сторінка тенантів з увімкненими розкладами після `after` (за id), до `limit` рядків. */
+  scheduledTenants(
     after: string | null,
     limit = SCHEDULE_PAGE,
-  ): Promise<Array<{ id: string; tenantId: string }>> {
-    return this.ds.query('SELECT * FROM scheduled_workflows($1, $2)', [
+  ): Promise<Array<{ tenantId: string }>> {
+    return this.ds.query('SELECT * FROM scheduled_tenants($1, $2)', [
       after,
       limit,
     ]);

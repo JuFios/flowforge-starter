@@ -25,6 +25,7 @@ export type StepDefinition =
 
 @Entity('workflows')
 @Index(['tenantId'])
+@Index('IDX_workflows_scheduled_tenant', { synchronize: false })
 export class Workflow {
   @PrimaryGeneratedColumn('uuid')
   id: string;

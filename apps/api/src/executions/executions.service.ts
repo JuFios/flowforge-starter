@@ -28,6 +28,13 @@ import { TenantDb } from '../tenancy/tenant-db';
 /** Джерело постановки (мітка метрики відхилених постановок). */
 type EnqueueTrigger = Execution['trigger'] | 'retry';
 
+/** Лічильники й ліміт черги тенанта з його рядка обліку. */
+interface QueueUsage {
+  queued: number;
+  running: number;
+  maxQueueSize: number;
+}
+
 @Injectable()
 export class ExecutionsService {
   private readonly logger = new Logger(ExecutionsService.name);
@@ -58,6 +65,13 @@ export class ExecutionsService {
     return (await this.create(workflow, input, trigger, null)).execution;
   }
 
+  async enqueueScheduled(
+    workflow: Workflow,
+    scheduledAt: Date,
+  ): Promise<boolean> {
+    return (await this.create(workflow, {}, 'cron', null, scheduledAt)).created;
+  }
+
   /**
    * Запуск через API з ключем ідемпотентності (`Idempotency-Key`): рівно одне виконання на ключ у
    * тенанті. Повтор того самого запиту (той самий workflow і вхід) повертає наявне виконання
@@ -73,31 +87,22 @@ export class ExecutionsService {
   }
 
   /**
-   * Місце в черзі тенанта (ліміт незавершених задач — README, «Контракт лімітів»). Рядок обліку
-   * тенанта блокується до кінця транзакції (`lock_tenant_usage`): постановки тенанта
-   * серіалізуються, тож перевірка ліміту й вставка задачі атомарні. `beforeCheck` виконується вже
-   * під блокуванням, до перевірки ліміту, і може завершити постановку власним результатом. Повна
-   * черга — 429 `queue_full`, нічого не створюється.
+   * Блокує рядок обліку тенанта до кінця транзакції (`lock_tenant_usage`) і повертає його
+   * лічильники: постановки тенанта серіалізуються, тож перевірка ліміту черги й вставка задачі
+   * атомарні.
    */
-  private async withQueueSlot<T>(
-    em: EntityManager,
-    trigger: EnqueueTrigger,
-    beforeCheck: () => Promise<T | undefined>,
-  ): Promise<T | undefined> {
-    const [usage]: Array<{
-      queued: number;
-      running: number;
-      maxQueueSize: number;
-    }> = await em.query(
+  private async lockUsage(em: EntityManager): Promise<QueueUsage> {
+    const [usage]: QueueUsage[] = await em.query(
       'SELECT queued, running, "maxQueueSize" FROM lock_tenant_usage()',
     );
-    const early = await beforeCheck();
-    if (early !== undefined) return early;
-    if (usage.queued + usage.running >= usage.maxQueueSize) {
-      this.limits.enqueueRejected.inc({ reason: 'queue_full', trigger });
-      throw new QueueFullException(usage.maxQueueSize);
-    }
-    return undefined;
+    return usage;
+  }
+
+  /** Місце в черзі (README, «Контракт лімітів»); повна черга — 429 `queue_full`. */
+  private assertQueueSlot(usage: QueueUsage, trigger: EnqueueTrigger): void {
+    if (usage.queued + usage.running < usage.maxQueueSize) return;
+    this.limits.enqueueRejected.inc({ reason: 'queue_full', trigger });
+    throw new QueueFullException(usage.maxQueueSize);
   }
 
   private create(
@@ -105,18 +110,32 @@ export class ExecutionsService {
     input: Record<string, unknown>,
     trigger: Execution['trigger'],
     idempotencyKey: string | null,
+    scheduledAt: Date | null = null,
   ): Promise<{ execution: Execution; created: boolean }> {
     const correlationId = getCorrelationId() ?? newCorrelationId();
     return this.db.run(workflow.tenantId, async (em) => {
       // Порядок: облік тенанта (блокування) → пошук за ключем → ліміт → нові рядки. Ключ
       // перевіряється після блокування: повтор уже прийнятого запиту повертає його виконання,
       // навіть коли черга тим часом заповнилась, і два однакові запити не займуть два місця.
-      const existing = await this.withQueueSlot(em, trigger, async () =>
-        idempotencyKey === null
-          ? undefined
-          : this.findRun(em, workflow, input, idempotencyKey),
-      );
-      if (existing) return { execution: existing, created: false };
+      const usage = await this.lockUsage(em);
+      if (scheduledAt) {
+        const existing = await em.findOneBy(Execution, {
+          tenantId: workflow.tenantId,
+          workflowId: workflow.id,
+          scheduledAt,
+        });
+        if (existing) return { execution: existing, created: false };
+      }
+      if (idempotencyKey !== null) {
+        const existing = await this.findRun(
+          em,
+          workflow,
+          input,
+          idempotencyKey,
+        );
+        if (existing) return { execution: existing, created: false };
+      }
+      this.assertQueueSlot(usage, trigger);
       const version = await em.findOneOrFail(WorkflowVersion, {
         where: {
           workflowId: workflow.id,
@@ -129,6 +148,7 @@ export class ExecutionsService {
         tenantId: workflow.tenantId,
         workflowId: workflow.id,
         workflowVersionId: version.id,
+        scheduledAt,
         input,
         trigger,
         correlationId,
@@ -247,7 +267,7 @@ export class ExecutionsService {
           'виконання створене до появи знімків версій workflow і не може бути повторене',
         );
       // Порядок блокувань: виконання → облік тенанта → задача (README, «Порядок блокувань»).
-      await this.withQueueSlot(em, 'retry', () => Promise.resolve(undefined));
+      this.assertQueueSlot(await this.lockUsage(em), 'retry');
       const [{ started }]: Array<{ started: boolean }> = await em.query(
         `SELECT EXISTS (SELECT 1 FROM step_runs WHERE "executionId" = $1 AND "tenantId" = $2) AS started`,
         [id, tenantId],
