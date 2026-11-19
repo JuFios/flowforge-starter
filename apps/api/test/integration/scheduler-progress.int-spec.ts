@@ -62,6 +62,41 @@ describe('scheduler progress', () => {
     expect(new Set(times).size).toBe(times.length);
   });
 
+  it('does not fire for moments before the workflow existed or while it was disabled', async () => {
+    const { apiKey } = await createTenant(ds);
+    const { app, scheduler: s } = await scheduler();
+    // Планувальник уже працює, коли з'являється workflow.
+    await sleep(2_200);
+    const wf = await createScheduledWorkflow(app, ds, apiKey, {
+      cron: '* * * * * *',
+    });
+    await s.tick();
+    expect(
+      (await scheduledTimes(ds, wf.id)).filter(
+        (t) => t <= wf.createdAt.getTime(),
+      ),
+    ).toEqual([]);
+
+    const patch = (enabled: boolean) =>
+      fetch(`${app.baseUrl}/workflows/${wf.id}`, {
+        method: 'PATCH',
+        headers: { 'x-api-key': apiKey, 'content-type': 'application/json' },
+        body: JSON.stringify({ enabled }),
+      });
+    expect((await patch(false)).status).toBe(200);
+    const disabledAt = await dbNow(ds);
+    await sleep(2_200);
+    expect((await patch(true)).status).toBe(200);
+    const enabledAt = await dbNow(ds);
+    await s.tick();
+    // Вимкнений розклад не «доганяє» моменти, коли він був вимкнений.
+    expect(
+      (await scheduledTimes(ds, wf.id)).filter(
+        (t) => t > disabledAt.getTime() + 1_000 && t < enabledAt.getTime(),
+      ),
+    ).toEqual([]);
+  });
+
   describe('after a failed enqueue', () => {
     beforeAll(async () => {
       await ds.query(
