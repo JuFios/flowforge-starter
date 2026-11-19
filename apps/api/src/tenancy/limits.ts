@@ -3,6 +3,7 @@
  * (CHECK у БД, валідація адмін-API й db:provision) і вирази CHECK перевизначень у `tenants`.
  * Контракт — README, «Контракт лімітів».
  */
+
 /** Значення лімітів за замовчуванням до першого `db:provision` (те саме, що й у env за замовчуванням). */
 export const BUILT_IN_LIMIT_DEFAULTS = {
   maxRunning: 10,
@@ -37,3 +38,35 @@ export const TENANT_LIMIT_CHECKS = {
     LIMIT_BOUNDS.rateLimit,
   ),
 };
+
+/** Перевизначення лімітів у тенанта (NULL — значення за замовчуванням). */
+export interface TenantLimitOverrides {
+  maxConcurrentExecutions: number | null;
+  maxQueueSize: number | null;
+  rateLimit: number | null;
+  webhookRateLimit: number | null;
+}
+
+/** Межі кожного перевизначення (ті самі, що в CHECK). */
+export const OVERRIDE_BOUNDS: Record<
+  keyof TenantLimitOverrides,
+  readonly [number, number]
+> = {
+  maxConcurrentExecutions: LIMIT_BOUNDS.maxRunning,
+  maxQueueSize: LIMIT_BOUNDS.maxQueueSize,
+  rateLimit: LIMIT_BOUNDS.rateLimit,
+  webhookRateLimit: LIMIT_BOUNDS.rateLimit,
+};
+
+/** Ефективні ліміти тенанта (`tenant_limits()`): перевизначення або значення за замовчуванням. */
+export interface EffectiveLimits {
+  maxRunning: number;
+  maxQueueSize: number;
+  rateLimit: number;
+  rateWindowMs: number;
+  webhookRateLimit: number;
+  webhookRateWindowMs: number;
+}
+
+/** Найдовший ключ відра частоти запитів (`<throttler>:<tenantId або IP>`). */
+export const RATE_KEY_MAX_LENGTH = 200;

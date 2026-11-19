@@ -9,10 +9,10 @@ import {
   Post,
   Query,
   Res,
-  UseGuards,
 } from '@nestjs/common';
 import type { Response } from 'express';
 import { ApiKeyGuard } from '../auth/api-key.guard';
+import { RateLimit } from '../limits/rate-limit.guard';
 import { CurrentTenant } from '../auth/current-tenant.decorator';
 import { Tenant } from '../entities';
 import { WorkflowsService } from '../workflows/workflows.service';
@@ -21,7 +21,7 @@ import { parseIdempotencyKey } from './idempotency-key';
 import { RunInputPipe } from './run-input.pipe';
 
 @Controller()
-@UseGuards(ApiKeyGuard)
+@RateLimit('tenant', { before: [ApiKeyGuard] })
 export class ExecutionsController {
   constructor(
     private readonly executions: ExecutionsService,

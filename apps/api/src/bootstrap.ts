@@ -9,7 +9,7 @@ import { NestExpressApplication } from '@nestjs/platform-express';
 import { Logger } from 'nestjs-pino';
 import { getMetadataStorage } from 'class-validator';
 import { exceedsJsonDepth, jsonTooDeepMessage } from './common/json-depth';
-import { EnvironmentVariables } from './config/env.validation';
+import { EnvironmentVariables, parseTrustProxy } from './config/env.validation';
 import {
   CreateWorkflowDto,
   UpdateWorkflowDto,
@@ -76,11 +76,15 @@ export function configureApp(app: INestApplication): INestApplication {
   // (Content-Encoding) — 415: API їх не потребує, а розпакування — код body-parser, досяжний до
   // автентифікації (README, «Аудит залежностей»).
   const http = app as NestExpressApplication;
+  const config = app.get(ConfigService<EnvironmentVariables, true>);
+  // IP клієнта для лімітів за IP (req.ip): X-Forwarded-For — лише від довірених проксі.
+  http.set(
+    'trust proxy',
+    parseTrustProxy(config.get('TRUST_PROXY', { infer: true })) ?? false,
+  );
   const options = {
     inflate: false,
-    limit: app
-      .get(ConfigService<EnvironmentVariables, true>)
-      .get('HTTP_BODY_LIMIT', { infer: true }),
+    limit: config.get('HTTP_BODY_LIMIT', { infer: true }),
   };
   http.useBodyParser('json', options);
   http.useBodyParser('urlencoded', { ...options, extended: true });

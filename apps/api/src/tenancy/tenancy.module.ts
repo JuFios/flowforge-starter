@@ -16,6 +16,8 @@ export class TenancyModule {
   static forRoot(kind: ProcessKind): DynamicModule {
     return {
       module: TenancyModule,
+      // Один на процес: доступ до БД потрібен і модулям бібліотек (сховище throttler-а).
+      global: true,
       providers: [
         { provide: PROCESS_KIND, useValue: kind },
         TenantDb,

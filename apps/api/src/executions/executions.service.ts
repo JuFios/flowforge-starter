@@ -20,8 +20,13 @@ import {
   getCorrelationId,
   newCorrelationId,
 } from '../observability/correlation';
+import { QueueFullException } from '../limits/limit-exceptions';
+import { LimitsMetrics } from '../limits/limits.metrics';
 import { MetricsService } from '../observability/metrics.service';
 import { TenantDb } from '../tenancy/tenant-db';
+
+/** Джерело постановки (мітка метрики відхилених постановок). */
+type EnqueueTrigger = Execution['trigger'] | 'retry';
 
 @Injectable()
 export class ExecutionsService {
@@ -32,6 +37,7 @@ export class ExecutionsService {
     private readonly db: TenantDb,
     private readonly config: ConfigService<EnvironmentVariables, true>,
     metrics: MetricsService,
+    private readonly limits: LimitsMetrics,
   ) {
     this.retried = new Counter({
       name: 'flowforge_executions_retried_total',
@@ -66,6 +72,34 @@ export class ExecutionsService {
     return this.create(workflow, input, 'api', idempotencyKey);
   }
 
+  /**
+   * Місце в черзі тенанта (ліміт незавершених задач — README, «Контракт лімітів»). Рядок обліку
+   * тенанта блокується до кінця транзакції (`lock_tenant_usage`): постановки тенанта
+   * серіалізуються, тож перевірка ліміту й вставка задачі атомарні. `beforeCheck` виконується вже
+   * під блокуванням, до перевірки ліміту, і може завершити постановку власним результатом. Повна
+   * черга — 429 `queue_full`, нічого не створюється.
+   */
+  private async withQueueSlot<T>(
+    em: EntityManager,
+    trigger: EnqueueTrigger,
+    beforeCheck: () => Promise<T | undefined>,
+  ): Promise<T | undefined> {
+    const [usage]: Array<{
+      queued: number;
+      running: number;
+      maxQueueSize: number;
+    }> = await em.query(
+      'SELECT queued, running, "maxQueueSize" FROM lock_tenant_usage()',
+    );
+    const early = await beforeCheck();
+    if (early !== undefined) return early;
+    if (usage.queued + usage.running >= usage.maxQueueSize) {
+      this.limits.enqueueRejected.inc({ reason: 'queue_full', trigger });
+      throw new QueueFullException(usage.maxQueueSize);
+    }
+    return undefined;
+  }
+
   private create(
     workflow: Workflow,
     input: Record<string, unknown>,
@@ -74,6 +108,15 @@ export class ExecutionsService {
   ): Promise<{ execution: Execution; created: boolean }> {
     const correlationId = getCorrelationId() ?? newCorrelationId();
     return this.db.run(workflow.tenantId, async (em) => {
+      // Порядок: облік тенанта (блокування) → пошук за ключем → ліміт → нові рядки. Ключ
+      // перевіряється після блокування: повтор уже прийнятого запиту повертає його виконання,
+      // навіть коли черга тим часом заповнилась, і два однакові запити не займуть два місця.
+      const existing = await this.withQueueSlot(em, trigger, async () =>
+        idempotencyKey === null
+          ? undefined
+          : this.findRun(em, workflow, input, idempotencyKey),
+      );
+      if (existing) return { execution: existing, created: false };
       const version = await em.findOneOrFail(WorkflowVersion, {
         where: {
           workflowId: workflow.id,
@@ -94,6 +137,8 @@ export class ExecutionsService {
       if (idempotencyKey === null) {
         execution = await em.save(em.create(Execution, fields));
       } else {
+        // Постановки тенанта серіалізовані блокуванням обліку, тож конфлікт ключа тут неможливий;
+        // ON CONFLICT лишається страховкою унікального індексу.
         const [inserted]: Execution[] = await em.query(
           `INSERT INTO executions
              ("tenantId", "workflowId", "workflowVersionId", input, trigger, "correlationId",
@@ -136,30 +181,45 @@ export class ExecutionsService {
     });
   }
 
-  /** Виконання, уже створене з цим ключем; інший workflow чи вхід — 422. */
-  private async existingRun(
+  /**
+   * Виконання, уже створене з цим ключем, або undefined; той самий ключ з іншим workflow чи
+   * входом — 422.
+   */
+  private async findRun(
     em: EntityManager,
     workflow: Workflow,
     input: Record<string, unknown>,
     idempotencyKey: string,
-  ): Promise<Execution> {
+  ): Promise<Execution | undefined> {
     // Вхід порівнюється як jsonb: порядок ключів і пробіли не мають значення.
     const [row]: Array<Execution & { sameRequest: boolean }> = await em.query(
       `SELECT *, ("workflowId" = $3 AND input = $4::jsonb) AS "sameRequest"
          FROM executions WHERE "tenantId" = $1 AND "idempotencyKey" = $2`,
       [workflow.tenantId, idempotencyKey, workflow.id, JSON.stringify(input)],
     );
-    // Виконання з цим ключем щойно видалило очищення історії: запит варто повторити.
-    if (!row)
-      throw new ConflictException(
-        'виконання з цим Idempotency-Key щойно видалено, повторіть запит',
-      );
+    if (!row) return undefined;
     if (!row.sameRequest)
       throw new UnprocessableEntityException(
         'Idempotency-Key уже використано для іншого запуску (інший workflow або вхідні дані)',
       );
     // Службове поле порівняння у відповідь не потрапляє.
     delete (row as Partial<typeof row>).sameRequest;
+    return row;
+  }
+
+  /** Виконання, з яким щойно конфліктувала вставка за ключем; інший workflow чи вхід — 422. */
+  private async existingRun(
+    em: EntityManager,
+    workflow: Workflow,
+    input: Record<string, unknown>,
+    idempotencyKey: string,
+  ): Promise<Execution> {
+    const row = await this.findRun(em, workflow, input, idempotencyKey);
+    // Виконання з цим ключем щойно видалило очищення історії: запит варто повторити.
+    if (!row)
+      throw new ConflictException(
+        'виконання з цим Idempotency-Key щойно видалено, повторіть запит',
+      );
     return row;
   }
 
@@ -186,6 +246,8 @@ export class ExecutionsService {
         throw new ConflictException(
           'виконання створене до появи знімків версій workflow і не може бути повторене',
         );
+      // Порядок блокувань: виконання → облік тенанта → задача (README, «Порядок блокувань»).
+      await this.withQueueSlot(em, 'retry', () => Promise.resolve(undefined));
       const [{ started }]: Array<{ started: boolean }> = await em.query(
         `SELECT EXISTS (SELECT 1 FROM step_runs WHERE "executionId" = $1 AND "tenantId" = $2) AS started`,
         [id, tenantId],

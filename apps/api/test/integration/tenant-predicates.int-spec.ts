@@ -6,6 +6,7 @@ import { CheckpointService } from '../../src/engine/checkpoint.service';
 import { JobQueueService } from '../../src/engine/job-queue.service';
 import { Execution, Job, StepRun, Workflow } from '../../src/entities';
 import { ExecutionsService } from '../../src/executions/executions.service';
+import { LimitsMetrics } from '../../src/limits/limits.metrics';
 import { MetricsService } from '../../src/observability/metrics.service';
 import { SystemDb } from '../../src/tenancy/system-db';
 import { TenantDb } from '../../src/tenancy/tenant-db';
@@ -47,7 +48,13 @@ describe('tenant predicates in the services (row-level security bypassed)', () =
       JOB_BACKOFF_MAX_MS: 500,
     });
     workflows = new WorkflowsService(db);
-    executions = new ExecutionsService(db, config, new MetricsService());
+    const metrics = new MetricsService();
+    executions = new ExecutionsService(
+      db,
+      config,
+      metrics,
+      new LimitsMetrics(metrics),
+    );
     queue = new JobQueueService(db, new SystemDb(owner), config);
     checkpoints = new CheckpointService(db, queue);
   });

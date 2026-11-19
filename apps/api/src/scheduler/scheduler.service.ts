@@ -9,6 +9,7 @@ import { parseExpression } from 'cron-parser';
 import { EnvironmentVariables } from '../config/env.validation';
 import { Workflow } from '../entities';
 import { ExecutionsService } from '../executions/executions.service';
+import { QueueFullException } from '../limits/limit-exceptions';
 import {
   newCorrelationId,
   runWithCorrelationId,
@@ -115,6 +116,15 @@ export class SchedulerService
         await this.executions.enqueue(wf, {}, 'cron');
         return true;
       } catch (err) {
+        // Черга тенанта заповнена: спрацювання пропускається (метрика відхилених постановок —
+        // flowforge_enqueue_rejected_total{trigger="cron"}), розклад іде далі.
+        if (err instanceof QueueFullException) {
+          this.logger.warn(
+            { workflowId: wf.id, scheduledAt: scheduledAt.toISOString() },
+            'scheduled run skipped: the tenant queue is full',
+          );
+          return false;
+        }
         this.logger.warn(
           {
             workflowId: wf.id,

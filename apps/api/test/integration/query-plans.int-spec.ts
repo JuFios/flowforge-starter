@@ -279,3 +279,35 @@ describe('choosing a claim candidate among 2000 tenants', () => {
     expect(hasSeqScan(root)).toBe(false);
   });
 });
+
+/** Очищення відер частоти запитів — за індексом кінця вікна, без читання всієї таблиці. */
+describe('purging rate limit buckets', () => {
+  let ds: DataSource;
+
+  beforeAll(async () => {
+    ds = await openTestDataSource();
+    await truncateAll(ds);
+    await ds.query(`
+      INSERT INTO rate_limit_buckets (key, hits, "resetAt")
+      SELECT 'tenant:' || g, 1, now() + make_interval(secs => g - 1000)
+        FROM generate_series(1, 20000) g`);
+    await ds.query(`ANALYZE rate_limit_buckets`);
+  });
+
+  afterAll(async () => {
+    await truncateAll(ds);
+    await ds.destroy();
+  });
+
+  it('selects expired buckets through their reset index', async () => {
+    const body = await functionBody(ds, 'purge_rate_limits', {
+      p_batch: '1000',
+    });
+    const select = /SELECT o\.key[\s\S]*?SKIP LOCKED/.exec(body)![0];
+    const [row]: Array<{ 'QUERY PLAN': Array<{ Plan: PlanNode }> }> =
+      await ds.query(`EXPLAIN (FORMAT JSON) ${select}`);
+    const root = row['QUERY PLAN'][0].Plan;
+    expect(indexesIn(root)).toContain('IDX_rate_limit_buckets_reset');
+    expect(hasSeqScan(root)).toBe(false);
+  });
+});

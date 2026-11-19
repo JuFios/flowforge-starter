@@ -19,6 +19,7 @@ import { QueueMetrics } from './engine/queue.metrics';
 import { StepExecutor } from './engine/step-executor';
 import { ExecutionsController } from './executions/executions.controller';
 import { ExecutionsService } from './executions/executions.service';
+import { LimitsModule } from './limits/limits.module';
 import { MetricsController } from './observability/metrics.controller';
 import { MetricsServer } from './observability/metrics-server';
 import { ObservabilityModule } from './observability/observability.module';
@@ -75,7 +76,7 @@ class ApiEnvironmentCheck implements OnModuleInit {
 
 /** HTTP API + планувальник. Метрики — на окремому службовому порту (MetricsServer, METRICS_PORT). */
 @Module({
-  imports: [...coreImports, TenancyModule.forRoot('api')],
+  imports: [...coreImports, TenancyModule.forRoot('api'), LimitsModule],
   controllers: [
     TenantsController,
     WorkflowsController,

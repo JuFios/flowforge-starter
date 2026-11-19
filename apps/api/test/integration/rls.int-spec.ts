@@ -216,6 +216,8 @@ const ROLES: Array<{
       `SELECT * FROM tenant_usage`,
       `SELECT * FROM limit_defaults`,
       `UPDATE limit_defaults SET "maxRunning" = 1000`,
+      `SELECT * FROM rate_limit_buckets`,
+      `DELETE FROM rate_limit_buckets`,
       `SELECT purge_finished_jobs(1, 1)`,
     ],
     update: `UPDATE executions SET error = 'touched' WHERE id = $1`,
@@ -233,6 +235,8 @@ const ROLES: Array<{
       `SELECT * FROM tenant_usage`,
       `UPDATE tenant_usage SET running = 0`,
       `SELECT * FROM limit_defaults`,
+      `SELECT * FROM rate_limit_hit('k', 1000, 1)`,
+      `SELECT * FROM tenant_limits()`,
     ],
     update: `UPDATE executions SET error = 'touched' WHERE id = $1`,
   },
@@ -392,6 +396,9 @@ describe('SECURITY DEFINER functions', () => {
         ).rejects.toThrow(/tenant context is required/);
       await expect(
         worker.query('SELECT refresh_tenant_usage()'),
+      ).rejects.toThrow(/tenant context is required/);
+      await expect(
+        apiRole.query('SELECT * FROM tenant_limits()'),
       ).rejects.toThrow(/tenant context is required/);
       // У контексті A: лише рядок A (задача B не видна й не рахується), навіть після перерахунку.
       const usage = await worker.transaction(async (em) => {

@@ -1,4 +1,5 @@
 import 'reflect-metadata';
+import { isIP } from 'node:net';
 import { plainToInstance, Type } from 'class-transformer';
 import {
   IsIn,
@@ -92,6 +93,51 @@ function IsNotLessThan(other: string, extra = 0): PropertyDecorator {
     });
 }
 
+/** Іменовані підмережі, які розуміє Express `trust proxy`. */
+const TRUST_PROXY_NAMES = new Set(['loopback', 'linklocal', 'uniquelocal']);
+
+/**
+ * Значення TRUST_PROXY для Express `trust proxy`: false, кількість переходів або перелік адрес і
+ * підмереж проксі. `true` (довіряти будь-кому) не приймається: тоді клієнт сам задавав би свою IP
+ * через X-Forwarded-For і обходив би ліміти за IP. Невалідне значення — undefined.
+ */
+export function parseTrustProxy(
+  value: string,
+): false | number | string[] | undefined {
+  const trimmed = value.trim();
+  if (trimmed === 'false' || trimmed === '') return false;
+  if (/^\d+$/.test(trimmed)) {
+    const hops = Number(trimmed);
+    return hops >= 1 && hops <= 10 ? hops : undefined;
+  }
+  const entries = trimmed.split(',').map((e) => e.trim());
+  const valid = entries.every((entry) => {
+    if (TRUST_PROXY_NAMES.has(entry)) return true;
+    const [address, prefix, ...rest] = entry.split('/');
+    const family = isIP(address);
+    if (family === 0 || rest.length > 0) return false;
+    if (prefix === undefined) return true;
+    if (!/^\d{1,3}$/.test(prefix)) return false;
+    return Number(prefix) <= (family === 4 ? 32 : 128);
+  });
+  return valid ? entries : undefined;
+}
+
+function IsTrustProxy(): PropertyDecorator {
+  return (target, propertyName) =>
+    registerDecorator({
+      name: 'isTrustProxy',
+      target: target.constructor,
+      propertyName: propertyName as string,
+      validator: {
+        validate: (value: unknown) =>
+          typeof value === 'string' && parseTrustProxy(value) !== undefined,
+        defaultMessage: () =>
+          'має бути false, кількість проксі-переходів 1..10 або перелік IP/підмереж проксі через кому',
+      },
+    });
+}
+
 /**
  * Запас пулу понад WORKER_CONCURRENCY: heartbeat-и задач у роботі (паралельно з записами
  * циклів), reaper, очищення старих задач і перевірка /ready.
@@ -171,6 +217,47 @@ export class EnvironmentVariables extends DatabaseEnvironment {
   @MinLength(12)
   @IsSecureSecretInProduction()
   ADMIN_TOKEN?: string;
+
+  /**
+   * Скільки запитів до `/tenants…` приймається з однієї IP-адреси за вікно ADMIN_RATE_WINDOW_MS
+   * (захист адмін-токена від перебору; лічильник у Postgres, спільний для інстансів API).
+   */
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(10_000)
+  ADMIN_RATE_LIMIT = 30;
+
+  @Type(() => Number)
+  @IsInt()
+  @Min(1_000)
+  @Max(3_600_000)
+  ADMIN_RATE_WINDOW_MS = 60_000;
+
+  /**
+   * Скільки невдалих автентифікацій (невірний API-ключ, невірний підпис webhook-а) з однієї
+   * IP-адреси за вікно AUTH_FAILURE_RATE_WINDOW_MS; понад це — 429 замість 401. Успішні запити не
+   * рахуються.
+   */
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(10_000)
+  AUTH_FAILURE_RATE_LIMIT = 30;
+
+  @Type(() => Number)
+  @IsInt()
+  @Min(1_000)
+  @Max(3_600_000)
+  AUTH_FAILURE_RATE_WINDOW_MS = 60_000;
+
+  /**
+   * Довіра до X-Forwarded-For (Express `trust proxy`) для IP клієнта в лімітах за IP: `false` (за
+   * замовчуванням — API без проксі попереду), кількість проксі-переходів (1..10) або перелік
+   * адрес/підмереж проксі через кому. Довіра без проксі дала б клієнту підробляти свою IP-адресу.
+   */
+  @IsTrustProxy()
+  TRUST_PROXY = 'false';
 
   @IsIn(LOG_LEVELS)
   LOG_LEVEL: LogLevel = 'info';

@@ -20,7 +20,11 @@ export async function openTestDataSource(): Promise<DataSource> {
  * тимчасово відкочують схему, і новіших таблиць у цей момент ще немає.
  */
 export async function truncateAll(ds: DataSource): Promise<void> {
-  const names = ds.entityMetadatas.map((m) => m.tableName);
+  // Відра лімітів частоти — теж: ліміти за IP (127.0.0.1) інакше переходили б між тестами.
+  const names = [
+    ...ds.entityMetadatas.map((m) => m.tableName),
+    'rate_limit_buckets',
+  ];
   const existing: Array<{ name: string }> = await ds.query(
     `SELECT table_name AS name FROM information_schema.tables
       WHERE table_schema = 'public' AND table_name = ANY($1)`,

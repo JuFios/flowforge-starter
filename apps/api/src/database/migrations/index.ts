@@ -12,6 +12,7 @@ import { HistoryIndexes1794993930872 } from './1794993930872-HistoryIndexes';
 import { RecoverCheckpoints1795000000000 } from './1795000000000-RecoverCheckpoints';
 import { TenantIsolation1795100000000 } from './1795100000000-TenantIsolation';
 import { TenantUsage1795200000000 } from './1795200000000-TenantUsage';
+import { TenantLimits1795300000000 } from './1795300000000-TenantLimits';
 
 /**
  * Явний перелік міграцій у порядку застосування. Без glob-шаблонів, щоб однаково
@@ -33,4 +34,5 @@ export const MIGRATIONS = [
   RecoverCheckpoints1795000000000,
   TenantIsolation1795100000000,
   TenantUsage1795200000000,
+  TenantLimits1795300000000,
 ];

@@ -1,4 +1,5 @@
 import {
+  parseTrustProxy,
   validateApiEnv,
   validateDatabaseEnv,
   validateEnv,
@@ -202,5 +203,38 @@ describe('validateDatabaseEnv (migration CLI)', () => {
     expect(() => validateDatabaseEnv({ DATABASE_URL: 'mysql://x' })).toThrow(
       /DATABASE_URL/,
     );
+  });
+});
+
+describe('TRUST_PROXY', () => {
+  it.each([
+    ['false', false],
+    ['1', 1],
+    ['10', 10],
+    ['loopback', ['loopback']],
+    ['10.0.0.1, 10.0.0.0/8', ['10.0.0.1', '10.0.0.0/8']],
+    ['fd00::/8,uniquelocal', ['fd00::/8', 'uniquelocal']],
+  ])('accepts %s', (value, parsed) => {
+    expect(parseTrustProxy(value)).toEqual(parsed);
+  });
+
+  // `true` дав би клієнту самому задавати свою IP через X-Forwarded-For.
+  it.each([
+    'true',
+    '0',
+    '11',
+    '10.0.0.0/33',
+    'fd00::/129',
+    'proxy.local',
+    '10.0.0.1/8/1',
+    '1.2.3',
+  ])('rejects %s', (value) => {
+    expect(parseTrustProxy(value)).toBeUndefined();
+    expect(() =>
+      validateEnv({
+        DATABASE_URL: 'postgres://u:p@localhost:5432/db',
+        TRUST_PROXY: value,
+      }),
+    ).toThrow(/TRUST_PROXY/);
   });
 });
