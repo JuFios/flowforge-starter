@@ -113,32 +113,19 @@ export class NotificationsService {
   ): Promise<SettingsView & { secret?: string }> {
     await this.checkUrl(input.url);
     return this.db.run(tenantId, async (em) => {
-      const [current]: SettingsRow[] = await em.query(
-        `SELECT url, enabled, revision, "secretKeyId", "nextSecretKeyId"
-           FROM notification_settings WHERE "tenantId" = $1 FOR NO KEY UPDATE`,
-        [tenantId],
+      const secret = newSecret();
+      const keyId = randomUUID();
+      const [row]: SettingsRow[] = await em.query(
+        `INSERT INTO notification_settings AS s ("tenantId", url, enabled, "secretKeyId", secret)
+         VALUES ($1,$2,COALESCE($3,true),$4,$5)
+         ON CONFLICT ("tenantId") DO UPDATE SET
+           url=EXCLUDED.url, enabled=COALESCE($3,s.enabled),
+           revision=s.revision + (s.url <> EXCLUDED.url OR ($3 IS TRUE AND NOT s.enabled))::integer,
+           "updatedAt"=now()
+         RETURNING url, enabled, revision, "secretKeyId", "nextSecretKeyId"`,
+        [tenantId, input.url, input.enabled ?? null, keyId, secret],
       );
-      if (!current) {
-        const secret = newSecret();
-        const [created]: SettingsRow[] = await em.query(
-          `INSERT INTO notification_settings ("tenantId", url, enabled, "secretKeyId", secret)
-           VALUES ($1, $2, $3, $4, $5)
-           RETURNING url, enabled, revision, "secretKeyId", "nextSecretKeyId"`,
-          [tenantId, input.url, input.enabled ?? true, randomUUID(), secret],
-        );
-        return { ...view(created), secret };
-      }
-      const enabled = input.enabled ?? current.enabled;
-      const changed =
-        input.url !== current.url || (enabled && !current.enabled);
-      const [[updated]]: [SettingsRow[], number] = await em.query(
-        `UPDATE notification_settings
-            SET url = $2, enabled = $3, revision = revision + $4, "updatedAt" = now()
-          WHERE "tenantId" = $1
-          RETURNING url, enabled, revision, "secretKeyId", "nextSecretKeyId"`,
-        [tenantId, input.url, enabled, changed ? 1 : 0],
-      );
-      return view(updated);
+      return row.secretKeyId === keyId ? { ...view(row), secret } : view(row);
     });
   }
 
