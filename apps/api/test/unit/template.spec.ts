@@ -14,6 +14,17 @@ describe('renderTemplate', () => {
     expect(renderTemplate('[{{ input.nope }}]', ctx)).toBe('[]');
   });
 
+  it('reads only properties supplied by the current input', () => {
+    const input = Object.create({ label: 'outer' }) as Record<string, unknown>;
+    input.name = 'Ada';
+    expect(
+      renderTemplate('{{ input.name }}[{{ input.label }}]', {
+        input,
+        steps: {},
+      }),
+    ).toBe('Ada[]');
+  });
+
   it('serialises objects as JSON', () => {
     expect(renderTemplate('{{ input.user }}', ctx)).toBe('{"name":"Ada"}');
   });
