@@ -28,6 +28,7 @@ describe('finishing an execution is atomic', () => {
       END $$ LANGUAGE plpgsql
       -- Тригер спрацьовує в транзакції воркера (роль без прав на службову послідовність тесту).
       SECURITY DEFINER SET search_path = pg_catalog, public`);
+    await ds.query(`REVOKE ALL ON FUNCTION test_fail_first_done() FROM PUBLIC`);
     await ds.query(`
       CREATE TRIGGER test_fail_first_done BEFORE UPDATE ON jobs
       FOR EACH ROW EXECUTE FUNCTION test_fail_first_done()`);

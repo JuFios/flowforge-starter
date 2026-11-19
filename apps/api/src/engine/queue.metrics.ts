@@ -30,11 +30,10 @@ export class QueueMetrics {
   /** Тривалість одного захоплення (промоція, вибір кандидата, спроби) — за годинником воркера. */
   readonly claimDuration: Histogram;
   /**
-   * Спроби захоплення, що не дали задачі через конкуренцію: `stale` — кандидата щойно обслужив
-   * інший воркер, `lock_timeout` — рядок обліку тенанта не звільнився за lock_timeout, `repair` —
-   * облік тенанта розійшовся із задачами й перерахований (за інваріантами не має траплятися).
+   * Рядки обліку тенантів, перераховані захопленням: облік казав, що готова задача є, а її не
+   * було (за інваріантами не трапляється; ненульове значення — привід розбиратися).
    */
-  readonly claimContention: Counter<'reason'>;
+  readonly claimUsageRepairs: Counter;
 
   constructor(metrics: MetricsService) {
     const registers = [metrics.registry];
@@ -46,16 +45,15 @@ export class QueueMetrics {
     });
     this.claimDuration = new Histogram({
       name: 'flowforge_job_claim_duration_seconds',
-      help: 'Time one claim takes (promotion, candidate selection, attempts)',
+      help: 'Time one claim takes (promotion, tenant and job selection)',
       buckets: [
         0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5,
       ],
       registers,
     });
-    this.claimContention = new Counter({
-      name: 'flowforge_job_claim_contention_total',
-      help: 'Claim attempts that yielded no job because of concurrency (stale candidate, lock timeout, usage repair)',
-      labelNames: ['reason'],
+    this.claimUsageRepairs = new Counter({
+      name: 'flowforge_claim_usage_repairs_total',
+      help: 'Tenant usage rows recomputed by a claim because they disagreed with the jobs',
       registers,
     });
     this.stepDuration = new Histogram({

@@ -14,11 +14,24 @@ import { TenantIsolation1795100000000 } from './1795100000000-TenantIsolation';
 import { TenantUsage1795200000000 } from './1795200000000-TenantUsage';
 import { TenantLimits1795300000000 } from './1795300000000-TenantLimits';
 
+import { TenantQuotaConsistency1795400000000 } from './1795400000000-TenantQuotaConsistency';
+
+import { ScheduledTenants1795500000000 } from './1795500000000-ScheduledTenants';
+
+import { ScheduledOccurrences1795600000000 } from './1795600000000-ScheduledOccurrences';
+
+import { JobUsageTransitions1795700000000 } from './1795700000000-JobUsageTransitions';
+import { FairPromotion1795800000000 } from './1795800000000-FairPromotion';
+import { ClaimBusyReport1795900000000 } from './1795900000000-ClaimBusyReport';
+import { RateLimitLockTime1795910000000 } from './1795910000000-RateLimitLockTime';
+
 /**
  * Явний перелік міграцій у порядку застосування. Без glob-шаблонів, щоб однаково
  * працювати з dist (CLI, docker) і з ts-jest (інтеграційні тести).
  * Нову міграцію після `migration:generate` треба додати сюди.
  */
+import { RateLimitInsertTime1795920000000 } from './1795920000000-RateLimitInsertTime';
+
 export const MIGRATIONS = [
   InitialSchema1794920217603,
   AddCorrelationId1794920232623,
@@ -35,4 +48,12 @@ export const MIGRATIONS = [
   TenantIsolation1795100000000,
   TenantUsage1795200000000,
   TenantLimits1795300000000,
+  TenantQuotaConsistency1795400000000,
+  ScheduledTenants1795500000000,
+  ScheduledOccurrences1795600000000,
+  JobUsageTransitions1795700000000,
+  FairPromotion1795800000000,
+  ClaimBusyReport1795900000000,
+  RateLimitLockTime1795910000000,
+  RateLimitInsertTime1795920000000,
 ];

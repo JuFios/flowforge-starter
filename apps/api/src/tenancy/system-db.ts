@@ -1,8 +1,12 @@
 import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
+import { Job } from '../entities';
 
-/** Розмір сторінки планувальника (`scheduled_workflows`); функція сама обмежує його 1000. */
+/** Найдовше читання глибини черги для метрик, мс (або менше — за statement_timeout сесії). */
+const QUEUE_DEPTH_TIMEOUT_MS = 2_000;
+
+/** Розмір сторінки планувальника (`scheduled_tenants`); функція сама обмежує його 1000. */
 export const SCHEDULE_PAGE = 500;
 
 /**
@@ -43,20 +47,52 @@ export class SystemDb {
     ]);
   }
 
-  /** Просуває дозрілих тенантів до індексу готових (пачка, SKIP LOCKED); кількість просунутих. */
-  async promoteReadyTenants(batch: number): Promise<number> {
-    const [row]: Array<{ promoted: number }> = await this.ds.query(
-      'SELECT promote_ready_tenants($1) AS promoted',
-      [batch],
+  /**
+   * Справедливе захоплення однієї задачі (`claim_job`, README, 3.3.5): задача (або null), скільки
+   * рядків обліку перераховано, і чи були всі кандидати зайняті іншими захопленнями.
+   */
+  async claimJob(
+    workerId: string,
+    leaseMs: number,
+  ): Promise<{
+    job: (Job & { claimedAt: Date }) | null;
+    repaired: number;
+    busy: boolean;
+  }> {
+    const [row]: Array<
+      Job & { claimedAt: Date | null; repaired: number; busy: boolean }
+    > = await this.ds.query(
+      `SELECT (r.job).*, r."claimedAt", r.repaired, r.busy FROM claim_job($1, $2) r`,
+      [workerId, leaseMs],
     );
-    return row.promoted;
+    const { repaired, busy, ...job } = row;
+    return {
+      job: job.id ? (job as Job & { claimedAt: Date }) : null,
+      repaired,
+      busy,
+    };
   }
 
-  /** Глибина черги кожного тенанта з незавершеними задачами (з обліку, без сканування задач). */
+  /**
+   * Глибина черги кожного тенанта з незавершеними задачами (з обліку, без сканування задач). Межа
+   * часу — менша з QUEUE_DEPTH_TIMEOUT_MS і statement_timeout сесії (0 — без межі): скрейп метрик не
+   * чекає на БД довше, а коротший DB_STATEMENT_TIMEOUT_MS діє й тут (сервер скасовує запит раніше за
+   * клієнтський query_timeout).
+   */
   queueDepthByTenant(): Promise<
     Array<{ tenantId: string; queued: number; running: number }>
   > {
-    return this.ds.query('SELECT * FROM queue_depth_by_tenant()');
+    return this.ds.transaction(async (em) => {
+      await em.query(
+        `SELECT pg_catalog.set_config('statement_timeout',
+                  (CASE WHEN s.setting::int = 0 THEN $1 ELSE least(s.setting::int, $1) END)::text, true)
+           FROM pg_catalog.pg_settings s WHERE s.name = 'statement_timeout'`,
+        [QUEUE_DEPTH_TIMEOUT_MS],
+      );
+      return em.query<
+        Array<{ tenantId: string; queued: number; running: number }>
+      >('SELECT * FROM queue_depth_by_tenant()');
+    });
   }
 
   /** Тенанти з простроченими lease, крім `exclude` (уже оброблені в цьому проході). */

@@ -1,16 +1,19 @@
 import { DataSource } from 'typeorm';
 import {
-  CLAIM_CANDIDATE_SQL,
   EXPIRED_LEASES_SQL,
+  FINISH_EXECUTION_SQL,
   FINISHED_JOBS_SQL,
   PURGE_EXECUTIONS_SQL,
   PURGE_FINISHED_SQL,
 } from '../../src/engine/job-queue.service';
 import { openTestDataSource, truncateAll } from '../helpers/db';
+import { testApiDatabaseUrl, testWorkerDatabaseUrl } from '../helpers/test-env';
 
 interface PlanNode {
   'Node Type': string;
   'Index Name'?: string;
+  'Relation Name'?: string;
+  'Index Cond'?: string;
   'Shared Hit Blocks'?: number;
   'Shared Read Blocks'?: number;
   Plans?: PlanNode[];
@@ -102,12 +105,6 @@ describe('query plans of the queue use their indexes', () => {
 
   it.each([
     [
-      'claiming the next ready job of the chosen tenant',
-      CLAIM_CANDIDATE_SQL,
-      ['00000000-0000-4000-8000-000000000000'],
-      'IDX_jobs_tenant_queue',
-    ],
-    [
       'finding expired leases of a tenant',
       EXPIRED_LEASES_SQL,
       ['00000000-0000-4000-8000-000000000000'],
@@ -164,7 +161,90 @@ describe('query plans of the queue use their indexes', () => {
     expect(indexesIn(root)).toContain(index);
     expect(hasSeqScan(root)).toBe(false);
   });
+
+  it('finishes by execution ID under the worker role without reading tenant history', async () => {
+    const [job]: Array<{ id: string; tenantId: string; executionId: string }> =
+      await ds.query('SELECT id, "tenantId", "executionId" FROM jobs LIMIT 1');
+    const worker = await new DataSource({
+      type: 'postgres',
+      url: testWorkerDatabaseUrl(),
+    }).initialize();
+    try {
+      const tree = await worker.transaction(async (em) => {
+        await em.query("SELECT set_config('app.tenant_id', $1, true)", [
+          job.tenantId,
+        ]);
+        const [row]: Array<{ 'QUERY PLAN': Array<{ Plan: PlanNode }> }> =
+          await em.query(`EXPLAIN (FORMAT JSON) ${FINISH_EXECUTION_SQL}`, [
+            job.id,
+            job.tenantId,
+            job.id,
+            job.executionId,
+            'true',
+          ]);
+        return row['QUERY PLAN'][0].Plan;
+      });
+      const reads = nodes(tree).filter(
+        (n) =>
+          n['Relation Name'] === 'executions' &&
+          n['Node Type'].includes('Scan'),
+      );
+      expect(reads).toHaveLength(1);
+      expect(reads[0]['Index Cond']).toContain(job.executionId);
+    } finally {
+      await worker.destroy();
+    }
+  });
+
+  it('lists the executions of a tenant through its index under the API role and RLS', async () => {
+    // Як ExecutionsService.list: роль API, контекст тенанта, предикат tenantId, найновіші першими.
+    const [{ id }]: Array<{ id: string }> = await ds.query(
+      `SELECT id FROM tenants ORDER BY id LIMIT 1`,
+    );
+    const api = await new DataSource({
+      type: 'postgres',
+      url: testApiDatabaseUrl(),
+    }).initialize();
+    try {
+      const root = await api.transaction(async (em) => {
+        await em.query(`SELECT set_config('app.tenant_id', $1, true)`, [id]);
+        const [row]: Array<{ 'QUERY PLAN': Array<{ Plan: PlanNode }> }> =
+          await em.query(
+            `EXPLAIN (FORMAT JSON) SELECT * FROM executions
+              WHERE "tenantId" = $1 ORDER BY "createdAt" DESC LIMIT 50`,
+            [id],
+          );
+        return row['QUERY PLAN'][0].Plan;
+      });
+      // Індекс executions ("tenantId", "createdAt") зі стартового коду (ім'я згенероване TypeORM).
+      expect(indexesIn(root)).toContain('IDX_5b883cccfe558d00b8a9319d93');
+      expect(hasSeqScan(root)).toBe(false);
+    } finally {
+      await api.destroy();
+    }
+  });
+
+  it('claims the next ready job of the chosen tenant through its queue index', async () => {
+    // Той самий запит, що виконує claim_job (з каталогу), з тенантом як параметром.
+    const body = await functionBody(ds, 'claim_job', {});
+    const select = /SELECT q\.id FROM public\.jobs q[\s\S]*?SKIP LOCKED/
+      .exec(body)![0]
+      .replace('q."tenantId" = t', 'q."tenantId" = $1');
+    const root = await ds.transaction(async (em) => {
+      const [row]: Array<{ 'QUERY PLAN': Array<{ Plan: PlanNode }> }> =
+        await em.query(`EXPLAIN (FORMAT JSON) ${select}`, [
+          '00000000-0000-4000-8000-000000000000',
+        ]);
+      return row['QUERY PLAN'][0].Plan;
+    });
+    expect(indexesIn(root)).toContain('IDX_jobs_tenant_queue');
+    expect(hasSeqScan(root)).toBe(false);
+  });
 });
+
+/** Вибір пачки дозрілих тенантів для промоції з тіла claim_job (далі — UPDATE за їхніми id). */
+const PROMOTE_SELECT =
+  /SELECT m\."tenantId" FROM public\.tenant_usage m[\s\S]*?SKIP LOCKED/;
 
 /**
  * Вибір кандидата на захоплення (README, 3.3.5) на 2000 тенантах: готові, насичені з різними
@@ -179,7 +259,7 @@ describe('choosing a claim candidate among 2000 tenants', () => {
     ds = await openTestDataSource();
     await truncateAll(ds);
     // n 1..1000 — готові (0–2 у роботі), 1001..1400 — насичені (ліміт 1..5), 1401..1700 — лише
-    // майбутні задачі, 1701..1750 — дозрілі, але промоція їх ще не обробила, решта — порожні.
+    // майбутні задачі, 1701..1720 — дозрілі, але промоція їх ще не обробила, решта — порожні.
     await ds.query(`
       INSERT INTO tenants (name, "apiKeyHash", "webhookSecret", "maxConcurrentExecutions")
       SELECT 'c-' || g, md5('key-' || g) || md5('hash-' || g), 'secret',
@@ -197,7 +277,7 @@ describe('choosing a claim candidate among 2000 tenants', () => {
           SELECT 'queued' AS status, now() - make_interval(mins => g) AS run_at
             FROM generate_series(1, CASE WHEN t.n <= 1000 THEN 1 + t.n % 3
                                          WHEN t.n <= 1400 THEN 2
-                                         WHEN t.n BETWEEN 1701 AND 1750 THEN 1 ELSE 0 END) g
+                                         WHEN t.n BETWEEN 1701 AND 1720 THEN 1 ELSE 0 END) g
           UNION ALL
           SELECT 'queued', now() + interval '1 hour'
             FROM generate_series(1, CASE WHEN t.n BETWEEN 1401 AND 1700 THEN 1 ELSE 0 END)
@@ -215,7 +295,7 @@ describe('choosing a claim candidate among 2000 tenants', () => {
     // Відставання промоції: тенанти з настилою задачею, яких промоція ще не просунула.
     await ds.query(`
       UPDATE tenant_usage u SET ready = false FROM tenants t
-       WHERE t.id = u."tenantId" AND split_part(t.name, '-', 2)::int BETWEEN 1701 AND 1750`);
+       WHERE t.id = u."tenantId" AND split_part(t.name, '-', 2)::int BETWEEN 1701 AND 1720`);
     await ds.query(`ANALYZE tenant_usage`);
     await ds.query(`ANALYZE jobs`);
   });
@@ -225,58 +305,99 @@ describe('choosing a claim candidate among 2000 tenants', () => {
     await ds.destroy();
   });
 
-  it('reads the candidate from the partial indexes within 5 ms and 64 buffers', async () => {
-    const sql = await functionBody(ds, 'claim_candidate', {
-      p_exclude: '$1::uuid[]',
-    });
-    const [row]: Array<{
-      'QUERY PLAN': Array<{ Plan: PlanNode; 'Execution Time': number }>;
-    }> = await ds.query(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${sql}`, [[]]);
-    const { Plan: root, 'Execution Time': ms } = row['QUERY PLAN'][0];
+  /** EXPLAIN оператора з тіла claim_job у транзакції, що відкочується (оператори блокують). */
+  async function explainInClaim(
+    pattern: RegExp,
+    replacements: Record<string, string>,
+    options = 'ANALYZE, BUFFERS, FORMAT JSON',
+  ): Promise<{ root: PlanNode; ms: number }> {
+    const body = await functionBody(ds, 'claim_job', {});
+    const statement = Object.entries(replacements).reduce(
+      (sql, [from, to]) => sql.replace(from, to),
+      pattern.exec(body)![0].replace(/;$/, ''),
+    );
+    const runner = ds.createQueryRunner();
+    await runner.connect();
+    await runner.startTransaction();
+    try {
+      const [row] = (await runner.query(
+        `EXPLAIN (${options}) ${statement}`,
+      )) as Array<{
+        'QUERY PLAN': Array<{ Plan: PlanNode; 'Execution Time': number }>;
+      }>;
+      return {
+        root: row['QUERY PLAN'][0].Plan,
+        ms: row['QUERY PLAN'][0]['Execution Time'],
+      };
+    } finally {
+      await runner.rollbackTransaction();
+      await runner.release();
+    }
+  }
+
+  it('reads the candidate from the partial index in key order within 5 ms and 64 buffers', async () => {
+    const { root, ms } = await explainInClaim(
+      /SELECT u\."tenantId" INTO t FROM public\.tenant_usage u[\s\S]*?SKIP LOCKED/,
+      { ' INTO t': '', 'ALL (tried)': "ALL ('{}'::uuid[])" },
+    );
+    expect(indexesIn(root)).toContain('IDX_tenant_usage_claim');
     expect(hasSeqScan(root)).toBe(false);
-    const branches = nodes(root).find(
-      (n) => n['Node Type'] === 'Append',
-    )!.Plans!;
-    const ready = branches.find((b) =>
-      indexesIn(b).includes('IDX_tenant_usage_claim'),
-    )!;
-    expect(ready).toBeDefined();
-    expect(nodes(ready).some((n) => n['Node Type'] === 'Sort')).toBe(false);
-    expect(
-      branches.some((b) => indexesIn(b).includes('IDX_tenant_usage_maturing')),
-    ).toBe(true);
+    expect(nodes(root).some((n) => n['Node Type'] === 'Sort')).toBe(false);
     expect(ms).toBeLessThanOrEqual(5);
     expect(
       (root['Shared Hit Blocks'] ?? 0) + (root['Shared Read Blocks'] ?? 0),
     ).toBeLessThanOrEqual(64);
   });
 
-  it('returns the best eligible tenant by (running, last claim, id), promoted or not', async () => {
+  it('promotes matured tenants through the maturing index, without a sequential scan', async () => {
+    const { root } = await explainInClaim(PROMOTE_SELECT, {});
+    expect(indexesIn(root)).toContain('IDX_tenant_usage_maturing');
+    expect(hasSeqScan(root)).toBe(false);
+    expect(
+      nodes(root).find((n) => n['Index Name'] === 'IDX_tenant_usage_maturing'),
+    ).toHaveProperty('Index Cond', expect.stringContaining('nextRunAt'));
+  });
+
+  it('claims for the best eligible tenant by (running, last claim, id), including just matured ones', async () => {
     const [best]: Array<{ tenantId: string }> = await ds.query(`
       SELECT "tenantId" FROM tenant_usage
        WHERE "nextRunAt" <= clock_timestamp() AND running < "maxRunning"
        ORDER BY running, "lastClaimedAt", "tenantId" LIMIT 1`);
-    const [chosen]: Array<{ tenantId: string }> = await ds.query(
-      `SELECT "tenantId" FROM claim_candidate('{}')`,
-    );
-    expect(chosen.tenantId).toBe(best.tenantId);
+    const runner = ds.createQueryRunner();
+    await runner.connect();
+    await runner.startTransaction();
+    try {
+      const [claimed] = (await runner.query(
+        `SELECT (r.job)."tenantId" FROM claim_job('plan', 1000) r`,
+      )) as Array<{ tenantId: string }>;
+      expect(claimed.tenantId).toBe(best.tenantId);
+    } finally {
+      await runner.rollbackTransaction();
+      await runner.release();
+    }
   });
-
-  it('promotes matured tenants through the maturing index, without a sequential scan', async () => {
-    const body = await functionBody(ds, 'promote_ready_tenants', {
-      p_batch: '100',
-    });
-    const update = /UPDATE public\.tenant_usage[\s\S]*?;/.exec(body)![0];
-    const root = await ds.transaction(async (em) => {
+  it('bounds idle promotion with 25000 tenants scheduled in the future', async () => {
+    const body = await functionBody(ds, 'claim_job', {});
+    const promote = PROMOTE_SELECT.exec(body)![0];
+    await ds.transaction(async (em) => {
+      await em.query(`INSERT INTO tenants(name,"apiKeyHash","webhookSecret")
+        SELECT 'future-'||g, 'future-'||g, 'fixture' FROM generate_series(1,25000) g`);
+      await em.query(
+        `UPDATE tenant_usage SET ready=false,"nextRunAt"=now()+interval '1 day'`,
+      );
+      await em.query('ANALYZE tenant_usage');
       const [row]: Array<{ 'QUERY PLAN': Array<{ Plan: PlanNode }> }> =
-        await em.query(`EXPLAIN (ANALYZE, FORMAT JSON) ${update.slice(0, -1)}`);
-      // Лише план: зміни відкочуються.
-      await em.query('ROLLBACK');
-      await em.query('BEGIN');
-      return row['QUERY PLAN'][0].Plan;
+        await em.query('EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ' + promote);
+      const root = row['QUERY PLAN'][0].Plan;
+      expect(
+        nodes(root).find(
+          (n) => n['Index Name'] === 'IDX_tenant_usage_maturing',
+        ),
+      ).toHaveProperty('Index Cond', expect.stringContaining('nextRunAt'));
+      expect(
+        (root['Shared Hit Blocks'] ?? 0) + (root['Shared Read Blocks'] ?? 0),
+      ).toBeLessThan(64);
     });
-    expect(indexesIn(root)).toContain('IDX_tenant_usage_maturing');
-    expect(hasSeqScan(root)).toBe(false);
   });
 });
 
@@ -308,6 +429,11 @@ describe('purging rate limit buckets', () => {
       await ds.query(`EXPLAIN (FORMAT JSON) ${select}`);
     const root = row['QUERY PLAN'][0].Plan;
     expect(indexesIn(root)).toContain('IDX_rate_limit_buckets_reset');
+    expect(
+      nodes(root).find(
+        (n) => n['Index Name'] === 'IDX_rate_limit_buckets_reset',
+      ),
+    ).toHaveProperty('Index Cond', expect.stringContaining('resetAt'));
     expect(hasSeqScan(root)).toBe(false);
   });
 });

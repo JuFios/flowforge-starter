@@ -88,12 +88,12 @@ describe('background error logs keep the correlation context', () => {
     const seen: Array<string | undefined> = [];
     const wf = { id: 'wf-1', cron: '* * * * * *' } as Workflow;
     const system = {
-      scheduledWorkflows: (after: string | null) =>
+      scheduledTenants: (after: string | null) =>
         Promise.resolve(after ? [] : [{ id: wf.id, tenantId: wf.tenantId }]),
     } as unknown as SystemDb;
-    const db = fakeTenantDb({ findOne: () => Promise.resolve(wf) } as never);
+    const db = fakeTenantDb({ find: () => Promise.resolve([wf]) } as never);
     const executions = {
-      enqueue: () => {
+      enqueueScheduled: () => {
         seen.push(getCorrelationId());
         return Promise.reject(new Error('db down'));
       },

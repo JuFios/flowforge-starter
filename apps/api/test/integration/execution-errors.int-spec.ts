@@ -28,6 +28,7 @@ describe('execution errors shown to the tenant', () => {
         IF NEW.status = 'succeeded' THEN RAISE EXCEPTION '${INTERNAL}'; END IF;
         RETURN NEW;
       END $$ LANGUAGE plpgsql`);
+    await ds.query(`REVOKE ALL ON FUNCTION test_fail_checkpoint() FROM PUBLIC`);
   });
 
   beforeEach(async () => {

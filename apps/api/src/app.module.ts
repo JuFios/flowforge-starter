@@ -15,6 +15,7 @@ import {
 import { CheckpointService } from './engine/checkpoint.service';
 import { JobQueueService } from './engine/job-queue.service';
 import { JobRunnerService } from './engine/job-runner.service';
+import { QueueDepthMetrics } from './engine/queue-depth.metrics';
 import { QueueMetrics } from './engine/queue.metrics';
 import { StepExecutor } from './engine/step-executor';
 import { ExecutionsController } from './executions/executions.controller';
@@ -104,6 +105,7 @@ export class AppModule {}
     JobRunnerService,
     StepExecutor,
     QueueMetrics,
+    QueueDepthMetrics,
   ],
 })
 export class WorkerModule {}

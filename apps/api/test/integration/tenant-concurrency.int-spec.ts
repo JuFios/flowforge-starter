@@ -68,12 +68,21 @@ describe('tenant concurrent executions limit', () => {
     return row.n;
   }
 
-  it('claims exactly the limit out of 50 concurrent claims', async () => {
+  it('claims exactly the limit with 50 concurrent claim loops', async () => {
     const t = await tenantWithJobs(3, 100);
+    // Як цикли воркера: зайняті кандидати (undefined) — нова спроба, порожня черга (null) — кінець.
     const claimed = await Promise.all(
-      Array.from({ length: 50 }, (_, i) => queue.claimNext(`c-${i}`)),
+      Array.from({ length: 50 }, async (_, i) => {
+        let mine = 0;
+        for (;;) {
+          const job = await queue.claimNext(`c-${i}`);
+          if (job === null) return mine;
+          if (job) mine++;
+          else await sleep(5);
+        }
+      }),
     );
-    expect(claimed.filter(Boolean)).toHaveLength(3);
+    expect(claimed.reduce((a, b) => a + b, 0)).toBe(3);
     expect(await running(t)).toBe(3);
   });
 

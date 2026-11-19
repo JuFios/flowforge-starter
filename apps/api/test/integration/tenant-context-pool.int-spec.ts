@@ -106,6 +106,26 @@ describe('tenant context and the connection pool', () => {
     ).rejects.toThrow('a transaction cannot switch tenants');
   });
 
+  it('binds the tenant before concurrent enter calls can race', async () => {
+    const other = (await createTenant(owner, 'other')).tenant.id;
+    await db.transaction(async (tx) => {
+      const results = await Promise.allSettled([
+        tx.enter(tenantId),
+        tx.enter(other),
+        tx.enter(tenantId),
+      ]);
+      expect(results.map((r) => r.status)).toEqual([
+        'fulfilled',
+        'rejected',
+        'fulfilled',
+      ]);
+      expect(await tx.em.query('SELECT id FROM tenants')).toEqual([
+        { id: tenantId },
+      ]);
+    });
+    await expectClean();
+  });
+
   it('refuses a tenant id that is not a UUID before touching the database', async () => {
     await expect(
       db.run("x'); RESET ALL; --", (em) => em.query(`SELECT 1`)),

@@ -12,8 +12,8 @@ import {
 import { sleep } from '../helpers/queue';
 
 /**
- * Захоплення, коли рядок обліку тенанта тримають ненормально довго (lock_timeout) або облік
- * розійшовся із задачами (самовідновлення): воркер не зависає й не падає, а обслуговує інших.
+ * Захоплення, коли рядок обліку тенанта тримають ненормально довго або облік розійшовся із
+ * задачами (самовідновлення): воркер не зависає й не падає, а обслуговує інших.
  */
 describe('claiming under contention on the usage row', () => {
   let owner: DataSource;
@@ -30,7 +30,7 @@ describe('claiming under contention on the usage row', () => {
 
   beforeEach(async () => {
     await truncateAll(owner);
-    metrics.claimContention.reset();
+    metrics.claimUsageRepairs.reset();
   });
 
   afterAll(async () => {
@@ -38,11 +38,6 @@ describe('claiming under contention on the usage row', () => {
     await truncateAll(owner);
     await owner.destroy();
   });
-
-  async function contention(reason: string): Promise<number> {
-    const { values } = await metrics.claimContention.get();
-    return values.find((v) => v.labels.reason === reason)?.value ?? 0;
-  }
 
   /** Тенант із `jobs` готовими задачами, що настали `ageSeconds` тому. */
   async function tenantWithJobs(
@@ -63,36 +58,40 @@ describe('claiming under contention on the usage row', () => {
     return tenant.id;
   }
 
-  it('serves another tenant when the row of the best candidate stays locked past lock_timeout, then returns to it', async () => {
-    const b = await tenantWithJobs('b', 3, 100);
-    const a = await tenantWithJobs('a', 3, 50);
-    // Довга транзакція тримає рядок B (найкращий кандидат) 3 с — довше за lock_timeout (2 с).
+  /** Паралельна транзакція тримає рядок обліку тенанта `ms` мілісекунд. */
+  async function holdUsageRow(
+    tenantId: string,
+    ms: number,
+  ): Promise<{ released: Promise<void> }> {
     const runner = owner.createQueryRunner();
     await runner.connect();
     await runner.startTransaction();
     await runner.query(
       `SELECT 1 FROM tenant_usage WHERE "tenantId" = $1 FOR UPDATE`,
-      [b],
+      [tenantId],
     );
-    const held = (async () => {
+    const released = (async () => {
       try {
-        await sleep(3_000);
+        await sleep(ms);
         await runner.commitTransaction();
       } finally {
         await runner.release();
       }
     })();
+    return { released };
+  }
+
+  it('answers busy at once, not empty and not an error, while every candidate is held, and claims after release', async () => {
+    const only = await tenantWithJobs('only', 3, 10);
+    // Довга транзакція тримає рядок єдиного кандидата.
+    const { released } = await holdUsageRow(only, 1_000);
     const started = performance.now();
     const job = await queue.claimNext('contention');
-    const waited = performance.now() - started;
-    await held;
-    // Не помилка захоплення і не 10 очікувань по 2 с: одне очікування, далі — інший тенант.
-    expect(job!.tenantId).toBe(a);
-    expect(waited).toBeGreaterThanOrEqual(1_900);
-    expect(waited).toBeLessThan(2_900);
-    expect(await contention('lock_timeout')).toBe(1);
-    // Рядок звільнено: B знову кандидат (менше обслуговувань за A).
-    expect((await queue.claimNext('contention'))!.tenantId).toBe(b);
+    // undefined — «кандидати зайняті, спробуй знову», без очікування блокування.
+    expect(job).toBeUndefined();
+    expect(performance.now() - started).toBeLessThan(150);
+    await released;
+    expect((await queue.claimNext('contention'))!.tenantId).toBe(only);
   });
 
   it('repairs usage that claims ready jobs which do not exist, and claims the next tenant', async () => {
@@ -108,7 +107,7 @@ describe('claiming under contention on the usage row', () => {
     );
     const job = await queue.claimNext('repair');
     expect(job!.tenantId).toBe(real);
-    expect(await contention('repair')).toBe(1);
+    expect((await metrics.claimUsageRepairs.get()).values[0].value).toBe(1);
     const [row]: Array<{
       queued: number;
       running: number;

@@ -11,30 +11,41 @@ import { fakeTenantDb } from '../helpers/fake-tenant-db';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+function signal() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
 /**
  * Коли БД недоступна, захоплення падає в кожному циклі воркера. Воркер має відступати
  * експоненційно й спільно для всіх циклів, а не стукати в БД і писати в лог щосекунди з кожного.
  */
 describe('worker backs off when claiming jobs fails', () => {
   const CONCURRENCY = 16;
-  let errors: string[];
-  let infos: string[];
+  let errorLog: jest.SpiedFunction<Logger['error']>;
+  let infoLog: jest.SpiedFunction<Logger['log']>;
   let runner: JobRunnerService | undefined;
+  let releaseClaims: (() => void) | undefined;
 
   beforeEach(() => {
-    errors = [];
-    infos = [];
-    const capture = (into: string[]) => (message: unknown, text?: unknown) => {
-      into.push(String(text ?? message));
-    };
-    jest.spyOn(Logger.prototype, 'error').mockImplementation(capture(errors));
-    jest.spyOn(Logger.prototype, 'warn').mockImplementation(capture(errors));
-    jest.spyOn(Logger.prototype, 'log').mockImplementation(capture(infos));
+    errorLog = jest
+      .spyOn(Logger.prototype, 'error')
+      .mockImplementation(() => undefined);
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    infoLog = jest
+      .spyOn(Logger.prototype, 'log')
+      .mockImplementation(() => undefined);
   });
 
   afterEach(async () => {
-    await runner?.beforeApplicationShutdown();
+    const shutdown = runner?.beforeApplicationShutdown();
+    releaseClaims?.();
+    await shutdown;
     runner = undefined;
+    releaseClaims = undefined;
     jest.restoreAllMocks();
   });
 
@@ -82,34 +93,60 @@ describe('worker backs off when claiming jobs fails', () => {
     );
 
   it('probes the database with one loop at a growing interval and logs once per probe', async () => {
-    const claimNext = jest.fn(outage);
+    const secondProbe = signal();
+    const started: number[] = [];
+    jest.spyOn(Math, 'random').mockReturnValue(0.25);
+    const claimNext = jest.fn(() => {
+      started.push(Date.now());
+      if (started.length === CONCURRENCY + 2) secondProbe.resolve();
+      return outage();
+    });
     startRunner(claimNext);
-    await sleep(3_500);
+    await secondProbe.promise;
 
-    const failures = errors.filter((e) => e === 'job claim failed');
-    // Без backoff: кожен із 16 циклів щосекунди — ~56 спроб і ~56 рядків логу за 3,5 с.
-    // З backoff (1 с, потім до 2 с, …): перший залп усіх циклів і не більше 3 перевірок.
-    expect(claimNext.mock.calls.length).toBeLessThanOrEqual(CONCURRENCY + 3);
-    expect(failures.length).toBeGreaterThanOrEqual(1);
-    expect(failures.length).toBeLessThanOrEqual(3);
-    // Метрика рахує кожну невдалу спробу, хоча лог стримано.
-    expect(metrics.claimFailures.inc).toHaveBeenCalledTimes(
-      claimNext.mock.calls.length,
+    // Остання перевірка вже почалася, але БД ще не відповіла.
+    expect(metrics.claimFailures.inc).toHaveBeenCalledTimes(CONCURRENCY + 1);
+    await runner?.beforeApplicationShutdown();
+    expect(claimNext).toHaveBeenCalledTimes(CONCURRENCY + 2);
+    expect(metrics.claimFailures.inc).toHaveBeenCalledTimes(CONCURRENCY + 2);
+    const failureLogs = errorLog.mock.calls.filter(
+      ([, text]) => text === 'job claim failed',
     );
-  });
+    expect(failureLogs).toMatchObject(
+      [1250, 1750, 2750].map((retryInMs) => [
+        { retryInMs },
+        'job claim failed',
+      ]),
+    );
+    // За фіксованого jitter 0,25 — відступ 1250 мс після першого залпу та 1750 мс після першої перевірки.
+    expect(started[CONCURRENCY] - started[0]).toBeGreaterThanOrEqual(1250);
+    expect(
+      started[CONCURRENCY + 1] - started[CONCURRENCY],
+    ).toBeGreaterThanOrEqual(1750);
+  }, 15_000);
 
   it('resumes claiming in every loop once the database is back', async () => {
-    let down = true;
-    const claimNext = jest.fn(() => (down ? outage() : Promise.resolve(null)));
+    const allPolling = signal();
+    const response = signal();
+    releaseClaims = response.resolve;
+    let started = 0;
+    const claimNext = jest.fn(async () => {
+      started++;
+      if (started <= CONCURRENCY) return outage();
+      if (started === CONCURRENCY + 1) return null;
+      // Утримуємо по одному запиту від кожного циклу після успішної перевірки БД.
+      if (started === 2 * CONCURRENCY + 1) allPolling.resolve();
+      await response.promise;
+      return null;
+    });
     startRunner(claimNext);
-    await sleep(500);
-    down = false;
-    const before = claimNext.mock.calls.length;
-    // Наступна перевірка — щонайпізніше через 2 с (перший інтервал backoff).
-    await sleep(2_500);
+    await allPolling.promise;
 
-    expect(infos).toContain('job claim recovered');
-    // Опитування порожньої черги кожні ~10 мс у кожному з 16 циклів.
-    expect(claimNext.mock.calls.length - before).toBeGreaterThan(100);
-  });
+    const recovered = infoLog.mock.calls.filter(
+      ([, text]) => text === 'job claim recovered',
+    );
+    expect(recovered).toHaveLength(1);
+    expect(metrics.claimFailures.inc).toHaveBeenCalledTimes(CONCURRENCY);
+    expect(claimNext).toHaveBeenCalledTimes(2 * CONCURRENCY + 1);
+  }, 15_000);
 });

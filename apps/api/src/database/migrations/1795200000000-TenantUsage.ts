@@ -6,98 +6,156 @@ import {
 } from '../../tenancy/limits';
 import { API_ROLE, SYSTEM_ROLE, WORKER_ROLE } from '../../tenancy/roles';
 
+/** Скільки дозрілих тенантів одне захоплення переводить до індексу готових. */
+const PROMOTE_BATCH = 32;
+/** Скільки тенантів-кандидатів без готової задачі одне захоплення пропускає, перш ніж здатися. */
+const CLAIM_TENANTS = 10;
+
 /** Спільні атрибути SECURITY DEFINER-функцій: pg_temp — явно останнім (документація Postgres). */
 const DEFINER = `SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp`;
+
+export function claimJobSql(bounded: boolean): string {
+  const eligible = bounded ? 'AND m.running < m."maxRunning"' : '';
+  const dueTime = bounded
+    ? 'pg_catalog.statement_timestamp()'
+    : 'pg_catalog.clock_timestamp()';
+  return `CREATE FUNCTION public.claim_job(p_worker text, p_lease_ms integer)
+        RETURNS SETOF public.claimed_job
+        LANGUAGE plpgsql VOLATILE ${DEFINER} AS $$
+        DECLARE
+          t uuid;
+          j public.jobs;
+          tried uuid[] := '{}';
+          repaired integer := 0;
+          lease interval;
+        BEGIN
+          IF p_worker IS NULL OR pg_catalog.length(p_worker) NOT BETWEEN 1 AND 200
+             OR p_lease_ms IS NULL OR p_lease_ms NOT BETWEEN 100 AND 3600000 THEN
+            RAISE EXCEPTION 'invalid claim arguments';
+          END IF;
+          lease := pg_catalog.make_interval(secs => p_lease_ms / 1000.0);
+
+          UPDATE public.tenant_usage u SET ready = true
+           WHERE u."tenantId" ${bounded ? '= ANY (ARRAY(' : 'IN ('}
+                   SELECT m."tenantId" FROM public.tenant_usage m
+                    WHERE NOT m.ready ${eligible} AND m."nextRunAt" <= ${dueTime}
+                    ORDER BY m."nextRunAt"
+                    LIMIT ${PROMOTE_BATCH}
+                    FOR UPDATE SKIP LOCKED)${bounded ? ')' : ''}
+             AND NOT u.ready AND u."nextRunAt" <= ${dueTime};
+
+          FOR attempt IN 1..${CLAIM_TENANTS} LOOP
+            SELECT u."tenantId" INTO t FROM public.tenant_usage u
+             WHERE u.ready AND u.running < u."maxRunning" AND u."tenantId" <> ALL (tried)
+             ORDER BY u.running, u."lastClaimedAt", u."tenantId"
+             LIMIT 1
+             FOR UPDATE SKIP LOCKED;
+            IF t IS NULL THEN
+              -- Кандидати є, але всіх саме захоплюють інші (або тримають їхні транзакції): busy —
+              -- воркер повторить за мить, не чекаючи на рядок (захоплення ніколи не стоять у черзі
+              -- блокувань — завершення задач тенанта не чекають за ними).
+              RETURN QUERY SELECT NULL::public.jobs, NULL::timestamptz, repaired,
+                EXISTS (SELECT 1 FROM public.tenant_usage u
+                         WHERE u.ready AND u.running < u."maxRunning"
+                           AND u."tenantId" <> ALL (tried));
+              RETURN;
+            END IF;
+
+            UPDATE public.jobs
+               SET status = 'running', "lockedBy" = p_worker,
+                   "lockToken" = pg_catalog.gen_random_uuid(),
+                   "lockedUntil" = pg_catalog.clock_timestamp() + lease,
+                   attempts = attempts + 1
+             WHERE id = (SELECT q.id FROM public.jobs q
+                          WHERE q."tenantId" = t AND q.status = 'queued'
+                            AND q."runAt" <= ${dueTime}
+                          ORDER BY q."runAt"
+                          LIMIT 1
+                          FOR UPDATE SKIP LOCKED)
+               AND "tenantId" = t
+            RETURNING * INTO j;
+            IF FOUND THEN
+              RETURN QUERY SELECT j, pg_catalog.clock_timestamp(), repaired, false;
+              RETURN;
+            END IF;
+            -- Готових задач немає зовсім (а не лише зайнятих): облік розійшовся — перерахувати.
+            IF NOT EXISTS (SELECT 1 FROM public.jobs q
+                            WHERE q."tenantId" = t AND q.status = 'queued'
+                              AND q."runAt" <= ${dueTime}) THEN
+              UPDATE public.tenant_usage u
+                 SET queued = a.queued, running = a.running, "nextRunAt" = a.next,
+                     ready = COALESCE(a.next <= ${dueTime}, false)
+                FROM (SELECT count(*) FILTER (WHERE q.status = 'queued')::int AS queued,
+                             count(*) FILTER (WHERE q.status = 'running')::int AS running,
+                             min(q."runAt") FILTER (WHERE q.status = 'queued') AS next
+                        FROM public.jobs q WHERE q."tenantId" = t) a
+               WHERE u."tenantId" = t;
+              repaired := repaired + 1;
+            END IF;
+            tried := tried || t;
+            t := NULL;
+          END LOOP;
+          RETURN QUERY SELECT NULL::public.jobs, NULL::timestamptz, repaired, false;
+        END $$`;
+}
+
+export function tenantUsageOnTenantSql(bounded: boolean): string {
+  return `CREATE FUNCTION public.tenant_usage_on_tenant() RETURNS trigger
+      LANGUAGE plpgsql ${DEFINER} AS $$
+      DECLARE d public.limit_defaults;
+      BEGIN
+        SELECT * INTO d FROM public.limit_defaults WHERE id${bounded ? ' FOR SHARE' : ''};
+        IF TG_OP = 'INSERT' THEN
+          INSERT INTO public.tenant_usage ("tenantId", "maxRunning", "maxQueueSize")
+          VALUES (NEW.id, COALESCE(NEW."maxConcurrentExecutions", d."maxRunning"),
+                  COALESCE(NEW."maxQueueSize", d."maxQueueSize"));
+        ELSE
+          UPDATE public.tenant_usage u
+             SET "maxRunning" = COALESCE(NEW."maxConcurrentExecutions", d."maxRunning"),
+                 "maxQueueSize" = COALESCE(NEW."maxQueueSize", d."maxQueueSize")
+           WHERE u."tenantId" = NEW.id;
+        END IF;
+        RETURN NULL;
+      END $$`;
+}
 
 const FUNCTIONS: Array<{ signature: string; grantees: string[]; sql: string }> =
   [
     {
       // Блокування рядка обліку тенанта з контексту транзакції (до кінця транзакції). Серіалізує
-      // постановки й захоплення одного тенанта; без контексту — помилка.
+      // постановки тенанта (ліміт черги); без контексту — помилка.
       signature: 'lock_tenant_usage()',
-      grantees: [API_ROLE, WORKER_ROLE],
+      grantees: [API_ROLE],
       sql: `CREATE FUNCTION public.lock_tenant_usage()
         RETURNS TABLE (queued integer, running integer, "maxRunning" integer,
-                       "maxQueueSize" integer, due boolean, "lastClaimedAt" text)
+                       "maxQueueSize" integer)
         LANGUAGE plpgsql VOLATILE ${DEFINER} AS $$
         DECLARE t uuid := public.app_current_tenant();
         BEGIN
           IF t IS NULL THEN RAISE EXCEPTION 'tenant context is required'; END IF;
           RETURN QUERY
-            SELECT u.queued, u.running, u."maxRunning", u."maxQueueSize",
-                   COALESCE(u."nextRunAt" <= pg_catalog.clock_timestamp(), false),
-                   u."lastClaimedAt"::text
+            SELECT u.queued, u.running, u."maxRunning", u."maxQueueSize"
               FROM public.tenant_usage u WHERE u."tenantId" = t FOR UPDATE;
           IF NOT FOUND THEN RAISE EXCEPTION 'tenant usage row is missing'; END IF;
         END $$`,
     },
     {
-      // Самовідновлення: рядок обліку тенанта з контексту — з фактичних задач.
-      signature: 'refresh_tenant_usage()',
+      // Справедливе захоплення однієї задачі (README, 3.3.5) одним оператором — стандартна для
+      // черг на Postgres схема FOR UPDATE SKIP LOCKED, але на рівні тенантів:
+      //  1. промоція: тенанти, чия найраніша задача вже настала, стають членами індексу готових;
+      //  2. тенант — серед готових і ненасичених найменше задач у роботі, далі найдавніше
+      //     обслужений (частковий індекс у порядку ключа); рядок, який тримає інша транзакція
+      //     (захоплення чи коротка транзакція самого тенанта), пропускається. Postgres перевіряє
+      //     умову (готовий, ненасичений) на найновішій версії заблокованого рядка, а тригер
+      //     збільшує running під цим блокуванням — ліміт одночасних задач жорсткий;
+      //  3. його найраніша готова задача (SKIP LOCKED) → running, fencing-токен, lease від цього
+      //     моменту (clock_timestamp).
+      // Захоплення ніколи не чекає на блокування: якщо кандидати є, але всі зайняті, — busy
+      // (воркер повторить за мить). Облік, що розійшовся із задачами (готова задача є, а її
+      // немає), перераховується (repaired).
+      signature: 'claim_job(text,integer)',
       grantees: [WORKER_ROLE],
-      sql: `CREATE FUNCTION public.refresh_tenant_usage() RETURNS void
-        LANGUAGE plpgsql VOLATILE ${DEFINER} AS $$
-        DECLARE t uuid := public.app_current_tenant();
-        BEGIN
-          IF t IS NULL THEN RAISE EXCEPTION 'tenant context is required'; END IF;
-          UPDATE public.tenant_usage u
-             SET queued = a.queued, running = a.running, "nextRunAt" = a.next,
-                 ready = COALESCE(a.next <= pg_catalog.clock_timestamp(), false)
-            FROM (SELECT count(*) FILTER (WHERE j.status = 'queued')::int AS queued,
-                         count(*) FILTER (WHERE j.status = 'running')::int AS running,
-                         min(j."runAt") FILTER (WHERE j.status = 'queued') AS next
-                    FROM public.jobs j WHERE j."tenantId" = t) a
-           WHERE u."tenantId" = t;
-        END $$`,
-    },
-    {
-      // Час минає: тенанти, чия найраніша задача вже настала, стають членами індексу готових.
-      // Лише прапорець (не умова коректності — див. claim_candidate), тому SKIP LOCKED.
-      signature: 'promote_ready_tenants(integer)',
-      grantees: [WORKER_ROLE],
-      sql: `CREATE FUNCTION public.promote_ready_tenants(p_batch integer) RETURNS integer
-        LANGUAGE plpgsql VOLATILE ${DEFINER} AS $$
-        DECLARE promoted integer;
-        BEGIN
-          UPDATE public.tenant_usage u SET ready = true
-           WHERE u."tenantId" IN (
-                   SELECT m."tenantId" FROM public.tenant_usage m
-                    WHERE NOT m.ready AND m."nextRunAt" <= pg_catalog.clock_timestamp()
-                    ORDER BY m."nextRunAt"
-                    LIMIT LEAST(GREATEST(p_batch, 1), 1000)
-                    FOR UPDATE SKIP LOCKED)
-             AND NOT u.ready AND u."nextRunAt" <= pg_catalog.clock_timestamp();
-          GET DIAGNOSTICS promoted = ROW_COUNT;
-          RETURN promoted;
-        END $$`,
-    },
-    {
-      // Найкращий кандидат на захоплення: серед готових і ненасичених — найменше задач у роботі,
-      // далі той, кого найдавніше обслужили. Дві гілки: (a) уже просунуті — частковий індекс у
-      // порядку ключа; (b) дозрілі, але ще не просунуті — щоб відставання промоції не пропускало
-      // нікого. Без блокувань: захоплення далі чекає рядка кандидата й перевіряє свіжість.
-      signature: 'claim_candidate(uuid[])',
-      grantees: [WORKER_ROLE],
-      sql: `CREATE FUNCTION public.claim_candidate(p_exclude uuid[])
-        RETURNS TABLE ("tenantId" uuid, "lastClaimedAt" text)
-        LANGUAGE sql VOLATILE ${DEFINER} AS $$
-          SELECT c."tenantId", c."lastClaimedAt"::text FROM (
-            (SELECT u."tenantId", u.running, u."lastClaimedAt" FROM public.tenant_usage u
-              WHERE u.ready AND u.running < u."maxRunning"
-                AND u."tenantId" <> ALL (COALESCE(p_exclude, '{}'))
-              ORDER BY u.running, u."lastClaimedAt", u."tenantId"
-              LIMIT 1)
-            UNION ALL
-            (SELECT u."tenantId", u.running, u."lastClaimedAt" FROM public.tenant_usage u
-              WHERE NOT u.ready AND u."nextRunAt" <= pg_catalog.clock_timestamp()
-                AND u.running < u."maxRunning"
-                AND u."tenantId" <> ALL (COALESCE(p_exclude, '{}'))
-              ORDER BY u.running, u."lastClaimedAt", u."tenantId"
-              LIMIT 1)
-          ) c
-          ORDER BY c.running, c."lastClaimedAt", c."tenantId"
-          LIMIT 1
-        $$`,
+      sql: claimJobSql(false),
     },
     {
       // Метрика глибини черги: лише тенанти з незавершеними задачами, без даних.
@@ -112,14 +170,7 @@ const FUNCTIONS: Array<{ signature: string; grantees: string[]; sql: string }> =
     },
   ];
 
-/** Тригерні функції (власник — системна роль): лише вони змінюють tenant_usage. */
-const TRIGGER_FUNCTIONS = [
-  {
-    name: 'tenant_usage_on_job',
-    // Облік задач тенанта в тій самій транзакції, що й зміна задачі: лічильники станів, найраніша
-    // задача в черзі (nextRunAt), готовість і момент останнього захоплення. Пише рядок, лише коли
-    // щось справді змінилось.
-    sql: `CREATE FUNCTION public.tenant_usage_on_job() RETURNS trigger
+export const ORIGINAL_JOB_USAGE_SQL = `CREATE FUNCTION public.tenant_usage_on_job() RETURNS trigger
       LANGUAGE plpgsql ${DEFINER} AS $$
       DECLARE
         t uuid;
@@ -148,8 +199,11 @@ const TRIGGER_FUNCTIONS = [
            AND NOT (new_queued AND NEW."runAt" <= OLD."runAt") THEN
           -- Найранішу задачу забрали або відсунули: мінімум за індексом (тригер AFTER бачить
           -- стан таблиці після оператора).
-          SELECT min(j."runAt") INTO next_run FROM public.jobs j
-           WHERE j."tenantId" = t AND j.status = 'queued';
+          -- Явний LIMIT, а не min(): план зупиняється на першому записі індексу навіть тоді, коли
+          -- застаріла статистика оцінює чергу тенанта в один рядок (min() тоді агрегує всю чергу).
+          SELECT j."runAt" INTO next_run FROM public.jobs j
+           WHERE j."tenantId" = t AND j.status = 'queued'
+           ORDER BY j."runAt" LIMIT 1;
         ELSIF new_queued THEN
           next_run := LEAST(current_next, NEW."runAt");
         END IF;
@@ -166,29 +220,22 @@ const TRIGGER_FUNCTIONS = [
                 OR next_run IS DISTINCT FROM current_next
                 OR claimed);
         RETURN NULL;
-      END $$`,
+      END $$`;
+
+/** Тригерні функції (власник — системна роль): лише вони змінюють tenant_usage. */
+const TRIGGER_FUNCTIONS = [
+  {
+    name: 'tenant_usage_on_job',
+    // Облік задач тенанта в тій самій транзакції, що й зміна задачі: лічильники станів, найраніша
+    // задача в черзі (nextRunAt), готовість і момент останнього захоплення. Пише рядок, лише коли
+    // щось справді змінилось.
+    sql: ORIGINAL_JOB_USAGE_SQL,
   },
   {
     name: 'tenant_usage_on_tenant',
     // Новий тенант — рядок обліку з ефективними лімітами; зміна перевизначень — нові ліміти.
     // Новий тенант стає в кінець черговості (lastClaimedAt = момент створення).
-    sql: `CREATE FUNCTION public.tenant_usage_on_tenant() RETURNS trigger
-      LANGUAGE plpgsql ${DEFINER} AS $$
-      DECLARE d public.limit_defaults;
-      BEGIN
-        SELECT * INTO d FROM public.limit_defaults WHERE id;
-        IF TG_OP = 'INSERT' THEN
-          INSERT INTO public.tenant_usage ("tenantId", "maxRunning", "maxQueueSize")
-          VALUES (NEW.id, COALESCE(NEW."maxConcurrentExecutions", d."maxRunning"),
-                  COALESCE(NEW."maxQueueSize", d."maxQueueSize"));
-        ELSE
-          UPDATE public.tenant_usage u
-             SET "maxRunning" = COALESCE(NEW."maxConcurrentExecutions", d."maxRunning"),
-                 "maxQueueSize" = COALESCE(NEW."maxQueueSize", d."maxQueueSize")
-           WHERE u."tenantId" = NEW.id;
-        END IF;
-        RETURN NULL;
-      END $$`,
+    sql: tenantUsageOnTenantSql(false),
   },
   {
     name: 'tenant_usage_on_defaults',
@@ -267,7 +314,7 @@ export class TenantUsage1795200000000 implements MigrationInterface {
       `CREATE INDEX "IDX_tenant_usage_claim" ON "tenant_usage" ("running", "lastClaimedAt", "tenantId")
         WHERE "ready" AND "running" < "maxRunning"`,
     );
-    // Дозрілі, ще не просунуті тенанти (промоція й гілка (b) вибору кандидата).
+    // Дозрілі, ще не просунуті тенанти (промоція на початку кожного захоплення).
     await queryRunner.query(
       `CREATE INDEX "IDX_tenant_usage_maturing" ON "tenant_usage" ("nextRunAt")
         WHERE NOT "ready" AND "nextRunAt" IS NOT NULL`,
@@ -351,6 +398,12 @@ export class TenantUsage1795200000000 implements MigrationInterface {
          FOR EACH ROW EXECUTE FUNCTION public.tenant_usage_on_defaults()`,
     );
 
+    // Результат захоплення: задача (або NULL), момент захоплення, скільки рядків обліку
+    // перераховано, і чи всі кандидати були зайняті іншими захопленнями.
+    await queryRunner.query(
+      `CREATE TYPE public.claimed_job AS (job public.jobs, "claimedAt" timestamptz,
+                                          repaired integer, busy boolean)`,
+    );
     for (const fn of FUNCTIONS) {
       await queryRunner.query(fn.sql);
       await queryRunner.query(
@@ -364,7 +417,7 @@ export class TenantUsage1795200000000 implements MigrationInterface {
       );
     }
 
-    // Захоплення FIFO замінює справедливе (claim_candidate + lock_tenant_usage).
+    // Захоплення FIFO замінює справедливе (claim_job).
     await queryRunner.query(`DROP FUNCTION public.claim_fifo_candidate()`);
   }
 
@@ -390,6 +443,7 @@ export class TenantUsage1795200000000 implements MigrationInterface {
     );
     for (const fn of [...FUNCTIONS].reverse())
       await queryRunner.query(`DROP FUNCTION public.${fn.signature}`);
+    await queryRunner.query(`DROP TYPE public.claimed_job`);
     await queryRunner.query(
       `DROP TRIGGER tenant_usage_defaults ON "limit_defaults"`,
     );

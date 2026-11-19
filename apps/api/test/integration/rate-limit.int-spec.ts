@@ -187,6 +187,35 @@ describe('tenant request rate limit', () => {
     expect((await get('/workflows')).status).toBe(200);
   });
 
+  // Запит, що чекав на рядок відра довше за залишок вікна, рахується вже в новому вікні: інакше
+  // клієнт отримав би 429 з додатним Retry-After, хоча нове вікно вже почалося.
+  it.each(['commit', 'rollback'])(
+    'starts a fresh window after a concurrent insert ends with %s',
+    async (outcome) => {
+      const key = 'lock-wait-window';
+      const runner = owner.createQueryRunner();
+      await runner.connect();
+      await runner.startTransaction();
+      let waited: Promise<Array<{ hits: number; resetMs: number }>>;
+      try {
+        await runner.query(`SELECT * FROM rate_limit_hit($1, 300, 1)`, [key]);
+        waited = owner.query(
+          `SELECT hits, "resetMs" FROM rate_limit_hit($1, 300, 1)`,
+          [key],
+        );
+        await sleep(500);
+      } finally {
+        if (outcome === 'rollback') await runner.rollbackTransaction();
+        else await runner.commitTransaction();
+        await runner.release();
+      }
+      const [row] = await waited;
+      expect(row.hits).toBe(1);
+      expect(row.resetMs).toBeGreaterThan(200);
+      expect(row.resetMs).toBeLessThanOrEqual(300);
+    },
+  );
+
   it('purges buckets whose window has ended and keeps the current ones', async () => {
     expect((await get('/workflows')).status).toBe(200);
     await owner.query(

@@ -194,6 +194,9 @@ describe('a worker killed in the middle of a step', () => {
       await barrier.query('SELECT pg_advisory_lock(61487)');
       await ds.query(`CREATE FUNCTION test_wait_before_done() RETURNS trigger LANGUAGE plpgsql AS $$
         BEGIN PERFORM pg_advisory_xact_lock(61487); RETURN NEW; END $$`);
+      await ds.query(
+        'REVOKE ALL ON FUNCTION test_wait_before_done() FROM PUBLIC',
+      );
       await ds.query(`CREATE TRIGGER test_wait_before_done BEFORE UPDATE ON jobs FOR EACH ROW
         WHEN (NEW.status = 'done') EXECUTE FUNCTION test_wait_before_done()`);
       await startChild();

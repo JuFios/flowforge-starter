@@ -175,6 +175,7 @@ describe('POST /executions/:id/retry', () => {
     await ds.query(`
       CREATE OR REPLACE FUNCTION test_slow_retry() RETURNS trigger AS $$
       BEGIN PERFORM pg_sleep(0.3); RETURN NEW; END $$ LANGUAGE plpgsql;
+      REVOKE ALL ON FUNCTION test_slow_retry() FROM PUBLIC;
       CREATE TRIGGER test_slow_retry BEFORE UPDATE ON executions
         FOR EACH ROW WHEN (OLD.status = 'failed') EXECUTE FUNCTION test_slow_retry();`);
     let results: Array<{ status: number }>;

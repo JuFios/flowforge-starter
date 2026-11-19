@@ -12,7 +12,7 @@ interface SavedCheckpoint {
 
 /**
  * Записи про перебіг кроків. Кожен метод — одна транзакція, що спершу перевіряє lease задачі
- * (`assertLease` блокує рядок job): воркер, чий lease уже забрали, нічого не запише, а стан
+ * (перевірка токена під блокуванням рядка job): воркер, чий lease уже забрали, нічого не запише, а стан
  * кількох таблиць змінюється разом або ніяк.
  */
 @Injectable()
@@ -122,20 +122,10 @@ export class CheckpointService {
 
   /** Виконання успішне: виконання й задача завершуються разом або ніяк. */
   async finish(job: Job, output: unknown): Promise<void> {
-    await this.db.run(job.tenantId, async (em) => {
-      await this.queue.assertLease(em, job);
-      await em.query(
-        `UPDATE executions SET status = 'succeeded', output = $2, error = NULL, "finishedAt" = now()
-          WHERE id = $1 AND "tenantId" = $3`,
-        [
-          job.executionId,
-          JSON.stringify(toStorable(output).value),
-          job.tenantId,
-        ],
-      );
-      // Задача — останньою: її оновлення зачіпає облік тенанта (порядок блокувань).
-      await this.queue.markLockedJobDone(em, job);
-    });
+    const result = { output: JSON.stringify(toStorable(output).value) ?? null };
+    await this.db.run(job.tenantId, (em) =>
+      this.queue.completeIn(em, job, result),
+    );
   }
 
   /**

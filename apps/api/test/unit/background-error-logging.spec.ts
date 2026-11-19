@@ -54,7 +54,7 @@ describe('background loops log errors without input values', () => {
   it('scheduler: a failing tick', async () => {
     jest.useFakeTimers();
     const system = {
-      scheduledWorkflows: () => Promise.reject(dbError()),
+      scheduledTenants: () => Promise.reject(dbError()),
     } as unknown as SystemDb;
     const scheduler = new SchedulerService(
       system,
@@ -79,15 +79,15 @@ describe('background loops log errors without input values', () => {
       cron: '* * * * * *',
     } as Workflow;
     const system = {
-      scheduledWorkflows: (after: string | null) =>
+      scheduledTenants: (after: string | null) =>
         Promise.resolve(after ? [] : [{ id: wf.id, tenantId: wf.tenantId }]),
     } as unknown as SystemDb;
     const executions = {
-      enqueue: () => Promise.reject(dbError()),
+      enqueueScheduled: () => Promise.reject(dbError()),
     } as unknown as ExecutionsService;
     const scheduler = new SchedulerService(
       system,
-      fakeTenantDb({ findOne: () => Promise.resolve(wf) } as never),
+      fakeTenantDb({ find: () => Promise.resolve([wf]) } as never),
       executions,
       config({ SCHEDULER_TICK_MS: 1000 }),
     );

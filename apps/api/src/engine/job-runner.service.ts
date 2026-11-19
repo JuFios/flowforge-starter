@@ -42,6 +42,13 @@ const RELEASE_WAIT_MS = 5_000;
  */
 const CLAIM_BACKOFF = { baseMs: 1_000, maxMs: 30_000 };
 
+/**
+ * Пауза перед новою спробою, коли всіх кандидатів саме захоплюють інші (рядки тримають їхні
+ * короткі транзакції), мс, з відхиленням ±50%: набагато менша за інтервал опитування, бо готові
+ * задачі є, але без холостого циклу.
+ */
+const BUSY_RETRY_MS = 20;
+
 @Injectable()
 export class JobRunnerService implements BeforeApplicationShutdown {
   private readonly logger = new Logger(JobRunnerService.name);
@@ -254,7 +261,14 @@ export class JobRunnerService implements BeforeApplicationShutdown {
         if (job) await this.releaseOnShutdown(job);
         return;
       }
-      if (job === undefined) continue;
+      // undefined — задачу не захоплено (кандидатів чи їхні готові задачі тримають інші
+      // транзакції, промоцію дозрілих тенантів ще не завершено, відступ після збою або
+      // завершення): коротка пауза з відхиленням і нове коло, без повного
+      // інтервалу опитування — готові задачі є.
+      if (job === undefined) {
+        await this.pause(BUSY_RETRY_MS * (0.5 + Math.random()));
+        continue;
+      }
       if (!job) {
         await this.idle();
         continue;
@@ -291,7 +305,6 @@ export class JobRunnerService implements BeforeApplicationShutdown {
     }
     try {
       const job = await this.queue.claimNext(this.workerId);
-      // undefined — кандидатів щойно забирали інші воркери: нове коло одразу, без паузи.
       if (this.claimFailures > 0) {
         this.logger.log(
           { consecutiveFailures: this.claimFailures },
@@ -399,32 +412,32 @@ export class JobRunnerService implements BeforeApplicationShutdown {
       { jobId: job.id, executionId: job.executionId, attempt: job.attempts },
       'processing job',
     );
-    // Виконання, його знімок і чекпоінти — одним читанням у контексті тенанта задачі, з явним
-    // предикатом tenantId (композитні FK гарантують, що вони належать тому самому тенанту).
-    const { execution, snapshot, history } = await this.db.run(
-      job.tenantId,
-      async (em) => {
-        const execution = await em.findOneOrFail(Execution, {
-          where: { id: job.executionId, tenantId: job.tenantId },
-        });
-        const snapshot = execution.workflowVersionId
-          ? await em.findOneOrFail(WorkflowVersion, {
-              where: {
-                id: execution.workflowVersionId,
-                tenantId: job.tenantId,
-              },
-            })
-          : null;
-        const history = await this.checkpoints.load(em, job);
-        return { execution, snapshot, history };
-      },
-    );
-    const ctx: StepContext = { input: execution.input, steps: {} };
     /** Крок, що виконується зараз (для запису провалу). */
     let current: StepRun | undefined;
     let delayAttemptStartedAt: number | undefined;
     let finalOutput: unknown;
     try {
+      // Виконання, його знімок і чекпоінти — одним читанням у контексті тенанта задачі, з явним
+      // предикатом tenantId (композитні FK гарантують, що вони належать тому самому тенанту).
+      const { execution, snapshot, history } = await this.db.run(
+        job.tenantId,
+        async (em) => {
+          const execution = await em.findOneOrFail(Execution, {
+            where: { id: job.executionId, tenantId: job.tenantId },
+          });
+          const snapshot = execution.workflowVersionId
+            ? await em.findOneOrFail(WorkflowVersion, {
+                where: {
+                  id: execution.workflowVersionId,
+                  tenantId: job.tenantId,
+                },
+              })
+            : null;
+          const history = await this.checkpoints.load(em, job);
+          return { execution, snapshot, history };
+        },
+      );
+      const ctx: StepContext = { input: execution.input, steps: {} };
       // Знімок версії, зафіксований під час створення виконання, а не поточний стан workflow.
       // Без знімку виконання запускати не можна: `{ id: undefined }` TypeORM виконав би без умови
       // й повернув першу-ліпшу версію. CHECK у БД такого стану не допускає — це остання лінія

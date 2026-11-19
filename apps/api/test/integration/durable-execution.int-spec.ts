@@ -73,6 +73,23 @@ describe('durable execution', () => {
     });
   }
 
+  it('releases the slot through normal retry when loading checkpoints fails', async () => {
+    worker = await startApp(WorkerModule);
+    const wf = await createWorkflow([
+      { id: 'log', type: 'log', message: 'ok' },
+    ]);
+    const id = await run(wf);
+    const queue = worker.app.get(JobQueueService);
+    const job = await queue.claimNext('test');
+    jest
+      .spyOn(worker.app.get(CheckpointService), 'load')
+      .mockRejectedValueOnce(new Error('read timeout'));
+    await worker.app.get(JobRunnerService).process(job!);
+    expect(
+      await ds.getRepository(Job).findOneByOrFail({ executionId: id }),
+    ).toMatchObject({ status: 'queued' });
+  });
+
   it('resumes a retried execution from the first unfinished step without repeating completed ones', async () => {
     let flakyCalls = 0;
     receiver.respond = (req, res) => {

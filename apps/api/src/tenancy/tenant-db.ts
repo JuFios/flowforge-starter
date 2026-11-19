@@ -52,12 +52,14 @@ export class TenantDb {
   }
 
   /**
-   * Транзакція, тенант якої стає відомим усередині неї (захоплення задачі: SECURITY DEFINER-функція
-   * спершу знаходить і блокує кандидата, далі робота — вже в контексті його тенанта).
+   * Транзакція з контекстом, що задається один раз (`enter`) і не змінюється: основа `run`.
+   * Спроба перейти до іншого тенанта в тій самій транзакції — помилка.
    */
   transaction<T>(fn: (tx: TenantTransaction) => Promise<T>): Promise<T> {
     return this.ds.transaction(async (em) => {
       let current: string | undefined;
+      let requested: string | undefined;
+      let setting: Promise<void> | undefined;
       const tx: TenantTransaction = {
         em,
         get tenantId() {
@@ -65,14 +67,15 @@ export class TenantDb {
         },
         async enter(tenantId: string) {
           assertTenantId(tenantId);
-          if (current !== undefined) {
-            if (current === tenantId) return;
+          if (requested !== undefined && requested !== tenantId)
             throw new Error('a transaction cannot switch tenants');
-          }
-          await em.query(`SELECT set_config('app.tenant_id', $1, true)`, [
-            tenantId,
-          ]);
-          current = tenantId;
+          requested = tenantId;
+          setting ??= em
+            .query(`SELECT set_config('app.tenant_id', $1, true)`, [tenantId])
+            .then(() => {
+              current = tenantId;
+            });
+          await setting;
         },
       };
       return fn(tx);
