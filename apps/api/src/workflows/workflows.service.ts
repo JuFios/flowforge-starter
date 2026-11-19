@@ -1,10 +1,30 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 import { Workflow, WorkflowVersion } from '../entities';
+import { CronSchedule, InvalidScheduleError } from '../scheduler/cron-schedule';
 import { TenantDb } from '../tenancy/tenant-db';
 
 import { validateSteps } from './definition';
 import { CreateWorkflowDto, UpdateWorkflowDto } from './dto/workflow.dto';
+
+/**
+ * Розклад перевіряється тим самим обчисленням, що й у планувальнику: порожній чи нездійсненний
+ * вираз і зона, якої немає в IANA, — 400 на межі API, а не попередження планувальника потім.
+ */
+function assertSchedule(cron: string | null, timezone: string): void {
+  if (cron === null) return;
+  try {
+    CronSchedule.parse(cron, timezone);
+  } catch (err) {
+    if (err instanceof InvalidScheduleError)
+      throw new BadRequestException([`schedule: ${err.message}`]);
+    throw err;
+  }
+}
 
 /**
  * Workflow тенанта. Кожен запит — у контексті тенанта (RLS) і з явним предикатом `tenantId`:
@@ -38,6 +58,7 @@ export class WorkflowsService {
   /** Workflow і його перша версія — в одній транзакції. */
   create(tenantId: string, input: CreateWorkflowDto): Promise<Workflow> {
     const steps = validateSteps(input.steps);
+    assertSchedule(input.cron ?? null, input.timezone ?? 'UTC');
     return this.db.run(tenantId, async (em) => {
       // Курсор розкладу — за замовчуванням БД now(), тобто момент створення: моменти до появи
       // workflow не спрацьовують.
@@ -84,6 +105,8 @@ export class WorkflowsService {
         (cron !== wf.cron ||
           timezone !== wf.timezone ||
           (input.enabled === true && !wf.enabled));
+      if (cron !== wf.cron || timezone !== wf.timezone)
+        assertSchedule(cron, timezone);
       if (input.name !== undefined) wf.name = input.name;
       wf.cron = cron;
       wf.timezone = timezone;
