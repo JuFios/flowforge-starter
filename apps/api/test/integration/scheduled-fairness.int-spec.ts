@@ -63,7 +63,7 @@ describe('scheduled tenant fairness', () => {
 
   /** Спроби постановки (без запису виконань) у порядку; `before` — перед кожною. */
   function recordFirings(
-    before?: (workflowId: string, call: number) => Promise<void>,
+    before?: (workflowId: string, call: number) => Promise<void> | void,
     result: () => Promise<boolean> = () => Promise.resolve(true),
   ): {
     calls: Array<{ tenantId: string; workflowId: string; at: number }>;
@@ -325,7 +325,7 @@ describe('scheduled tenant fairness', () => {
     await schedules(a, 1, 45_000, '00000000-0000-4000-9000-');
     await schedules(b, 1, 1000, '00000000-0000-4000-a000-');
     let failures = 0;
-    const log = recordFirings(async (id) => {
+    const log = recordFirings((id) => {
       if (id.startsWith('00000000-0000-4000-a000-')) {
         failures++;
         throw new Error('scheduled enqueue failed');
