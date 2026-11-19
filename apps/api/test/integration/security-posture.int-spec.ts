@@ -67,6 +67,19 @@ describe('db:migrate refuses a catalog that FlowForge did not shape', () => {
     await owner.destroy();
   });
 
+  it('requires a tenant relation to be a table covered by the policy inspection', async () => {
+    const ds = await freshScratch();
+    await migrate(ds);
+    await ds.query('DROP TABLE webhook_deliveries');
+    await ds.query(
+      'CREATE VIEW webhook_deliveries AS SELECT NULL::uuid AS "tenantId" WHERE false',
+    );
+    await ds.query(
+      'GRANT SELECT,INSERT ON webhook_deliveries TO flowforge_api_role',
+    );
+    await expect(migrate(ds)).rejects.toThrow(/webhook_deliveries/);
+  });
+
   it('applies every migration to an empty database and accepts a repeated run', async () => {
     const ds = await freshScratch();
     expect(await migrate(ds)).toHaveLength(ds.migrations.length);
