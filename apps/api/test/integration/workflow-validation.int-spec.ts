@@ -86,6 +86,34 @@ describe('workflow and run input is validated at the API boundary', () => {
     },
   );
 
+  it.each([['Mars/Olympus'], ['+03:00'], ['local']])(
+    'rejects the timezone %s with 400 also without a cron expression',
+    async (timezone) => {
+      const created = await call('POST', '/workflows', {
+        name: 'w',
+        steps,
+        timezone,
+      });
+      expect(created.status).toBe(400);
+      const wf = await api<{ id: string }>(
+        app.baseUrl,
+        apiKey,
+        'POST',
+        '/workflows',
+        { name: 'w', steps },
+      );
+      const patched = await call('PATCH', `/workflows/${wf.body.id}`, {
+        timezone,
+      });
+      expect(patched.status).toBe(400);
+      expect(
+        await ds.query(`SELECT timezone FROM workflows WHERE id = $1`, [
+          wf.body.id,
+        ]),
+      ).toEqual([{ timezone: 'UTC' }]);
+    },
+  );
+
   it.each([
     ['a five-field cron', { cron: '30 3 * * *', timezone: 'Europe/Kyiv' }],
     ['a six-field cron with seconds', { cron: '*/10 * * * * *' }],

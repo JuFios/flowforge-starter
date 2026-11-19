@@ -5,18 +5,28 @@ import {
 } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 import { Workflow, WorkflowVersion } from '../entities';
-import { CronSchedule, InvalidScheduleError } from '../scheduler/cron-schedule';
+import {
+  CronSchedule,
+  InvalidScheduleError,
+  isValidTimeZone,
+} from '../scheduler/cron-schedule';
 import { TenantDb } from '../tenancy/tenant-db';
-
 import { validateSteps } from './definition';
 import { CreateWorkflowDto, UpdateWorkflowDto } from './dto/workflow.dto';
 
 /**
  * Розклад перевіряється тим самим обчисленням, що й у планувальнику: порожній чи нездійсненний
- * вираз і зона, якої немає в IANA, — 400 на межі API, а не попередження планувальника потім.
+ * вираз і зона, якої немає в IANA, — 400 на межі API, а не попередження планувальника потім. Зона
+ * перевіряється й без виразу: інакше її відхиляв би лише пізніший PATCH розкладу.
  */
 function assertSchedule(cron: string | null, timezone: string): void {
-  if (cron === null) return;
+  if (cron === null) {
+    if (!isValidTimeZone(timezone))
+      throw new BadRequestException([
+        'schedule: timezone is not a known IANA zone',
+      ]);
+    return;
+  }
   try {
     CronSchedule.parse(cron, timezone);
   } catch (err) {
