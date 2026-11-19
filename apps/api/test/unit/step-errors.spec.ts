@@ -1,3 +1,5 @@
+import { Response } from 'undici';
+import { outboundTransport } from '../../src/engine/outbound-http';
 import { StepError, StepExecutor } from '../../src/engine/step-executor';
 
 /** Яка відповідь отримувача дає повторювану помилку кроку http, а яка — остаточну. */
@@ -9,7 +11,7 @@ describe('http step error classification', () => {
 
   async function failureFor(status: number): Promise<StepError> {
     jest
-      .spyOn(globalThis, 'fetch')
+      .spyOn(outboundTransport, 'fetch')
       .mockResolvedValue(new Response('busy', { status }));
     try {
       await executor.execute(
@@ -60,7 +62,7 @@ describe('http step error classification', () => {
   ])(
     'retries %s and names only the class of the network failure',
     async (_case, error, reason) => {
-      jest.spyOn(globalThis, 'fetch').mockRejectedValue(error);
+      jest.spyOn(outboundTransport, 'fetch').mockRejectedValue(error);
       const failure = executor.execute(
         { id: 'call', type: 'http', url: 'https://receiver.example/hook' },
         ctx,
@@ -93,7 +95,7 @@ describe('http step error classification', () => {
   it('does not retry a request to a port that fetch blocks', async () => {
     // Порт 9 (discard) — у списку заборонених портів специфікації fetch: відмова детермінована.
     const failure = executor.execute(
-      { id: 'call', type: 'http', url: 'http://127.0.0.1:9/' },
+      { id: 'call', type: 'http', url: 'http://receiver.example:9/' },
       ctx,
     );
     await expect(failure).rejects.toMatchObject({
@@ -103,7 +105,7 @@ describe('http step error classification', () => {
   });
 
   it('fails at once with an explanation when the url is invalid after substitution', async () => {
-    const fetchSpy = jest.spyOn(globalThis, 'fetch');
+    const fetchSpy = jest.spyOn(outboundTransport, 'fetch');
     const failure = executor.execute(
       { id: 'call', type: 'http', url: 'http://{{ input.host }}/x' },
       { input: { host: 'a b' }, steps: {} },
@@ -140,7 +142,7 @@ describe('http step error classification', () => {
   it.each([429, 503])(
     'passes the Retry-After of HTTP %i on to the retry',
     async (status) => {
-      jest.spyOn(globalThis, 'fetch').mockResolvedValue(
+      jest.spyOn(outboundTransport, 'fetch').mockResolvedValue(
         new Response('slow down', {
           status,
           headers: { 'retry-after': '7' },
@@ -164,7 +166,7 @@ describe('http step error classification', () => {
         },
       });
       jest
-        .spyOn(globalThis, 'fetch')
+        .spyOn(outboundTransport, 'fetch')
         .mockResolvedValue(
           new Response(body, { status, headers: { 'retry-after': '7' } }),
         );
@@ -209,7 +211,9 @@ describe('http step error classification', () => {
   ])(
     'retries a step whose response body %s while being read',
     async (_case, error, reason) => {
-      jest.spyOn(globalThis, 'fetch').mockResolvedValue(failingBody(error));
+      jest
+        .spyOn(outboundTransport, 'fetch')
+        .mockResolvedValue(failingBody(error));
       await expect(
         executor.execute(
           { id: 'call', type: 'http', url: 'https://receiver.example/hook' },

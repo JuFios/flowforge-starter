@@ -78,6 +78,8 @@ export class Receiver {
     await new Promise<void>((resolve) =>
       this.server!.listen(0, '127.0.0.1', resolve),
     );
+    process.env.HTTP_FIXTURE_ORIGIN = this.url('');
+    process.env.HTTP_FIXTURE_ADDRESS = '127.0.0.1';
   }
 
   url(path: string): string {
@@ -92,6 +94,10 @@ export class Receiver {
   async stop(): Promise<void> {
     const server = this.server;
     if (!server) return;
+    if (process.env.HTTP_FIXTURE_ORIGIN === this.url('')) {
+      delete process.env.HTTP_FIXTURE_ORIGIN;
+      delete process.env.HTTP_FIXTURE_ADDRESS;
+    }
     this.server = undefined;
     server.closeAllConnections();
     await new Promise((resolve) => server.close(resolve));

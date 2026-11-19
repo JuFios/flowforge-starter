@@ -99,7 +99,7 @@ describe('webhook upgrade, concurrent acceptance and revocation', () => {
     const counts = () =>
       db.query(
         'SELECT (SELECT count(*)::int FROM webhook_deliveries) AS receipts,(SELECT count(*)::int FROM executions) AS executions,(SELECT count(*)::int FROM jobs) AS jobs',
-      ) as Promise<unknown>;
+      );
     expect(await counts()).toEqual([{ receipts: 3, executions: 3, jobs: 3 }]);
     expect((await send(a, 'order-42', fresh.secret, '{}')).status).toBe(409);
     const worker = await startWorker();

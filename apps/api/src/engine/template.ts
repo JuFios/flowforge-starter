@@ -42,7 +42,7 @@ export function renderTemplate(
     const value = lookup(ctx, match[1]);
     if (value !== null && value !== undefined)
       append(typeof value === 'object' ? JSON.stringify(value) : String(value));
-    offset = match.index! + match[0].length;
+    offset = match.index + match[0].length;
   }
   append(template.slice(offset));
   return chunks.join('');

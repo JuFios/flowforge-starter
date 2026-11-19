@@ -45,9 +45,12 @@ const HEADER_VALUE = /^[\t\x20-\x7e\x80-\xff]*$/;
  * Заголовки, які тенант не задає: `Idempotency-Key` ставить платформа (стабільний для всіх спроб
  * кроку), а службові заголовки з'єднання визначає HTTP-клієнт.
  */
-const RESERVED_HEADERS = new Set([
+export const RESERVED_HEADERS = new Set([
   'idempotency-key',
   'host',
+  'x-request-id',
+  'accept-encoding',
+  'proxy-authorization',
   'content-length',
   'transfer-encoding',
   'connection',

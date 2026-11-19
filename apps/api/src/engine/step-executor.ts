@@ -1,8 +1,11 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { exceedsJsonDepth, MAX_STEP_RESULT_DEPTH } from '../common/json-depth';
 import { StepDefinition } from '../entities';
+import { outboundSettings } from '../config/outbound';
+import { outboundHttp } from './outbound-http';
 import { StepError } from './step-error';
 import {
+  RESERVED_HEADERS,
   MAX_LOG_MESSAGE_LENGTH,
   MAX_URL_LENGTH,
 } from '../workflows/definition';
@@ -86,23 +89,26 @@ export class StepExecutor {
         'http url is invalid after template substitution',
         false,
       );
-    let res: Response;
+    const timeout = AbortSignal.timeout(
+      outboundSettings(process.env).timeoutMs,
+    );
+    let res: Awaited<ReturnType<typeof outboundHttp>>;
     try {
       const headers = new Headers(Object.entries(step.headers ?? {}));
+      for (const name of headers.keys())
+        if (RESERVED_HEADERS.has(name))
+          throw new StepError('http request contains a reserved header', false);
       if (idempotencyKey) headers.set('Idempotency-Key', idempotencyKey);
-      res = await fetch(url, {
-        method: step.method ?? 'GET',
-        // Ключ однаковий для всіх спроб кроку: отримувач, що його враховує, виконає ефект один раз.
+      res = await outboundHttp(
+        new URL(url),
+        step.method ?? 'GET',
         headers,
-        body:
-          step.body !== undefined ? renderTemplate(step.body, ctx) : undefined,
-        signal: signal
-          ? AbortSignal.any([signal, AbortSignal.timeout(15_000)])
-          : AbortSignal.timeout(15_000),
-      });
+        step.body !== undefined ? renderTemplate(step.body, ctx) : undefined,
+        signal ? AbortSignal.any([signal, timeout]) : timeout,
+      );
     } catch (err) {
       // Скасування воркером (lease, завершення) — не помилка кроку, передаємо як є.
-      if (signal?.aborted) throw err;
+      if (signal?.aborted || err instanceof StepError) throw err;
       // Повторювані лише збої мережі й таймаут. Інша помилка fetch означає, що запит неможливо
       // надіслати взагалі (напр., тіло в GET), і повтор дав би той самий результат.
       if (isBlockedPort(err))
@@ -114,9 +120,8 @@ export class StepExecutor {
         throw new StepError('http request is invalid', false);
       throw new StepError(`http request failed: ${networkReason(err)}`, true);
     }
-    if (!res.ok) {
+    if (res.status < 200 || res.status >= 300) {
       // Заголовки визначають результат навіть при обриві непотрібного тіла.
-      void res.body?.cancel().catch(() => undefined);
       throw new StepError(
         `http ${res.status}`,
         isRetryableStatus(res.status),
@@ -125,15 +130,7 @@ export class StepExecutor {
           : undefined,
       );
     }
-    let text: string;
-    try {
-      text = await res.text();
-    } catch (err) {
-      if (signal?.aborted) throw err;
-      // Заголовки прийшли, але тіло не дочитано: таймаут або обрив з'єднання (undici —
-      // TypeError('terminated') з причиною в `cause`). Це збій мережі, повтор може допомогти.
-      throw new StepError(`http request failed: ${networkReason(err)}`, true);
-    }
+    const text = res.body;
     let body: unknown;
     try {
       body = JSON.parse(text);
@@ -170,7 +167,8 @@ function isNetworkFailure(err: unknown): boolean {
   const { name, message } = err as { name?: unknown; message?: unknown };
   return (
     name === 'TimeoutError' ||
-    (name === 'TypeError' && message === 'fetch failed')
+    (name === 'TypeError' &&
+      (message === 'fetch failed' || message === 'terminated'))
   );
 }
 

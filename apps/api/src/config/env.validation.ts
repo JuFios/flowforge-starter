@@ -1,4 +1,5 @@
 import 'reflect-metadata';
+import { outboundSettings } from './outbound';
 import { isIP } from 'node:net';
 import { plainToInstance, Type } from 'class-transformer';
 import {
@@ -409,12 +410,14 @@ export function validateEnv(
   raw: Record<string, unknown>,
 ): EnvironmentVariables {
   rejectOwnerCredentials(raw);
+  outboundSettings(raw);
   return validateAs(EnvironmentVariables, raw);
 }
 
 /** Схема API: спільна плюс обов'язковий ADMIN_TOKEN. */
 export function validateApiEnv(raw: Record<string, unknown>): ApiEnvironment {
   rejectOwnerCredentials(raw);
+  outboundSettings(raw);
   const env = validateAs(EnvironmentVariables, raw);
   // Явна перевірка: @IsOptional спільної схеми вимикає для цієї властивості будь-які інші
   // декоратори, зокрема @IsDefined.

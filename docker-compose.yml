@@ -66,6 +66,9 @@ services:
     command: ['node', 'dist/worker']
     environment:
       NODE_ENV: production
+      HTTP_DENY_CIDRS: ${HTTP_DENY_CIDRS:-}
+      HTTP_STEP_TIMEOUT_MS: ${HTTP_STEP_TIMEOUT_MS:-15000}
+      HTTP_RESPONSE_BYTES: ${HTTP_RESPONSE_BYTES:-1048576}
       # Роль воркера без BYPASSRLS (flowforge_worker_role). ADMIN_TOKEN воркер не отримує.
       DATABASE_URL: postgres://flowforge_worker:${WORKER_DB_PASSWORD:?задайте WORKER_DB_PASSWORD у .env}@postgres:5432/flowforge
     # Час між SIGTERM і SIGKILL: воркер чекає на задачі WORKER_SHUTDOWN_GRACE_MS (20 с), решту

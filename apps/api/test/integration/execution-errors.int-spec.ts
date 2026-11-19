@@ -115,9 +115,13 @@ describe('execution errors shown to the tenant', () => {
     );
     const { port } = server.address() as AddressInfo;
     await new Promise((resolve) => server.close(resolve));
+    const origin = process.env.HTTP_FIXTURE_ORIGIN!;
+    process.env.HTTP_FIXTURE_ORIGIN = `http://127.0.0.1:${port}`;
     const body = await runToFailure([
-      { id: 'call', type: 'http', url: `http://127.0.0.1:${port}/` },
-    ]);
+      { id: 'call', type: 'http', url: process.env.HTTP_FIXTURE_ORIGIN + '/' },
+    ]).finally(() => {
+      process.env.HTTP_FIXTURE_ORIGIN = origin;
+    });
     expect(body.error).toMatch(/^http request failed: connection refused/);
     expect(JSON.stringify(body)).not.toContain('ECONNREFUSED 127.0.0.1');
   });

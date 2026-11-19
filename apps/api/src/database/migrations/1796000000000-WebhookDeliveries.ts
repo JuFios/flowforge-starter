@@ -33,12 +33,12 @@ export class WebhookDeliveries1796000000000 implements MigrationInterface {
     );
   }
   async down(runner: QueryRunner): Promise<void> {
-    const rows: unknown[] = await runner.query(
+    const rows = (await runner.query(
       'SELECT 1 FROM webhook_deliveries LIMIT 1',
-    );
-    const rotating: unknown[] = await runner.query(
+    )) as unknown[];
+    const rotating = (await runner.query(
       'SELECT 1 FROM tenants WHERE "nextWebhookKeyId" IS NOT NULL LIMIT 1',
-    );
+    )) as unknown[];
     if (rows.length || rotating.length)
       throw new Error(
         'webhook deliveries or active rotations prevent a lossless downgrade',
