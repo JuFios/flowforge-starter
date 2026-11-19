@@ -5,7 +5,7 @@ import { LimitsMetrics } from '../../src/limits/limits.metrics';
 import { SchedulerService } from '../../src/scheduler/scheduler.service';
 import { RunningApp, startApp } from '../helpers/app';
 import { createTenant, openTestDataSource, truncateAll } from '../helpers/db';
-import { Receiver, startWorker, waitFor } from '../helpers/queue';
+import { Receiver, sleep, startWorker, waitFor } from '../helpers/queue';
 
 /**
  * Ліміт черги тенанта (ТЗ 3.3.4): незавершених задач (`queued` + `running`, включно з паузами)
@@ -129,21 +129,35 @@ describe('tenant queue size limit', () => {
     expect(await rejected('webhook')).toBe(1);
   });
 
-  it('skips a cron firing on a full queue, counts it and keeps the schedule going', async () => {
+  it('holds a cron firing on a full queue, counts it and creates it once a place frees up', async () => {
     await setQueueSize(1);
-    await workflow(undefined, { cron: '* * * * * *' });
     const scheduler = apiApp.app.get(SchedulerService);
-    // Три спрацювання за тік: перше займає єдине місце, наступне пропускається.
-    expect(await scheduler.tick(new Date(Date.now() + 3_000))).toBe(1);
+    scheduler.onApplicationShutdown();
+    // Єдине місце займає запуск через API (воркера немає, задача лишається в черзі).
+    const busy = await workflow();
+    expect((await call('POST', `/workflows/${busy}/run`, {})).status).toBe(201);
+    const id = await workflow(undefined, { cron: '* * * * * *' });
+    const [{ createdAt }]: Array<{ createdAt: Date }> = await owner.query(
+      'SELECT "createdAt" FROM workflows WHERE id = $1',
+      [id],
+    );
+    const firstDue = Math.floor(createdAt.getTime() / 1000) * 1000 + 1000;
+    await sleep(1_500);
+    expect(await scheduler.tick()).toBe(0);
     expect(await executions()).toBe(1);
-    expect(await rejected('cron')).toBe(1);
-    // Місце звільнилось — наступний тік створює виконання.
+    expect(await rejected('cron')).toBeGreaterThanOrEqual(1);
+    // Місце звільнилось — відкладене спрацювання не загублене, а створюється першим.
     await owner.query(
       `UPDATE jobs SET status = 'done', "finishedAt" = now() WHERE "tenantId" = $1`,
       [tenant.id],
     );
-    expect(await scheduler.tick(new Date(Date.now() + 4_000))).toBe(1);
-    expect(await executions()).toBe(2);
+    expect(await scheduler.tick()).toBeGreaterThanOrEqual(1);
+    const [first]: Array<{ at: Date }> = await owner.query(
+      `SELECT "scheduledAt" AS at FROM executions WHERE "workflowId" = $1
+        ORDER BY "scheduledAt" LIMIT 1`,
+      [id],
+    );
+    expect(first.at.getTime()).toBe(firstDue);
   });
 
   it('admits exactly the queue size out of 20 concurrent runs', async () => {
