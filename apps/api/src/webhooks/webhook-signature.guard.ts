@@ -43,14 +43,15 @@ export class WebhookSignatureGuard implements CanActivate {
     // Як ParseUUIDPipe: guard виконується раніше за пайпи параметрів.
     if (!isUUID(workflowId))
       throw new BadRequestException('Validation failed (uuid is expected)');
-    // Тенант адресата — вузькою SECURITY DEFINER-функцією; workflow, секрет і ліміти читаються
+    // Тенант адресата (і вимкненого workflow: повтор прийнятої доставки повертає її виконання) —
+    // вузькою SECURITY DEFINER-функцією; workflow, секрет і ліміти читаються
     // вже в контексті цього тенанта (RLS), з явним предикатом tenantId.
     const tenantId = await this.system.webhookTenant(workflowId);
     const target =
       tenantId &&
       (await this.db.run(tenantId, async (em) => {
         const workflow = await em.findOne(Workflow, {
-          where: { id: workflowId, tenantId, enabled: true },
+          where: { id: workflowId, tenantId },
         });
         if (!workflow) return null;
         const tenant = await em.findOneOrFail(Tenant, {
@@ -76,7 +77,7 @@ export class WebhookSignatureGuard implements CanActivate {
           limits: delivery ? await effectiveLimits(em) : undefined,
         };
       }));
-    // Невідомий чи вимкнений адресат — теж невдала автентифікація (ліміт за IP): інакше перебір
+    // Невідомий адресат — теж невдала автентифікація (ліміт за IP): інакше перебір
     // випадкових UUID без жодного ліміту навантажував би БД пошуком тенанта.
     if (!target) return this.authFailures.reject(ctx, new NotFoundException());
 

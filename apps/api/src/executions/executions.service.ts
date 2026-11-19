@@ -169,7 +169,7 @@ export class ExecutionsService {
         [target.tenantId],
       );
       const workflow = await em.findOne(Workflow, {
-        where: { id: target.id, tenantId: target.tenantId, enabled: true },
+        where: { id: target.id, tenantId: target.tenantId },
         lock: { mode: 'pessimistic_read' },
       });
       if (!workflow) throw new NotFoundException();
@@ -195,6 +195,8 @@ export class ExecutionsService {
           );
         return existing.executionId;
       }
+      // Вимкнений workflow нових доставок не приймає, але повтор уже прийнятої (вище) повертає її.
+      if (!workflow.enabled) throw new NotFoundException();
       const { execution } = await this.insertExecution(
         em,
         workflow,

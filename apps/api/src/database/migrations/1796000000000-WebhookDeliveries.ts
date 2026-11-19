@@ -1,6 +1,19 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
 import { API_ROLE } from '../../tenancy/roles';
 
+const DEFINER = `SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp`;
+
+/**
+ * Тенант адресата webhook-а. Квитанція доставки живе весь час існування workflow, тож повтор уже
+ * прийнятої доставки автентифікується й для вимкненого workflow; нові доставки відхиляє постановка.
+ * CREATE OR REPLACE зберігає власника (flowforge_system) і ACL функції.
+ */
+const webhookTenantSql = (enabledOnly: boolean) =>
+  `CREATE OR REPLACE FUNCTION public.webhook_tenant(p_workflow_id uuid) RETURNS uuid
+      LANGUAGE sql STABLE ${DEFINER} AS $$
+        SELECT w."tenantId" FROM public.workflows w WHERE w.id = p_workflow_id${enabledOnly ? ' AND w.enabled' : ''}
+      $$`;
+
 export class WebhookDeliveries1796000000000 implements MigrationInterface {
   async up(runner: QueryRunner): Promise<void> {
     await runner.query(`ALTER TABLE tenants
@@ -31,6 +44,7 @@ export class WebhookDeliveries1796000000000 implements MigrationInterface {
     await runner.query(
       `GRANT SELECT, INSERT ON webhook_deliveries TO ${API_ROLE}`,
     );
+    await runner.query(webhookTenantSql(false));
   }
   async down(runner: QueryRunner): Promise<void> {
     const rows = (await runner.query(
@@ -43,6 +57,7 @@ export class WebhookDeliveries1796000000000 implements MigrationInterface {
       throw new Error(
         'webhook deliveries or active rotations prevent a lossless downgrade',
       );
+    await runner.query(webhookTenantSql(true));
     await runner.query('DROP TABLE webhook_deliveries');
     await runner.query(
       'ALTER TABLE workflows DROP CONSTRAINT "UQ_workflows_id_tenant"',

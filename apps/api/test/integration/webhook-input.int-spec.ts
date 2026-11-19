@@ -152,4 +152,25 @@ describe('webhook input is validated only after the signature', () => {
       await ds.getRepository(Execution).findOneByOrFail({ id: executionId }),
     ).toMatchObject({ input: body, trigger: 'webhook' });
   });
+
+  it('returns the accepted execution for a repeated delivery after the workflow is disabled', async () => {
+    const body = { order: 7 };
+    const headers = sign(body);
+    const first = await deliver(body, headers);
+    expect(first.status).toBe(202);
+    const { executionId } = (await first.json()) as { executionId: string };
+    await ds.query('UPDATE workflows SET enabled = false WHERE id = $1', [
+      workflowId,
+    ]);
+    const repeat = await deliver(body, headers);
+    expect(repeat.status).toBe(202);
+    expect(await repeat.json()).toEqual({ executionId });
+    // Нова доставка вимкненим workflow не приймається, а без підпису — як і раніше, 401.
+    expect((await deliver({ order: 8 }, sign({ order: 8 }))).status).toBe(404);
+    expect((await deliver({ order: 8 })).status).toBe(401);
+    const counts: unknown = await ds.query(
+      'SELECT (SELECT count(*)::int FROM executions) AS executions, (SELECT count(*)::int FROM jobs) AS jobs',
+    );
+    expect(counts).toEqual([{ executions: 1, jobs: 1 }]);
+  });
 });
