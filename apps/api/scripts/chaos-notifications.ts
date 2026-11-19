@@ -113,16 +113,36 @@ async function main(): Promise<void> {
       await db.destroy();
     }
   };
-  // Перезапуск БД, коли частину подій уже створено, а доставку ще не завершено.
+  // Блокуємо конкретну подію з відкритою спробою. До рестарту ніхто не зможе
+  // завершити її транзакцію доставки, навіть якщо HTTP-відповідь уже надійшла.
   const deadline = Date.now() + TIMEOUT_MS;
-  for (;;) {
-    const { events, delivered } = await counts();
-    if (events > 0 && delivered < RUNS) break;
-    if (Date.now() > deadline) throw new Error('no events were created');
-    await sleep(200);
+  const barrier = await openDatabase();
+  const holder = barrier.createQueryRunner();
+  try {
+    await holder.startTransaction();
+    for (;;) {
+      const active = (await holder.query(
+        `SELECT e.id, a.attempt FROM outbox_events e JOIN outbox_attempts a
+          ON a."eventId"=e.id AND a.attempt=e.attempts
+          WHERE e."executionId"=ANY($1) AND e.status='sending' AND a."finishedAt" IS NULL
+          LIMIT 1 FOR UPDATE OF e SKIP LOCKED`,
+        [ids],
+      )) as Array<{ id: string; attempt: number }>;
+      if (active.length) {
+        log(
+          `restarting postgres during attempt ${active[0].attempt} of event ${active[0].id}`,
+        );
+        docker([...COMPOSE, 'restart', 'postgres']);
+        break;
+      }
+      if (Date.now() > deadline)
+        throw new Error('no active delivery at restart barrier');
+      await sleep(10);
+    }
+  } finally {
+    await holder.release();
+    await barrier.destroy();
   }
-  log('restarting postgres while events are being delivered');
-  docker([...COMPOSE, 'restart', 'postgres']);
   for (;;) {
     let state: { events: number; delivered: number } | undefined;
     try {
@@ -163,7 +183,9 @@ async function main(): Promise<void> {
     )
       problems.push(`expected one event per execution, got ${events.length}`);
     const received = (await (
-      await fetch(`${SINK_URL}/notifications`)
+      await fetch(`${SINK_URL}/notifications`, {
+        signal: AbortSignal.timeout(10000),
+      })
     ).json()) as Delivery[];
     for (const e of events) {
       const hits = received.filter((d) => d.id === e.id);

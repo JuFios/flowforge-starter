@@ -81,7 +81,8 @@ export class WorkflowsService {
           timezone: input.timezone ?? 'UTC',
           enabled: input.enabled ?? true,
           missedRunPolicy: input.missedRunPolicy ?? 'run_once',
-          nextFireAt: input.cron ? new Date(0) : null,
+          nextFireAt:
+            input.cron && input.enabled !== false ? new Date(0) : null,
         }),
       );
       await this.saveVersion(em, wf);
@@ -118,6 +119,11 @@ export class WorkflowsService {
       if (cron !== wf.cron || timezone !== wf.timezone)
         assertSchedule(cron, timezone);
       if (input.name !== undefined) wf.name = input.name;
+      if (!cron || input.enabled === false) {
+        wf.nextFireAt = null;
+        wf.scheduleError = null;
+        wf.scheduleBlockedSince = null;
+      }
       wf.cron = cron;
       wf.timezone = timezone;
       if (input.enabled !== undefined) wf.enabled = input.enabled;
@@ -129,11 +135,12 @@ export class WorkflowsService {
       }
       const saved = await em.save(wf);
       if (steps !== undefined) await this.saveVersion(em, saved);
-      if (reanchor) {
+      if (reanchor && wf.enabled) {
         const [rows]: [Workflow[], number] = await em.query(
-          `UPDATE workflows SET "scheduleCursor" = now(), "nextFireAt" = now(),
+          `UPDATE workflows SET "scheduleCursor" = stamp.at, "nextFireAt" = stamp.at,
                   "scheduleError" = NULL, "scheduleBlockedSince" = NULL
-            WHERE id = $1 AND "tenantId" = $2 RETURNING *`,
+            FROM (SELECT clock_timestamp() AS at) stamp
+            WHERE id = $1 AND "tenantId" = $2 RETURNING workflows.*`,
           [id, tenantId],
         );
         return rows[0];

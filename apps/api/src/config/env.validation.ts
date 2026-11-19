@@ -503,10 +503,6 @@ function checkRelations<T extends EnvironmentVariables>(env: T): T {
     problems.push(
       'SCHEDULER_MISFIRE_GRACE_MS: не може бути меншим за SCHEDULER_TICK_MS',
     );
-  if (env.OUTBOX_HTTP_TIMEOUT_MS > env.HTTP_STEP_TIMEOUT_MS)
-    problems.push(
-      'OUTBOX_HTTP_TIMEOUT_MS: не може бути більшим за HTTP_STEP_TIMEOUT_MS',
-    );
   if (env.OUTBOX_BACKOFF_MAX_MS < env.OUTBOX_BACKOFF_BASE_MS)
     problems.push(
       'OUTBOX_BACKOFF_MAX_MS: не може бути меншим за OUTBOX_BACKOFF_BASE_MS',

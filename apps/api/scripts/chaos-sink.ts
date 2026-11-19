@@ -79,7 +79,8 @@ createServer((req, res) => {
         });
       if (!seen.has(id)) {
         seen.add(id);
-        req.socket.destroy();
+        // Залишаємо відкриту спробу доступною для бар’єра рестарту PostgreSQL.
+        setTimeout(() => req.socket.destroy(), DELAY_MS);
         return;
       }
       res.writeHead(204).end();

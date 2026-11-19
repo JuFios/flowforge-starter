@@ -323,7 +323,7 @@ OpenAPI-документація — буде заповнено.
 | `OUTBOX_CONCURRENCY` | `4` | циклів доставки сповіщень на воркер, 0..64 (`0` — воркер сповіщень не надсилає) |
 | `OUTBOX_TENANT_IN_FLIGHT` | `2` | одночасних спроб доставки одного тенанта в усьому кластері, 1..64: повільний endpoint не займає всіх циклів |
 | `OUTBOX_POLL_INTERVAL_MS` | `1000` | пауза, коли надсилати нічого, 10..60000 мс, з відхиленням ±50% |
-| `OUTBOX_HTTP_TIMEOUT_MS` | `10000` | таймаут однієї спроби доставки, 100..60000 мс, не більше за `HTTP_STEP_TIMEOUT_MS`; lease спроби — `2 ×` таймаут `+ 5 с` |
+| `OUTBOX_HTTP_TIMEOUT_MS` | `10000` | таймаут однієї спроби доставки, 100..60000 мс; транспорт застосовує мінімум із цим значенням та `HTTP_STEP_TIMEOUT_MS`; lease спроби — `2 ×` таймаут `+ 5 с` |
 | `OUTBOX_BACKOFF_BASE_MS` / `OUTBOX_BACKOFF_MAX_MS` | `5000` / `3600000` | backoff між спробами (експоненційний, повний jitter, не раніше за `Retry-After`); стеля — найдовша пауза: спроб без ліміту, недоставлена подія не видаляється |
 | `OUTBOX_RETENTION_DAYS` | `7` | скільки днів зберігати доставлені події, 1..3650; недоставлені не видаляються ніколи |
 | `TEST_DATABASE_URL` | `postgres://flowforge:flowforge@localhost:5432/flowforge_test` | лише для інтеграційних тестів |
@@ -822,10 +822,13 @@ async function handle(headers, rawBody, secrets, store) {
   if (!verify(headers, rawBody, secrets)) return 401;
   const event = JSON.parse(rawBody.toString('utf8'));
   if (event.id !== headers['x-flowforge-event-id']) return 400;
-  const fresh = await store.insertIfAbsent(event.id);
-  if (!fresh) return 200; // уже оброблено раніше
-  // … дія за event.type та event.data …
-  return 204;
+  // transaction повертає результат після COMMIT. Виняток відкочує обидва записи
+  // і доходить до HTTP-обробника, який відповідає 5xx.
+  return store.transaction(async (tx) => {
+    if (!(await tx.insertIfAbsent(event.id))) return 200;
+    await tx.applyEvent(event);
+    return 204;
+  });
 }
 
 module.exports = { verify, handle };
@@ -2891,8 +2894,8 @@ RFC 5545 §3.3.5:
 бібліотекою. Окремо тест порівнює генератор із незалежним еталоном (перебір кожної хвилини вікна через
 `Intl` за правилом вище, без `cron-parser`) для Kyiv, New York і Lord Howe (перехід на 30 хв),
 починаючи з кожної півхвилини ±6 год навколо переходу. Робота на один момент — O(1) викликів
-`cron-parser` плюс бінарний пошук переходу; `lastAtOrBefore` для `run_once` — вікнами, що
-подвоюються, без перебору всього пропуску.
+`cron-parser` плюс бінарний пошук переходу; `lastAtOrBefore` для `run_once` — двійковим пошуком за часом: кількість викликів генератора
+зростає логарифмічно з довжиною інтервалу в секундах.
 
 **Альтернативи.**
 
@@ -3083,7 +3086,7 @@ flowchart TD
 більшість) не потрапляють в індекс. На 100 тис. задач (99,8% `done`) кожен із них займає 16 КіБ.
 Старий індекс `(status, "runAt")` видалено.
 
-**Як перевірено.** Індекси планувальника й outbox — `scheduler-outbox-plans.int-spec.ts` (20 тис. розкладів, з них 20 належних; 50 тис. подій, з них 20 недоставлених): кожен запит гарячого шляху йде своїм індексом без `Seq Scan`. Інтеграційний тест `query-plans.int-spec.ts` засіває 20 тис. задач і кроків
+**Як перевірено.** Індекси планувальника й outbox — `scheduler-outbox-plans.int-spec.ts` (20 тис. розкладів, з них 20 належних; 50 тис. подій, з них 20 недоставлених; 3001 налаштування тенантів, одне належне): кожен із шести перевірених запитів йде своїм індексом без `Seq Scan`. Інтеграційний тест `query-plans.int-spec.ts` засіває 20 тис. задач і кроків
 і для того самого SQL, що виконує черга (оператори з тіла `claim_job` у каталозі, `EXPIRED_LEASES_SQL`,
 `FINISHED_JOBS_SQL`, `PURGE_FINISHED_SQL`, `PURGE_EXECUTIONS_SQL`, пошук за ключем запуску й
 задачі за виконанням), перевіряє в

@@ -12,8 +12,7 @@ const MAX_SHIFT = 3 * HOUR;
 const TRANSITION_STEP = 12 * HOUR;
 /** Найдальший горизонт пошуку наступного моменту (рідкісні розклади на кшталт 29 лютого). */
 const HORIZON = 10 * 366 * DAY;
-/** Межа роботи `lastAtOrBefore` — кількість моментів, які можна перебрати за один виклик. */
-const MAX_SCAN = 100_000;
+const MAX_FORMATTERS = 128;
 
 /** Ім'я зони IANA (зокрема аліаси на кшталт `US/Eastern`), а не зміщення чи `local`. */
 const ZONE_NAME = /^[A-Za-z][A-Za-z0-9_+-]*(\/[A-Za-z0-9_+-]+)*$/;
@@ -21,7 +20,8 @@ const ZONE_NAME = /^[A-Za-z][A-Za-z0-9_+-]*(\/[A-Za-z0-9_+-]+)*$/;
 const formatters = new Map<string, Intl.DateTimeFormat>();
 
 function formatter(timeZone: string): Intl.DateTimeFormat {
-  let f = formatters.get(timeZone);
+  const key = timeZone.toLowerCase();
+  let f = formatters.get(key);
   if (!f) {
     f = new Intl.DateTimeFormat('en-US', {
       timeZone,
@@ -33,7 +33,11 @@ function formatter(timeZone: string): Intl.DateTimeFormat {
       minute: '2-digit',
       second: '2-digit',
     });
-    formatters.set(timeZone, f);
+    if (formatters.size >= MAX_FORMATTERS) {
+      const oldest = formatters.keys().next();
+      if (!oldest.done) formatters.delete(oldest.value);
+    }
+    formatters.set(key, f);
   }
   return f;
 }
@@ -144,26 +148,24 @@ export class CronSchedule {
     }
   }
 
-  /**
-   * Останній момент розкладу в (`after`, `atOrBefore`] або undefined. Лише `next()` (у `prev()`
-   * cron-parser інша семантика переходів), вікнами, що подвоюються, від `atOrBefore` назад: робота
-   * пропорційна кількості моментів у знайденому вікні, а не всьому проміжку.
-   */
+  /** Межа монотонного предиката next(t) <= end дає останнє спрацювання з тими ж правилами DST. */
   lastAtOrBefore(atOrBefore: Date, after: Date): Date | undefined {
-    const end = atOrBefore.getTime();
-    const floor = after.getTime();
-    let scanned = 0;
-    for (let width = 60 * SECOND; ; width *= 2) {
-      const start = Math.max(floor, end - width);
-      let last: number | undefined;
-      for (let t = this.nextMs(start); t <= end; t = this.nextMs(t)) {
-        last = t;
-        if (++scanned > MAX_SCAN)
-          throw new InvalidScheduleError('schedule fires too often to scan');
-      }
-      if (last !== undefined) return new Date(last);
-      if (start === floor) return undefined;
+    const end = Math.floor(atOrBefore.getTime() / SECOND);
+    let lo = Math.floor(after.getTime() / SECOND);
+    if (lo >= end) return undefined;
+    if (this.next(new Date((end - 1) * SECOND)).getTime() === end * SECOND)
+      return new Date(end * SECOND);
+    const first = this.next(new Date(lo * SECOND)).getTime() / SECOND;
+    if (first > end) return undefined;
+    lo = first;
+    let hi = end;
+    while (lo < hi) {
+      const mid = lo + Math.floor((hi - lo) / 2);
+      const next = this.next(new Date(mid * SECOND)).getTime() / SECOND;
+      if (next <= end) lo = next;
+      else hi = mid;
     }
+    return new Date(lo * SECOND);
   }
 
   private offset(instant: number): number {

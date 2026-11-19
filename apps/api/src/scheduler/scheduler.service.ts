@@ -46,7 +46,15 @@ type Attempt =
   | 'invalid';
 
 /** Рядок workflow, заблокований спрацюванням, разом із часом БД. */
+/** Версія заблокованого рядка для умовного запису після відкату постановки. */
+class BlockedSchedule extends Error {
+  constructor(readonly revision: string) {
+    super('schedule enqueue rolled back');
+  }
+}
+
 interface LockedSchedule {
+  revision: string;
   id: string;
   tenantId: string;
   cron: string;
@@ -287,20 +295,23 @@ export class SchedulerService
     workflowId: string,
   ): Promise<{ attempt: Attempt; created: boolean }> {
     try {
-      return await this.db.run(tenantId, (em) =>
-        this.fireIn(em, tenantId, workflowId),
+      const afterCommit: Array<() => void> = [];
+      const result = await this.db.run(tenantId, (em) =>
+        this.fireIn(em, tenantId, workflowId, afterCommit),
       );
+      for (const observe of afterCommit) observe();
+      return result;
     } catch (err) {
-      if (!(err instanceof QueueFullException)) throw err;
+      if (!(err instanceof BlockedSchedule)) throw err;
       this.metrics.blocked.inc({ reason: 'queue_full' });
       const [rows]: [Array<{ id: string }>, number] = await this.db.run(
         tenantId,
         (em) =>
           em.query(
             `UPDATE workflows SET "scheduleBlockedSince" = now()
-              WHERE id = $1 AND "tenantId" = $2 AND "scheduleBlockedSince" IS NULL
+              WHERE id = $1 AND "tenantId" = $2 AND xmin::text = $3 AND "scheduleBlockedSince" IS NULL
               RETURNING id`,
-            [workflowId, tenantId],
+            [workflowId, tenantId, err.revision],
           ),
       );
       if (rows.length > 0)
@@ -316,9 +327,10 @@ export class SchedulerService
     em: EntityManager,
     tenantId: string,
     workflowId: string,
+    afterCommit: Array<() => void>,
   ): Promise<{ attempt: Attempt; created: boolean }> {
     const [row]: LockedSchedule[] = await em.query(
-      `SELECT id, "tenantId", cron, timezone, version, "missedRunPolicy", "scheduleCursor",
+      `SELECT id, "tenantId", cron, timezone, version, xmin::text AS revision, "missedRunPolicy", "scheduleCursor",
               "nextFireAt", "scheduleBlockedSince", "scheduleError", clock_timestamp() AS now
          FROM workflows
         WHERE id = $1 AND "tenantId" = $2 AND enabled AND cron IS NOT NULL
@@ -333,11 +345,11 @@ export class SchedulerService
       next = schedule.next(row.scheduleCursor);
     } catch (err) {
       if (!(err instanceof InvalidScheduleError)) throw err;
-      await this.markInvalid(em, row, err.message);
+      await this.markInvalid(em, row, err.message, afterCommit);
       return { attempt: 'invalid', created: false };
     }
     if (next > row.now) {
-      await this.save(em, row, row.scheduleCursor, next);
+      await this.save(em, row, row.scheduleCursor, next, afterCommit);
       return { attempt: 'idle', created: false };
     }
     const grace = this.config.get('SCHEDULER_MISFIRE_GRACE_MS', {
@@ -348,31 +360,35 @@ export class SchedulerService
     let cursor = next;
     if (next < threshold) {
       if (row.missedRunPolicy === 'skip') {
-        this.metrics.firings.inc({ outcome: 'missed_skipped' });
-        this.logger.warn(
-          {
-            workflowId,
-            firstSkipped: next.toISOString(),
-            skippedUntil: threshold.toISOString(),
-          },
-          'missed scheduled runs skipped by the workflow policy',
-        );
-        await this.save(em, row, threshold, schedule);
+        afterCommit.push(() => {
+          this.metrics.firings.inc({ outcome: 'missed_skipped' });
+          this.logger.warn(
+            {
+              workflowId,
+              firstSkipped: next.toISOString(),
+              skippedUntil: threshold.toISOString(),
+            },
+            'missed scheduled runs skipped by the workflow policy',
+          );
+        });
+        await this.save(em, row, threshold, schedule, afterCommit);
         return { attempt: 'skipped', created: false };
       }
       if (row.missedRunPolicy === 'run_once') {
         // Один запуск за весь пропуск — за останнім пропущеним моментом.
         at = schedule.lastAtOrBefore(threshold, row.scheduleCursor) ?? next;
         cursor = threshold;
-        this.metrics.firings.inc({ outcome: 'missed_run_once' });
-        this.logger.warn(
-          {
-            workflowId,
-            firstMissed: next.toISOString(),
-            runAt: at.toISOString(),
-          },
-          'missed scheduled runs collapsed into one run by the workflow policy',
-        );
+        afterCommit.push(() => {
+          this.metrics.firings.inc({ outcome: 'missed_run_once' });
+          this.logger.warn(
+            {
+              workflowId,
+              firstMissed: next.toISOString(),
+              runAt: at.toISOString(),
+            },
+            'missed scheduled runs collapsed into one run by the workflow policy',
+          );
+        });
       }
       // run_all: кожен пропущений момент — окреме виконання, у порядку розкладу.
     }
@@ -394,6 +410,8 @@ export class SchedulerService
             correlationId,
           );
         } catch (err) {
+          if (err instanceof QueueFullException)
+            throw new BlockedSchedule(row.revision);
           // У контексті спрацювання (кореляційний ID моменту), з workflowId і моментом. Помилка
           // з'єднання перериває тік, і її логує сам тік.
           if (scopedToWorkflow(err)) {
@@ -411,12 +429,14 @@ export class SchedulerService
         }
       },
     );
-    await this.save(em, row, cursor, schedule);
-    this.metrics.firings.inc({ outcome: created ? 'created' : 'existing' });
-    if (created)
-      this.metrics.lag.observe(
-        Math.max(0, row.now.getTime() - at.getTime()) / 1000,
-      );
+    await this.save(em, row, cursor, schedule, afterCommit);
+    afterCommit.push(() => {
+      this.metrics.firings.inc({ outcome: created ? 'created' : 'existing' });
+      if (created)
+        this.metrics.lag.observe(
+          Math.max(0, row.now.getTime() - at.getTime()) / 1000,
+        );
+    });
     return { attempt: 'fired', created };
   }
 
@@ -439,6 +459,7 @@ export class SchedulerService
     row: LockedSchedule,
     cursor: Date,
     next: Date | CronSchedule,
+    afterCommit: Array<() => void>,
   ): Promise<void> {
     const nextFireAt =
       next instanceof CronSchedule ? this.following(next, cursor) : next;
@@ -454,13 +475,13 @@ export class SchedulerService
         WHERE id = $1 AND "tenantId" = $2`,
       [row.id, row.tenantId, cursor, nextFireAt],
     );
-    if (row.scheduleBlockedSince !== null)
-      this.logger.log(
-        {
-          workflowId: row.id,
-          heldSince: row.scheduleBlockedSince.toISOString(),
-        },
-        'scheduled runs resumed: the tenant queue has room again',
+    const heldSince = row.scheduleBlockedSince?.toISOString();
+    if (heldSince)
+      afterCommit.push(() =>
+        this.logger.log(
+          { workflowId: row.id, heldSince },
+          'scheduled runs resumed: the tenant queue has room again',
+        ),
       );
   }
 
@@ -472,17 +493,20 @@ export class SchedulerService
     em: EntityManager,
     row: LockedSchedule,
     reason: string,
+    afterCommit: Array<() => void>,
   ): Promise<void> {
-    this.metrics.errors.inc({ reason: 'invalid_schedule' });
     await em.query(
       `UPDATE workflows SET "nextFireAt" = NULL, "scheduleError" = $3
         WHERE id = $1 AND "tenantId" = $2`,
       [row.id, row.tenantId, reason],
     );
-    if (row.scheduleError !== reason)
-      this.logger.warn(
-        { workflowId: row.id, reason },
-        'cron schedule could not be evaluated',
-      );
+    afterCommit.push(() => {
+      this.metrics.errors.inc({ reason: 'invalid_schedule' });
+      if (row.scheduleError !== reason)
+        this.logger.warn(
+          { workflowId: row.id, reason },
+          'cron schedule could not be evaluated',
+        );
+    });
   }
 }

@@ -48,6 +48,7 @@ services:
     <<: *api-image
     environment:
       NODE_ENV: production
+      HTTP_DENY_CIDRS: &http-deny-cidrs ${HTTP_DENY_CIDRS:-}
       ADMIN_TOKEN: ${ADMIN_TOKEN:?задайте ADMIN_TOKEN у .env у корені репозиторію (див. README, розділ «Запуск»)}
       # Роль API без BYPASSRLS (flowforge_api_role); пароль — лише символи [A-Za-z0-9].
       DATABASE_URL: postgres://flowforge_api:${API_DB_PASSWORD:?задайте API_DB_PASSWORD у .env}@postgres:5432/flowforge
@@ -66,7 +67,7 @@ services:
     command: ['node', 'dist/worker']
     environment:
       NODE_ENV: production
-      HTTP_DENY_CIDRS: ${HTTP_DENY_CIDRS:-}
+      HTTP_DENY_CIDRS: *http-deny-cidrs
       HTTP_STEP_TIMEOUT_MS: ${HTTP_STEP_TIMEOUT_MS:-15000}
       HTTP_RESPONSE_BYTES: ${HTTP_RESPONSE_BYTES:-1048576}
       # Роль воркера без BYPASSRLS (flowforge_worker_role). ADMIN_TOKEN воркер не отримує.

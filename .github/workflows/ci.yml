@@ -175,6 +175,15 @@ jobs:
         run: |
           diff <(docker compose config --format json | jq -S '.networks.default') \
                <(docker compose -f docker-compose.yml -f docker-compose.chaos.yml config --format json | jq -S '.networks.default')
+      - name: Verify the receiver binding and shared outbound network policy
+        env:
+          HTTP_DENY_CIDRS: 203.0.113.0/24
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.chaos.yml config --format json |
+            jq -e '.services as $s |
+              $s.api.environment.HTTP_DENY_CIDRS == env.HTTP_DENY_CIDRS and
+              $s.worker.environment.HTTP_DENY_CIDRS == env.HTTP_DENY_CIDRS and
+              ($s.sink.ports | length == 1 and all(.host_ip == "127.0.0.1"))' > /dev/null
       - name: Add the chaos receiver and short worker leases
         run: docker compose -f docker-compose.yml -f docker-compose.chaos.yml up -d --wait --wait-timeout 180
       - name: Kill workers under load and verify exactly-once effects
