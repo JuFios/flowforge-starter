@@ -313,6 +313,29 @@ describe('notification settings', () => {
       ).toBe(400);
   });
 
+  it('validates the UTC calendar of event cursors before querying', async () => {
+    for (const [date, expected] of [
+      ['2024-02-29T23:59:59', 200],
+      ['2024-02-30T00:00:00', 400],
+      ['2025-02-29T00:00:00', 400],
+      ['2024-02-29T24:00:00', 400],
+      ['0000-01-01T00:00:00', 400],
+    ] as const) {
+      const cursor = Buffer.from(`${date}.000000Z|${a.tenant.id}`).toString(
+        'base64url',
+      );
+      expect(
+        (
+          await call(
+            a,
+            'GET',
+            `/tenants/me/notifications/events?cursor=${cursor}`,
+          )
+        ).status,
+      ).toBe(expected);
+    }
+  });
+
   it('pages through events with a cursor without gaps or repeats', async () => {
     await setup(a);
     const ids: string[] = [];
