@@ -92,11 +92,18 @@ export class OutboxMetrics {
       help: 'Undelivered notification events of each tenant',
       labelNames: ['tenant_id'],
       registers,
+      // Реєстр збирає метрики паралельно: значення заповнює збір першого gauge.
+      collect: async () => {
+        await this.collecting;
+      },
     });
     const oldest = new Gauge({
       name: 'flowforge_outbox_oldest_pending_age_seconds',
       help: 'Age of the oldest undelivered notification event (0 when none)',
       registers,
+      collect: async () => {
+        await this.collecting;
+      },
     });
     this.collectErrors = new Counter({
       name: 'flowforge_outbox_backlog_collect_errors_total',
