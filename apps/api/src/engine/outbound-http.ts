@@ -259,8 +259,9 @@ export async function outboundHttp(
         !location ||
         redirects === 'reject'
       ) {
-        if (!readBody || !response.ok) {
-          await response.body?.cancel();
+        if (!readBody) {
+          // Статус уже відомий; помилка тіла (обрив після заголовків) результату не змінює.
+          await response.body?.cancel().catch(() => undefined);
           return {
             status: response.status,
             headers: response.headers,
@@ -270,7 +271,7 @@ export async function outboundHttp(
         return {
           status: response.status,
           headers: response.headers,
-          body: await readLimited(response),
+          body: response.ok ? await readLimited(response) : '',
         };
       }
       if (hops >= 5 || !URL.canParse(location, url))
