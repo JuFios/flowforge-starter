@@ -148,6 +148,46 @@ describe('notification settings', () => {
     },
   );
 
+  it.each(['/first', '/second'])(
+    'serializes concurrent initial PUTs ending at %s',
+    async (secondPath) => {
+      const holder = ds.createQueryRunner();
+      await holder.connect();
+      await holder.startTransaction();
+      const put = (path: string) =>
+        call<{
+          secret?: string;
+          url: string;
+          revision: number;
+          keys: Array<{ id: string }>;
+        }>(a, 'PUT', '/tenants/me/notifications', { url: receiver.url(path) });
+      try {
+        // SHARE пропускає пошук FOR NO KEY UPDATE, утримуючи обидві вставки до COMMIT.
+        await holder.query('LOCK TABLE notification_settings IN SHARE MODE');
+        const results = Promise.all([put('/first'), put(secondPath)]);
+        await waitForBlocked(ds, holder, 2);
+        await holder.commitTransaction();
+        const responses = await results;
+        expect(responses.map((r) => r.status)).toEqual([200, 200]);
+        const creator = responses.filter((r) => r.body.secret);
+        expect(creator).toHaveLength(1);
+        expect(responses[0].body.keys).toEqual(responses[1].body.keys);
+        const last = responses.find((r) => !r.body.secret)!;
+        expect(
+          await ds.query(
+            'SELECT url, revision FROM notification_settings WHERE "tenantId"=$1',
+            [a.tenant.id],
+          ),
+        ).toEqual([
+          { url: last.body.url, revision: secondPath === '/first' ? 1 : 2 },
+        ]);
+      } finally {
+        if (holder.isTransactionActive) await holder.rollbackTransaction();
+        await holder.release();
+      }
+    },
+  );
+
   it('shows the signing secret once and never again', async () => {
     const created = await setup(a);
     expect(created.secret).toMatch(/^[0-9a-f]{64}$/);
