@@ -34,6 +34,7 @@ import { RateLimitInsertTime1795920000000 } from './1795920000000-RateLimitInser
 
 import { WebhookDeliveries1796000000000 } from './1796000000000-WebhookDeliveries';
 import { ScheduleProgress1796100000000 } from './1796100000000-ScheduleProgress';
+import { NotificationOutbox1796200000000 } from './1796200000000-NotificationOutbox';
 
 export const MIGRATIONS = [
   InitialSchema1794920217603,
@@ -61,4 +62,5 @@ export const MIGRATIONS = [
   RateLimitInsertTime1795920000000,
   WebhookDeliveries1796000000000,
   ScheduleProgress1796100000000,
+  NotificationOutbox1796200000000,
 ];

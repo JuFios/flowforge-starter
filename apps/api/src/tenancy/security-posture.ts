@@ -82,6 +82,30 @@ export const POSTURE: {
         [SYSTEM_ROLE]: ALL_TABLE,
       },
     },
+    notification_settings: {
+      tenantColumn: 'tenantId',
+      grants: {
+        [API_ROLE]: ALL_TABLE,
+        [WORKER_ROLE]: ['SELECT'],
+        [SYSTEM_ROLE]: ALL_TABLE,
+      },
+    },
+    outbox_events: {
+      tenantColumn: 'tenantId',
+      grants: {
+        [API_ROLE]: ['SELECT', 'UPDATE'],
+        [WORKER_ROLE]: ['SELECT', 'UPDATE'],
+        [SYSTEM_ROLE]: ALL_TABLE,
+      },
+    },
+    outbox_attempts: {
+      tenantColumn: 'tenantId',
+      grants: {
+        [API_ROLE]: ['SELECT'],
+        [WORKER_ROLE]: ['SELECT', 'UPDATE'],
+        [SYSTEM_ROLE]: ALL_TABLE,
+      },
+    },
     tenant_usage: {
       tenantColumn: 'tenantId',
       grants: { [SYSTEM_ROLE]: ALL_TABLE },
@@ -125,6 +149,17 @@ export const POSTURE: {
     'queue_depth_by_tenant()': { owner: SYSTEM_ROLE, execute: [WORKER_ROLE] },
     // Тригерні функції обліку: їх викликає лише тригер.
     'tenant_usage_on_job()': { owner: SYSTEM_ROLE, execute: [] },
+    'execution_terminal_cycle()': { owner: SYSTEM_ROLE, execute: [] },
+    'outbox_on_execution()': { owner: SYSTEM_ROLE, execute: [] },
+    'claim_outbox_event(text,integer,integer)': {
+      owner: SYSTEM_ROLE,
+      execute: [WORKER_ROLE],
+    },
+    'purge_delivered_events(integer,integer)': {
+      owner: SYSTEM_ROLE,
+      execute: [WORKER_ROLE],
+    },
+    'outbox_backlog()': { owner: SYSTEM_ROLE, execute: [WORKER_ROLE] },
     'tenant_usage_on_tenant()': { owner: SYSTEM_ROLE, execute: [] },
     'tenant_usage_on_defaults()': { owner: SYSTEM_ROLE, execute: [] },
   },

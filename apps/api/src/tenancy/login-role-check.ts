@@ -50,7 +50,10 @@ export const GROUP_FUNCTIONS: Readonly<Record<string, readonly string[]>> = {
   [WORKER_ROLE]: [
     'app_current_tenant()',
     'claim_job(text,integer)',
+    'claim_outbox_event(text,integer,integer)',
     'expired_lease_tenants(uuid[],integer)',
+    'outbox_backlog()',
+    'purge_delivered_events(integer,integer)',
     'purge_execution_history(integer,integer)',
     'purge_finished_jobs(integer,integer)',
     'queue_depth_by_tenant()',
@@ -79,10 +82,16 @@ export const UNSAFE_GROUP_SQL = `
      ('flowforge_api_role','executions',ARRAY['SELECT','INSERT','UPDATE']),
      ('flowforge_api_role','step_runs',ARRAY['SELECT']),
      ('flowforge_api_role','jobs',ARRAY['SELECT','INSERT','UPDATE']),
+     ('flowforge_api_role','notification_settings',ARRAY['SELECT','INSERT','UPDATE','DELETE']),
+     ('flowforge_api_role','outbox_events',ARRAY['SELECT','UPDATE']),
+     ('flowforge_api_role','outbox_attempts',ARRAY['SELECT']),
      ('flowforge_worker_role','workflow_versions',ARRAY['SELECT']),
      ('flowforge_worker_role','executions',ARRAY['SELECT','UPDATE']),
      ('flowforge_worker_role','step_runs',ARRAY['SELECT','INSERT','UPDATE']),
-     ('flowforge_worker_role','jobs',ARRAY['SELECT','UPDATE'])),
+     ('flowforge_worker_role','jobs',ARRAY['SELECT','UPDATE']),
+     ('flowforge_worker_role','notification_settings',ARRAY['SELECT']),
+     ('flowforge_worker_role','outbox_events',ARRAY['SELECT','UPDATE']),
+     ('flowforge_worker_role','outbox_attempts',ARRAY['SELECT','UPDATE'])),
   allowed_functions(role_name, signature) AS (VALUES
      ${ALLOWED_FUNCTIONS_VALUES}),
   relations AS (SELECT c.oid,c.relname,c.relowner,c.relacl FROM pg_class c

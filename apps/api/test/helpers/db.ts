@@ -24,6 +24,9 @@ export async function truncateAll(ds: DataSource): Promise<void> {
   const names = [
     ...ds.entityMetadatas.map((m) => m.tableName),
     'rate_limit_buckets',
+    'notification_settings',
+    'outbox_events',
+    'outbox_attempts',
   ];
   const existing: Array<{ name: string }> = await ds.query(
     `SELECT table_name AS name FROM information_schema.tables
