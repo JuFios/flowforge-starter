@@ -5,6 +5,7 @@ import { SchedulerService } from '../../src/scheduler/scheduler.service';
 import { SystemDb } from '../../src/tenancy/system-db';
 import { RunningApp, startApp } from '../helpers/app';
 import { createTenant, openTestDataSource, truncateAll } from '../helpers/db';
+import { dbNow, wholeSeconds } from '../helpers/schedule';
 
 /**
  * Справедливість планувальника між тенантами (README 3.3.5, 3.3.8): тенант із тисячами розкладів
@@ -157,15 +158,21 @@ describe('scheduled tenant fairness', () => {
     ].sort();
     await schedules(a, 20, 15_000, '00000000-0000-4000-9000-');
     await schedules(b, 1, 15_000, '00000000-0000-4000-a000-');
+    const [{ cursor }]: Array<{ cursor: Date }> = await ds.query(
+      'SELECT max("scheduleCursor") AS cursor FROM workflows',
+    );
     const { calls, restore } = recordFirings();
     try {
+      const before = await dbNow(ds);
       await scheduler.tick();
       const tenants = calls.map((c) => c.tenantId);
       expect(tenants).toContain(a);
       // Раунд тенанта — до 16 спроб постановки, а не 16 workflow з усіма їхніми спрацюваннями.
       expect(tenants.indexOf(b)).toBeLessThanOrEqual(16);
 
-      // Відновлення посеред workflow і між сторінками не губить і не повторює спрацювань.
+      // Відновлення посеред workflow і між сторінками не губить і не повторює спрацювань. Кожен
+      // розклад має всі моменти від курсора до початку тіку; workflow, оброблені пізніше, бачать
+      // пізніший час БД і можуть мати ще кілька моментів, тож однакової кількості не вимагаємо.
       const byWorkflow = new Map<string, number[]>();
       for (const c of calls)
         byWorkflow.set(c.workflowId, [
@@ -173,11 +180,10 @@ describe('scheduled tenant fairness', () => {
           c.at,
         ]);
       expect(byWorkflow.size).toBe(21);
-      const perWorkflow = [...byWorkflow.values()];
-      const expected = perWorkflow[0].length;
-      expect(expected).toBeGreaterThanOrEqual(15);
-      for (const times of perWorkflow) {
-        expect(Math.abs(times.length - expected)).toBeLessThanOrEqual(1);
+      const due = wholeSeconds(cursor, before);
+      expect(due.length).toBeGreaterThanOrEqual(15);
+      for (const times of byWorkflow.values()) {
+        expect(times.slice(0, due.length)).toEqual(due);
         expect(times).toEqual([...times].sort((x, y) => x - y));
         expect(new Set(times).size).toBe(times.length);
         for (let i = 1; i < times.length; i++)
