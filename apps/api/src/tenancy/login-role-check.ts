@@ -74,6 +74,7 @@ export const UNSAFE_GROUP_SQL = `
                      FROM pg_roles WHERE rolname = $1),
   allowed(role_name, table_name, rights) AS (VALUES
      ('flowforge_api_role','tenants',ARRAY['SELECT','INSERT','UPDATE']),
+     ('flowforge_api_role','webhook_deliveries',ARRAY['SELECT','INSERT']),
      ('flowforge_api_role','workflows',ARRAY['SELECT','INSERT','UPDATE','DELETE']),
      ('flowforge_api_role','workflow_versions',ARRAY['SELECT','INSERT']),
      ('flowforge_api_role','executions',ARRAY['SELECT','INSERT','UPDATE']),

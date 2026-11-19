@@ -1,5 +1,6 @@
 import {
   ConflictException,
+  UnauthorizedException,
   Injectable,
   Logger,
   NotFoundException,
@@ -23,6 +24,11 @@ import {
 import { QueueFullException } from '../limits/limit-exceptions';
 import { LimitsMetrics } from '../limits/limits.metrics';
 import { MetricsService } from '../observability/metrics.service';
+import {
+  readClock,
+  VerifiedDelivery,
+  WEBHOOK_WINDOW_SECONDS,
+} from '../webhooks/webhook-signature';
 import { TenantDb } from '../tenancy/tenant-db';
 
 /** Джерело постановки (мітка метрики відхилених постановок). */
@@ -135,70 +141,151 @@ export class ExecutionsService {
         );
         if (existing) return { execution: existing, created: false };
       }
-      this.assertQueueSlot(usage, trigger);
-      const version = await em.findOneOrFail(WorkflowVersion, {
-        where: {
-          workflowId: workflow.id,
-          version: workflow.version,
-          tenantId: workflow.tenantId,
-        },
-        select: { id: true },
-      });
-      const fields = {
-        tenantId: workflow.tenantId,
-        workflowId: workflow.id,
-        workflowVersionId: version.id,
-        scheduledAt,
+      return this.insertExecution(
+        em,
+        workflow,
         input,
         trigger,
+        idempotencyKey,
+        scheduledAt,
         correlationId,
-      };
-      let execution: Execution;
-      if (idempotencyKey === null) {
-        execution = await em.save(em.create(Execution, fields));
-      } else {
-        // Постановки тенанта серіалізовані блокуванням обліку, тож конфлікт ключа тут неможливий;
-        // ON CONFLICT лишається страховкою унікального індексу.
-        const [inserted]: Execution[] = await em.query(
-          `INSERT INTO executions
+        usage,
+      );
+    });
+  }
+
+  async enqueueWebhook(
+    target: Workflow,
+    input: Record<string, unknown>,
+    proof: VerifiedDelivery,
+  ): Promise<string> {
+    return this.db.run(target.tenantId, async (em) => {
+      // Порядок блокувань однаковий для всіх доставок. Зміна ключів блокує лише тенанта.
+      const [keys]: Array<{
+        webhookKeyId: string;
+        nextWebhookKeyId: string | null;
+      }> = await em.query(
+        'SELECT "webhookKeyId","nextWebhookKeyId" FROM tenants WHERE id=$1 FOR SHARE',
+        [target.tenantId],
+      );
+      const workflow = await em.findOne(Workflow, {
+        where: { id: target.id, tenantId: target.tenantId, enabled: true },
+        lock: { mode: 'pessimistic_read' },
+      });
+      if (!workflow) throw new NotFoundException();
+      const usage = await this.lockUsage(em);
+      if (
+        !keys ||
+        (keys.webhookKeyId !== proof.keyId &&
+          keys.nextWebhookKeyId !== proof.keyId) ||
+        Math.abs((await readClock(em)) - proof.timestamp) >
+          WEBHOOK_WINDOW_SECONDS
+      )
+        throw new UnauthorizedException('Невірний підпис');
+      const params = [workflow.tenantId, workflow.id, proof.deliveryId];
+      const [existing]: Array<{ executionId: string; bodyHash: Buffer }> =
+        await em.query(
+          'SELECT "executionId","bodyHash" FROM webhook_deliveries WHERE "tenantId"=$1 AND "workflowId"=$2 AND "deliveryId"=$3',
+          params,
+        );
+      if (existing) {
+        if (!existing.bodyHash.equals(proof.digest))
+          throw new ConflictException(
+            'Ідентифікатор доставки вже використано з іншим тілом',
+          );
+        return existing.executionId;
+      }
+      const { execution } = await this.insertExecution(
+        em,
+        workflow,
+        input,
+        'webhook',
+        null,
+        null,
+        getCorrelationId() ?? newCorrelationId(),
+        usage,
+      );
+      await em.query(
+        'INSERT INTO webhook_deliveries ("tenantId","workflowId","deliveryId","bodyHash","executionId") VALUES ($1,$2,$3,$4,$5)',
+        [...params, proof.digest, execution.id],
+      );
+      return execution.id;
+    });
+  }
+
+  private async insertExecution(
+    em: EntityManager,
+    workflow: Workflow,
+    input: Record<string, unknown>,
+    trigger: Execution['trigger'],
+    idempotencyKey: string | null,
+    scheduledAt: Date | null,
+    correlationId: string,
+    usage: QueueUsage,
+  ): Promise<{ execution: Execution; created: boolean }> {
+    this.assertQueueSlot(usage, trigger);
+    const version = await em.findOneOrFail(WorkflowVersion, {
+      where: {
+        workflowId: workflow.id,
+        version: workflow.version,
+        tenantId: workflow.tenantId,
+      },
+      select: { id: true },
+    });
+    const fields = {
+      tenantId: workflow.tenantId,
+      workflowId: workflow.id,
+      workflowVersionId: version.id,
+      scheduledAt,
+      input,
+      trigger,
+      correlationId,
+    };
+    let execution: Execution;
+    if (idempotencyKey === null) {
+      execution = await em.save(em.create(Execution, fields));
+    } else {
+      // Постановки тенанта серіалізовані блокуванням обліку, тож конфлікт ключа тут неможливий;
+      // ON CONFLICT лишається страховкою унікального індексу.
+      const [inserted]: Execution[] = await em.query(
+        `INSERT INTO executions
              ("tenantId", "workflowId", "workflowVersionId", input, trigger, "correlationId",
               "idempotencyKey")
            VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7)
            ON CONFLICT ("tenantId", "idempotencyKey") WHERE "idempotencyKey" IS NOT NULL
            DO NOTHING
            RETURNING *`,
-          [
-            fields.tenantId,
-            fields.workflowId,
-            fields.workflowVersionId,
-            JSON.stringify(input),
-            trigger,
-            correlationId,
-            idempotencyKey,
-          ],
-        );
-        if (!inserted)
-          return {
-            execution: await this.existingRun(
-              em,
-              workflow,
-              input,
-              idempotencyKey,
-            ),
-            created: false,
-          };
-        execution = inserted;
-      }
-      await em.save(
-        em.create(Job, {
-          tenantId: workflow.tenantId,
-          executionId: execution.id,
-          maxAttempts: this.config.get('JOB_MAX_ATTEMPTS', { infer: true }),
+        [
+          fields.tenantId,
+          fields.workflowId,
+          fields.workflowVersionId,
+          JSON.stringify(input),
+          trigger,
           correlationId,
-        }),
+          idempotencyKey,
+        ],
       );
-      return { execution, created: true };
-    });
+      if (!inserted)
+        return {
+          execution: await this.existingRun(
+            em,
+            workflow,
+            input,
+            idempotencyKey,
+          ),
+          created: false,
+        };
+      execution = inserted;
+    }
+    await em.save(
+      em.create(Job, {
+        tenantId: workflow.tenantId,
+        executionId: execution.id,
+        maxAttempts: this.config.get('JOB_MAX_ATTEMPTS', { infer: true }),
+        correlationId,
+      }),
+    );
+    return { execution, created: true };
   }
 
   /**

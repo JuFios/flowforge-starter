@@ -1,4 +1,4 @@
-import { createHmac } from 'node:crypto';
+import { signedHeaders } from '../helpers/webhook';
 import { DataSource } from 'typeorm';
 import { AppModule } from '../../src/app.module';
 import { Execution, Job, StepRun } from '../../src/entities';
@@ -78,18 +78,9 @@ describe('JSON nesting depth', () => {
       authenticated ? { 'x-api-key': apiKey } : {},
     );
 
-  /** Підпис у форматі, який зараз перевіряє контролер (HMAC серіалізованого тіла). */
-  const sign = (body: string) =>
-    createHmac('sha256', secret)
-      .update(JSON.stringify(JSON.parse(body)))
-      .digest('hex');
-
-  const deliver = (body: string, signature?: string) =>
-    post(
-      `/hooks/${workflowId}`,
-      body,
-      signature === undefined ? {} : { 'x-signature': signature },
-    );
+  const sign = (body: string) => signedHeaders(workflowId, secret, body);
+  const deliver = (body: string, headers: Record<string, string> = {}) =>
+    post(`/hooks/${workflowId}`, body, headers);
 
   it('accepts a run input nested exactly 64 levels deep', async () => {
     const res = await runWith(nested(64));
@@ -129,11 +120,9 @@ describe('JSON nesting depth', () => {
     },
   );
 
-  it('answers a webhook too deep to re-serialize for its signature with 401, not 500', async () => {
-    // Підпис зараз рахується над повторно серіалізованим тілом (PR 4 — над сирими байтами), а
-    // JSON.stringify такої глибини не серіалізує: підпис неможливо підтвердити.
-    const res = await deliver(nested(15_000), 'f'.repeat(64));
-    expect(res.status).toBe(401);
+  it('validates depth after authenticating the original bytes', async () => {
+    const body = nested(15_000);
+    expect((await deliver(body, sign(body))).status).toBe(400);
   });
 
   it.each([

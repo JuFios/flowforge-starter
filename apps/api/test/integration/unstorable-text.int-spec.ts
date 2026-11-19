@@ -1,4 +1,4 @@
-import { createHmac } from 'node:crypto';
+import { signedHeaders } from '../helpers/webhook';
 import { DataSource } from 'typeorm';
 import { AppModule } from '../../src/app.module';
 import { Execution, Job, StepRun, Tenant } from '../../src/entities';
@@ -207,9 +207,7 @@ describe('strings Postgres cannot store', () => {
           method: 'POST',
           headers: {
             'content-type': 'application/json',
-            'x-signature': createHmac('sha256', webhookSecret)
-              .update(JSON.stringify(JSON.parse(body)))
-              .digest('hex'),
+            ...signedHeaders(wf.id, webhookSecret, body),
           },
           body,
         });

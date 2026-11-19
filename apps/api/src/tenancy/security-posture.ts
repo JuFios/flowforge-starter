@@ -42,6 +42,10 @@ export const POSTURE: {
         [SYSTEM_ROLE]: ALL_TABLE,
       },
     },
+    webhook_deliveries: {
+      tenantColumn: 'tenantId',
+      grants: { [API_ROLE]: ['INSERT', 'SELECT'] },
+    },
     workflows: {
       tenantColumn: 'tenantId',
       grants: { [API_ROLE]: ALL_TABLE, [SYSTEM_ROLE]: ALL_TABLE },

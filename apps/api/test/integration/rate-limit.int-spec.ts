@@ -1,4 +1,4 @@
-import { createHmac } from 'node:crypto';
+import { signedHeaders } from '../helpers/webhook';
 import { DataSource } from 'typeorm';
 import { LimitsMetrics } from '../../src/limits/limits.metrics';
 import { RateLimitPurger } from '../../src/limits/rate-limit.purger';
@@ -70,9 +70,7 @@ describe('tenant request rate limit', () => {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
-        'x-signature': createHmac('sha256', secret)
-          .update(JSON.stringify(body))
-          .digest('hex'),
+        ...signedHeaders(wf, secret, JSON.stringify(body)),
       },
       body: JSON.stringify(body),
     });

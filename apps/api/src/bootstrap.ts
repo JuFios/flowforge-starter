@@ -1,3 +1,4 @@
+import { raw } from 'express';
 import {
   ArgumentMetadata,
   BadRequestException,
@@ -98,6 +99,7 @@ export function configureApp(app: INestApplication): INestApplication {
     inflate: false,
     limit: config.get('HTTP_BODY_LIMIT', { infer: true }),
   };
+  http.use('/hooks', raw({ ...options, type: () => true }));
   http.useBodyParser('json', options);
   http.useBodyParser('urlencoded', { ...options, extended: true });
   // Невідомі поля — 400, а не мовчазне відкидання: тенант бачить, що поле не діє.

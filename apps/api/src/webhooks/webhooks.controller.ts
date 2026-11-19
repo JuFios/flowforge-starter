@@ -1,4 +1,11 @@
-import { Controller, HttpCode, Post, Req } from '@nestjs/common';
+import {
+  BadRequestException,
+  UnsupportedMediaTypeException,
+  Controller,
+  HttpCode,
+  Post,
+  Req,
+} from '@nestjs/common';
 import { ExecutionsService } from '../executions/executions.service';
 import { parseRunInput } from '../executions/run-input.pipe';
 import { RateLimit } from '../limits/rate-limit.guard';
@@ -7,11 +14,6 @@ import {
   WebhookSignatureGuard,
 } from './webhook-signature.guard';
 
-/**
- * Вхідні webhook-и. Підпис: hex HMAC-SHA256 від тіла запиту секретом тенанта, у заголовку
- * x-signature (WebhookSignatureGuard); далі — ліміт частоти webhook-ів тенанта (окрема квота від
- * API) і ліміт його черги.
- */
 @Controller('hooks')
 @RateLimit('webhook', { before: [WebhookSignatureGuard] })
 export class WebhooksController {
@@ -20,14 +22,29 @@ export class WebhooksController {
   @Post(':workflowId')
   @HttpCode(202)
   async receive(@Req() req: WebhookRequest) {
-    // Вхід перевіряється лише після підпису (guard), інакше неавтентифікований запит отримав би
-    // 400 з поясненням формату замість 401.
-    const input = parseRunInput(req.body);
-    const execution = await this.executions.enqueue(
-      req.webhookWorkflow,
-      input,
-      'webhook',
-    );
-    return { executionId: execution.id };
+    const type = req.headers['content-type'] ?? '';
+    if (
+      !/^application\/json(?:\s*;\s*charset\s*=\s*(?:"utf-8"|utf-8))?$/i.test(
+        type,
+      )
+    )
+      throw new UnsupportedMediaTypeException();
+    let body: unknown = {};
+    if (Buffer.isBuffer(req.body) && req.body.length) {
+      try {
+        body = JSON.parse(
+          new TextDecoder('utf-8', { fatal: true }).decode(req.body),
+        ) as unknown;
+      } catch {
+        throw new BadRequestException('Невалідний UTF-8 JSON');
+      }
+    }
+    return {
+      executionId: await this.executions.enqueueWebhook(
+        req.webhookWorkflow,
+        parseRunInput(body),
+        req.delivery,
+      ),
+    };
   }
 }

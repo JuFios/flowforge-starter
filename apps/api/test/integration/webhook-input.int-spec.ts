@@ -1,4 +1,4 @@
-import { createHmac } from 'node:crypto';
+import { signedHeaders } from '../helpers/webhook';
 import { DataSource } from 'typeorm';
 import { Execution } from '../../src/entities';
 import { RunningApp, startApp } from '../helpers/app';
@@ -36,17 +36,12 @@ describe('webhook input is validated only after the signature', () => {
     await ds.destroy();
   });
 
-  /** Підпис у форматі, який зараз перевіряє контролер (HMAC серіалізованого тіла). */
   const sign = (body: unknown) =>
-    createHmac('sha256', secret).update(JSON.stringify(body)).digest('hex');
-
-  const deliver = (body: unknown, signature?: string) =>
+    signedHeaders(workflowId, secret, JSON.stringify(body));
+  const deliver = (body: unknown, headers: Record<string, string> = {}) =>
     fetch(`${running.baseUrl}/hooks/${workflowId}`, {
       method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        ...(signature !== undefined && { 'x-signature': signature }),
-      },
+      headers: { 'content-type': 'application/json', ...headers },
       body: JSON.stringify(body),
     });
 
@@ -56,7 +51,7 @@ describe('webhook input is validated only after the signature', () => {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
-        'x-signature': createHmac('sha256', secret).update(body).digest('hex'),
+        ...signedHeaders(workflowId, secret, body),
       },
       body,
     });
@@ -91,7 +86,10 @@ describe('webhook input is validated only after the signature', () => {
   it.each(invalidInputs)(
     'answers a wrongly signed delivery of %s with 401',
     async (_name, body) => {
-      const res = await deliver(body, 'f'.repeat(64));
+      const res = await deliver(body, {
+        ...sign(body),
+        'x-signature': 'v1=' + 'f'.repeat(64),
+      });
       expect(res.status).toBe(401);
     },
   );

@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Header,
   Get,
   NotFoundException,
   Param,
@@ -86,6 +87,7 @@ export class TenantsController {
   constructor(private readonly db: TenantDb) {}
 
   @Post()
+  @Header('Cache-Control', 'no-store')
   async create(@Body() dto: CreateTenantDto) {
     const apiKey = `ff_${randomBytes(24).toString('hex')}`;
     const webhookSecret = randomBytes(24).toString('hex');
