@@ -34,7 +34,7 @@ describe('database migrations', () => {
     expect(count).toBe(0);
 
     const applied = await ds.runMigrations({ transaction: 'each' });
-    await provisionTestDatabase((sql, params) => ds.query(sql, params));
+    await provisionTestDatabase(ds);
     expect(applied).toHaveLength(total);
     expect((await ds.driver.createSchemaBuilder().log()).upQueries).toEqual([]);
   });

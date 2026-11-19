@@ -27,7 +27,7 @@ describe('data migrations', () => {
     // старих форматів (без тенантів) очищаються до того, як TenantIsolation перевірить цілісність.
     await truncateAll(ds);
     await ds.runMigrations({ transaction: 'each' });
-    await provisionTestDatabase((sql, params) => ds.query(sql, params));
+    await provisionTestDatabase(ds);
     await truncateAll(ds);
     await ds.destroy();
   });

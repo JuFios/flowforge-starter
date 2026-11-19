@@ -1,3 +1,4 @@
+import { lockClusterRoles } from '../cluster-role-lock';
 import { MigrationInterface, QueryRunner } from 'typeorm';
 import {
   assertRolesUnclaimed,
@@ -214,6 +215,7 @@ export class TenantIsolation1795100000000 implements MigrationInterface {
         'PostgreSQL 16 or newer is required: tenant isolation relies on its role membership rules',
       );
 
+    await lockClusterRoles((sql) => queryRunner.query(sql));
     for (const [what, sql] of ORPHAN_CHECKS) {
       const [{ count }] = (await queryRunner.query(sql)) as Array<{
         count: string;

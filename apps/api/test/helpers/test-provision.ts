@@ -1,3 +1,4 @@
+import { DataSource } from 'typeorm';
 import {
   limitDefaultsFromEnv,
   provisionLimitDefaults,
@@ -16,25 +17,28 @@ import {
  * значення лімітів за замовчуванням. Викликається після побудови схеми й після кожного тесту, що
  * перезастосовує міграції (міграція TenantUsage засіває вбудовані значення заново).
  */
-export async function provisionTestDatabase(query: Query): Promise<void> {
-  await provisionLoginRoles(query, [
-    {
-      user: TEST_API_DB_USER,
-      password: testRolePassword(TEST_API_DB_USER),
-      group: API_ROLE,
-    },
-    {
-      user: TEST_WORKER_DB_USER,
-      password: testRolePassword(TEST_WORKER_DB_USER),
-      group: WORKER_ROLE,
-    },
-  ]);
-  // Наявні тести черги захоплюють десятки задач одного тенанта без завершення: ліміт задач у
-  // роботі для них — вище; тести лімітів задають ліміти тенанта явно.
-  await provisionLimitDefaults(
-    query,
-    limitDefaultsFromEnv({ TENANT_MAX_RUNNING: '1000' }),
-  );
+export async function provisionTestDatabase(ds: DataSource): Promise<void> {
+  await ds.transaction(async (em) => {
+    const query: Query = (sql, params) => em.query(sql, params);
+    await provisionLoginRoles(query, [
+      {
+        user: TEST_API_DB_USER,
+        password: testRolePassword(TEST_API_DB_USER),
+        group: API_ROLE,
+      },
+      {
+        user: TEST_WORKER_DB_USER,
+        password: testRolePassword(TEST_WORKER_DB_USER),
+        group: WORKER_ROLE,
+      },
+    ]);
+    // Наявні тести черги захоплюють десятки задач одного тенанта без завершення: ліміт задач у
+    // роботі для них — вище; тести лімітів задають ліміти тенанта явно.
+    await provisionLimitDefaults(
+      query,
+      limitDefaultsFromEnv({ TENANT_MAX_RUNNING: '1000' }),
+    );
+  });
 }
 
 /**

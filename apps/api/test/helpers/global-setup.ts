@@ -53,7 +53,7 @@ export default async function globalSetup(): Promise<void> {
     // Тим самим шляхом, що й `db:migrate` у compose: одна транзакція й звірка інваріантів безпеки.
     await migrate(ds);
     // Як db:provision у compose: застосунок у тестах ходить runtime-ролями без BYPASSRLS.
-    await provisionTestDatabase((sql, params) => ds.query(sql, params));
+    await provisionTestDatabase(ds);
   } finally {
     await ds.destroy();
   }

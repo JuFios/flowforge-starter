@@ -168,7 +168,7 @@ describe('TimestampsWithTimeZone migration', () => {
         );
 
       await session.runMigrations({ transaction: 'each' });
-      await provisionTestDatabase((sql, params) => session.query(sql, params));
+      await provisionTestDatabase(session);
 
       const [{ createdAt }]: Array<{ createdAt: Date }> = await session.query(
         `SELECT "createdAt" FROM "tenants" WHERE "id" = $1`,
