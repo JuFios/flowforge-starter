@@ -95,6 +95,19 @@ async function main(): Promise<void> {
     ids.push(...batch);
     await sleep(750);
     await captureCheckpoints(batch, observed);
+    const observation = await openDatabase();
+    let checkpoint: string;
+    try {
+      const rows: { id: string }[] = await observation.query(
+        `SELECT id FROM step_runs WHERE "executionId"=ANY($1)
+           AND "stepId"='charge' AND status='running' LIMIT 1`,
+        [batch],
+      );
+      if (!rows.length) throw new Error('no active HTTP checkpoint');
+      checkpoint = rows[0].id;
+    } finally {
+      await observation.destroy();
+    }
     log('restarting postgres');
     const t0 = Date.now();
     docker([...COMPOSE, 'restart', 'postgres']);
@@ -102,6 +115,20 @@ async function main(): Promise<void> {
     downtimeMs += Date.now() - t0;
     log(`postgres is healthy again after ${Date.now() - t0} ms`);
     interrupted.push(await finishRound(batch, TIMEOUT_MS));
+    const verification = await openDatabase();
+    try {
+      const [step]: { attempts: number; status: string }[] =
+        await verification.query(
+          'SELECT attempts, status FROM step_runs WHERE id=$1',
+          [checkpoint],
+        );
+      if (step.status !== 'succeeded' || step.attempts < 2)
+        throw new Error(
+          `round ${round + 1}: observed HTTP checkpoint did not retry and succeed`,
+        );
+    } finally {
+      await verification.destroy();
+    }
   }
 
   const db = await openDatabase();
