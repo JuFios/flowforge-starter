@@ -168,6 +168,17 @@ describe('webhook input is validated only after the signature', () => {
     // Нова доставка вимкненим workflow не приймається, а без підпису — як і раніше, 401.
     expect((await deliver({ order: 8 }, sign({ order: 8 }))).status).toBe(404);
     expect((await deliver({ order: 8 })).status).toBe(401);
+    // Тіло нової доставки вимкненому workflow не розбирається: 404, а не 400/415.
+    const garbled = '{"order":';
+    const refused = await fetch(`${running.baseUrl}/hooks/${workflowId}`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'text/plain',
+        ...signedHeaders(workflowId, secret, garbled),
+      },
+      body: garbled,
+    });
+    expect(refused.status).toBe(404);
     const counts: unknown = await ds.query(
       'SELECT (SELECT count(*)::int FROM executions) AS executions, (SELECT count(*)::int FROM jobs) AS jobs',
     );

@@ -18,7 +18,7 @@ export class WebhooksController {
     return {
       executionId: await this.executions.enqueueWebhook(
         req.webhookWorkflow,
-        parseWebhookBody(req),
+        () => parseWebhookBody(req),
         req.delivery,
       ),
     };

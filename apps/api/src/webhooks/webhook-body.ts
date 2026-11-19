@@ -9,8 +9,8 @@ const JSON_UTF8 =
   /^application\/json(?:\s*;\s*charset\s*=\s*(?:"utf-8"|utf-8))?$/i;
 
 /**
- * Вхід виконання з уже автентифікованих сирих байтів webhook-а (README 3.3.7): лише UTF-8 JSON;
- * нуль байтів — порожній вхід, JSON null чи не-об'єкт — 400.
+ * Вхід виконання з уже автентифікованих сирих байтів нової доставки (README 3.3.7): лише UTF-8
+ * JSON; нуль байтів — порожній вхід, JSON null чи не-об'єкт — 400, інший тип чи кодування — 415.
  */
 export function parseWebhookBody(req: Request): Record<string, unknown> {
   if (!JSON_UTF8.test(req.headers['content-type'] ?? ''))

@@ -27,7 +27,9 @@ export class SystemDb {
     return row?.id ?? null;
   }
 
-  /** Тенант увімкненого workflow (адресата webhook-а) або null. */
+  /**
+   * Тенант workflow — адресата webhook-а, увімкненого чи ні (повтор прийнятої доставки), або null.
+   */
   async webhookTenant(workflowId: string): Promise<string | null> {
     const [row]: Array<{ id: string | null }> = await this.ds.query(
       'SELECT webhook_tenant($1) AS id',

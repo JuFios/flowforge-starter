@@ -154,9 +154,14 @@ export class ExecutionsService {
     });
   }
 
+  /**
+   * Постановка автентифікованої доставки. `parseInput` викликається лише для нової доставки
+   * увімкненого workflow: повтор прийнятої повертає її виконання, а вимкнений workflow відповідає
+   * 404 до розбору тіла й без блокування обліку тенанта.
+   */
   async enqueueWebhook(
     target: Workflow,
-    input: Record<string, unknown>,
+    parseInput: () => Record<string, unknown>,
     proof: VerifiedDelivery,
   ): Promise<string> {
     return this.db.run(target.tenantId, async (em) => {
@@ -173,7 +178,6 @@ export class ExecutionsService {
         lock: { mode: 'pessimistic_read' },
       });
       if (!workflow) throw new NotFoundException();
-      const usage = await this.lockUsage(em);
       if (
         !keys ||
         (keys.webhookKeyId !== proof.keyId &&
@@ -183,24 +187,33 @@ export class ExecutionsService {
       )
         throw new UnauthorizedException('Невірний підпис');
       const params = [workflow.tenantId, workflow.id, proof.deliveryId];
-      const [existing]: Array<{ executionId: string; bodyHash: Buffer }> =
-        await em.query(
-          'SELECT "executionId","bodyHash" FROM webhook_deliveries WHERE "tenantId"=$1 AND "workflowId"=$2 AND "deliveryId"=$3',
-          params,
-        );
-      if (existing) {
-        if (!existing.bodyHash.equals(proof.digest))
+      const receipt = async (): Promise<string | undefined> => {
+        const [existing]: Array<{ executionId: string; bodyHash: Buffer }> =
+          await em.query(
+            'SELECT "executionId","bodyHash" FROM webhook_deliveries WHERE "tenantId"=$1 AND "workflowId"=$2 AND "deliveryId"=$3',
+            params,
+          );
+        if (existing && !existing.bodyHash.equals(proof.digest))
           throw new ConflictException(
             'Ідентифікатор доставки вже використано з іншим тілом',
           );
-        return existing.executionId;
+        return existing?.executionId;
+      };
+      // Вимкнений workflow (FOR SHARE вище не дає його ввімкнути до COMMIT) нових доставок не
+      // приймає, тож квитанція не може з'явитися паралельно, і облік тенанта не потрібен.
+      if (!workflow.enabled) {
+        const accepted = await receipt();
+        if (accepted) return accepted;
+        throw new NotFoundException();
       }
-      // Вимкнений workflow нових доставок не приймає, але повтор уже прийнятої (вище) повертає її.
-      if (!workflow.enabled) throw new NotFoundException();
+      const usage = await this.lockUsage(em);
+      // Після блокування обліку: паралельна доставка того самого ID уже закомічена й видна.
+      const accepted = await receipt();
+      if (accepted) return accepted;
       const { execution } = await this.insertExecution(
         em,
         workflow,
-        input,
+        parseInput(),
         'webhook',
         null,
         null,
