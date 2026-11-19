@@ -1,12 +1,7 @@
 import { Inject, Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
-import {
-  foreignMembers,
-  SERVICE_ROLES,
-  UNSAFE_LOGIN_SQL,
-  UNSAFE_GROUP_SQL,
-} from './login-role-check';
+import { UNSAFE_LOGIN_SQL, UNSAFE_GROUP_SQL } from './login-role-check';
 import { API_ROLE, SYSTEM_ROLE, WORKER_ROLE } from './roles';
 import { findPostureViolations } from './security-posture';
 
@@ -109,13 +104,8 @@ export class DatabaseSecurityCheck implements OnModuleInit {
     );
     for (const { name } of privileged)
       problems.push(`the role can act as the privileged role ${name}`);
-    // Член будь-якої службової ролі поруч обходить ізоляцію, навіть якщо роль процесу безпечна.
-    for (const { group, names } of await foreignMembers(
-      (sql, params) => this.ds.query(sql, params),
-      SERVICE_ROLES,
-    ))
-      for (const name of names)
-        problems.push(`unexpected member ${name} of ${group}`);
+    // Сторонніх членів службових ролей (член будь-якої з них обходить ізоляцію, навіть якщо роль
+    // процесу безпечна) звіряють інваріанти каталогу нижче (I-1).
 
     const owned: Array<{ name: string }> = await this.ds.query(
       `SELECT c.relname AS name FROM pg_class c
