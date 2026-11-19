@@ -363,6 +363,37 @@ describe('notification delivery', () => {
     expect(Number(wait)).toBeLessThanOrEqual(1.05);
   });
 
+  it('reaches a tenant behind more than a claim window of tenants at their in-flight limit', async () => {
+    const e = await complete();
+    await ds.query(
+      `UPDATE notification_settings SET "lastClaimedAt" = now() WHERE "tenantId" = $1`,
+      [tenantId],
+    );
+    // 20 тенантів, давніше обслужених, із двома спробами в роботі кожен (ліміт 2) і подією, що чекає.
+    for (let i = 0; i < 20; i++) {
+      const busy = await createTenant(ds, `busy-${i}`);
+      await ds.query(
+        `INSERT INTO notification_settings ("tenantId", url, secret, "dueAt", "lastClaimedAt")
+         VALUES ($1, $2, $3, now() - interval '1 minute', now() - interval '1 hour')`,
+        [busy.tenant.id, receiver.url('/busy'), 'b'.repeat(64)],
+      );
+      await ds.query(
+        `INSERT INTO outbox_events ("tenantId", "executionId", sequence, type, payload, status,
+                                    "leaseToken", "leaseUntil")
+         SELECT $1, gen_random_uuid(), 1, 'execution.succeeded', '{}',
+                CASE WHEN g <= 2 THEN 'sending' ELSE 'pending' END,
+                CASE WHEN g <= 2 THEN gen_random_uuid() END,
+                CASE WHEN g <= 2 THEN now() + interval '1 minute' END
+           FROM generate_series(1, 3) g`,
+        [busy.tenant.id],
+      );
+    }
+    const s = await sender();
+    expect(await s.deliverNext()).toBe(true);
+    expect((await event(e.id)).status).toBe('delivered');
+    expect(receiver.hits('/busy')).toEqual([]);
+  });
+
   it('keeps delivering to other tenants while one endpoint hangs', async () => {
     // Тенант A: endpoint не відповідає до таймауту; тенант B — відповідає одразу.
     receiver.respond = async (req, res) => {

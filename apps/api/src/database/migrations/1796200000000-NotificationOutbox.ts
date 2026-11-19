@@ -222,8 +222,13 @@ export class NotificationOutbox1796200000000 implements MigrationInterface {
         lease interval := make_interval(secs => LEAST(GREATEST(p_lease_ms, 1000), 600000) / 1000.0);
       BEGIN
         FOR s IN
+          -- Тенанти, що вже вичерпали ліміт спроб у роботі, у вікно кандидатів не потрапляють:
+          -- інакше 16 тенантів із завислими endpoint-ами займали б усе вікно до спливання lease.
           SELECT n."tenantId" FROM public.notification_settings n
            WHERE n.enabled AND n."dueAt" <= now()
+             AND (SELECT count(*) FROM public.outbox_events b
+                   WHERE b."tenantId" = n."tenantId" AND b.status = 'sending'
+                     AND b."leaseUntil" > now()) < GREATEST(p_in_flight, 1)
            ORDER BY n."lastClaimedAt" NULLS FIRST, n."tenantId"
            LIMIT 16
            FOR NO KEY UPDATE SKIP LOCKED
