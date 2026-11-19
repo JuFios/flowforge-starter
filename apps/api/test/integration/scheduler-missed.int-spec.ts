@@ -65,6 +65,51 @@ describe('missed scheduled runs', () => {
     return { id, cursor };
   }
 
+  it('rejects invalid cron arity before updating the schedule', async () => {
+    const { id } = await stalled({}, 1000);
+    const state = () =>
+      ds.query<unknown[]>(
+        'SELECT cron, "scheduleCursor", "nextFireAt" FROM workflows WHERE id=$1',
+        [id],
+      );
+    const before = await state();
+    for (const fields of [1, 2, 3, 4, 7]) {
+      const cron = Array<string>(fields).fill('*').join(' ');
+      expect(
+        (
+          await tenantCall(app, apiKey, 'POST', '/workflows', {
+            name: 'arity',
+            steps: [{ id: 's', type: 'log', message: 's' }],
+            cron,
+          })
+        ).status,
+      ).toBe(400);
+      expect(
+        (await tenantCall(app, apiKey, 'PATCH', `/workflows/${id}`, { cron }))
+          .status,
+      ).toBe(400);
+      expect(await state()).toEqual(before);
+    }
+    for (const cron of ['@hourly', '* * * * *', '* * * * * *'])
+      expect(
+        (await tenantCall(app, apiKey, 'PATCH', `/workflows/${id}`, { cron }))
+          .status,
+      ).toBe(200);
+    await ds.query(
+      `UPDATE workflows SET cron='* *', "nextFireAt"=now() WHERE id=$1`,
+      [id],
+    );
+    await scheduler.tick();
+    expect(
+      await ds.query(
+        'SELECT "nextFireAt", "scheduleError" FROM workflows WHERE id=$1',
+        [id],
+      ),
+    ).toEqual([
+      { nextFireAt: null, scheduleError: expect.any(String) as unknown },
+    ]);
+  });
+
   /** Моменти розкладу в (from, to]. */
   function moments(from: number, to: number): number[] {
     const out: number[] = [];
