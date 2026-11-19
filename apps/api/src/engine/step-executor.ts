@@ -1,7 +1,11 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { exceedsJsonDepth, MAX_STEP_RESULT_DEPTH } from '../common/json-depth';
 import { StepDefinition } from '../entities';
-import { MAX_URL_LENGTH } from '../workflows/definition';
+import { StepError } from './step-error';
+import {
+  MAX_LOG_MESSAGE_LENGTH,
+  MAX_URL_LENGTH,
+} from '../workflows/definition';
 import { parseRetryAfter } from './retry-after';
 import { renderTemplate, StepContext } from './template';
 
@@ -16,16 +20,7 @@ export function isRetryableStatus(status: number): boolean {
 /** Статуси, для яких отримувач може вказати, коли повторювати (`Retry-After`). */
 const RETRY_AFTER_STATUSES = new Set([429, 503]);
 
-export class StepError extends Error {
-  constructor(
-    message: string,
-    readonly retryable = true,
-    /** Не повторювати раніше, ніж через стільки мс (з `Retry-After` отримувача). */
-    readonly retryAfterMs?: number,
-  ) {
-    super(message);
-  }
-}
+export { StepError } from './step-error';
 
 export interface StepRunOptions {
   /** Скасування кроку (втрата lease, завершення воркера). */
@@ -45,7 +40,9 @@ export class StepExecutor {
   ): Promise<unknown> {
     switch (step.type) {
       case 'log':
-        this.logger.log(renderTemplate(step.message, ctx));
+        this.logger.log(
+          renderTemplate(step.message, ctx, MAX_LOG_MESSAGE_LENGTH * 4),
+        );
         return { logged: true };
       case 'delay':
         // Пауза — довговічний таймер у черзі (JobRunnerService), а не очікування в процесі.
@@ -76,7 +73,12 @@ export class StepExecutor {
     signal?: AbortSignal,
     idempotencyKey?: string,
   ): Promise<unknown> {
-    const url = renderTemplate(step.url, ctx);
+    const url = renderTemplate(
+      step.url,
+      ctx,
+      MAX_URL_LENGTH * 4,
+      'http url is invalid after template substitution',
+    );
     // Підстановка значень із input/steps може зробити URL невалідним (пробіл, задовгий, інша
     // схема). Це помилка даних, а не мережі: повтор дасть той самий URL.
     if (!isValidHttpUrl(url))
