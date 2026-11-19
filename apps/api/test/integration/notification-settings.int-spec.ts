@@ -450,7 +450,7 @@ describe('notification settings', () => {
         .spyOn(reader.manager, 'query')
         .mockImplementation(async (sql, params) => {
           if (sql.includes('FROM outbox_attempts')) purged = await purge();
-          return query(sql, params) as Promise<unknown>;
+          return query(sql, params);
         });
       const service = new NotificationsService(fakeTenantDb(reader.manager));
       const page = await service.eventPage(a.tenant.id, id, 1);
