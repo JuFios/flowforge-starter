@@ -265,7 +265,7 @@ export class NotificationsService {
   ) {
     return this.db.run(tenantId, async (em) => {
       const [event]: Array<EventView & { payload: string }> = await em.query(
-        `SELECT ${EVENT_COLUMNS}, payload FROM outbox_events WHERE id = $1 AND "tenantId" = $2`,
+        `SELECT ${EVENT_COLUMNS}, payload FROM outbox_events WHERE id = $1 AND "tenantId" = $2 FOR KEY SHARE`,
         [id, tenantId],
       );
       if (!event) throw new NotFoundException('Подію не знайдено');
