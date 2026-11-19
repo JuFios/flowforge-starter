@@ -39,6 +39,10 @@ export class WebhooksController {
         throw new BadRequestException('Невалідний UTF-8 JSON');
       }
     }
+    if (body === null)
+      throw new BadRequestException(
+        "Вхідні дані виконання мають бути JSON-об'єктом",
+      );
     return {
       executionId: await this.executions.enqueueWebhook(
         req.webhookWorkflow,
