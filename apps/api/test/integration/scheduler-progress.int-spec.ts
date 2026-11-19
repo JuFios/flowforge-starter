@@ -61,4 +61,56 @@ describe('scheduler progress', () => {
     );
     expect(new Set(times).size).toBe(times.length);
   });
+
+  describe('after a failed enqueue', () => {
+    beforeAll(async () => {
+      await ds.query(
+        'CREATE TABLE IF NOT EXISTS test_block_executions (x int)',
+      );
+      await ds.query(`
+        CREATE OR REPLACE FUNCTION test_block_executions() RETURNS trigger AS $$
+        BEGIN
+          IF EXISTS (SELECT FROM public.test_block_executions) THEN
+            RAISE EXCEPTION 'simulated database failure while creating an execution';
+          END IF;
+          RETURN NEW;
+        END $$ LANGUAGE plpgsql
+        -- Тригер спрацьовує в транзакції ролі API, якій таблиця тесту не належить.
+        SECURITY DEFINER SET search_path = pg_catalog, public`);
+      await ds.query(
+        'REVOKE ALL ON FUNCTION test_block_executions() FROM PUBLIC',
+      );
+      await ds.query(`
+        CREATE TRIGGER test_block_executions BEFORE INSERT ON executions
+        FOR EACH ROW EXECUTE FUNCTION test_block_executions()`);
+    });
+    afterAll(async () => {
+      await ds.query(
+        'DROP TRIGGER IF EXISTS test_block_executions ON executions',
+      );
+      await ds.query('DROP FUNCTION IF EXISTS test_block_executions()');
+      await ds.query('DROP TABLE IF EXISTS test_block_executions');
+    });
+
+    it('creates the firings of a tick whose enqueue failed on the next tick', async () => {
+      const { apiKey } = await createTenant(ds);
+      const { app, scheduler: s } = await scheduler();
+      const wf = await createScheduledWorkflow(app, ds, apiKey, {
+        cron: '* * * * * *',
+      });
+      await ds.query('INSERT INTO test_block_executions VALUES (1)');
+      await sleep(2_200);
+      const failed = await dbNow(ds);
+      await s.tick();
+      expect(await scheduledTimes(ds, wf.id)).toEqual([]);
+      await ds.query('DELETE FROM test_block_executions');
+      await s.tick();
+      const times = await scheduledTimes(ds, wf.id);
+      // Спрацювання, які мав створити тік із помилкою, не загубились.
+      expect(times).toEqual(
+        expect.arrayContaining(wholeSeconds(wf.createdAt, failed)),
+      );
+      expect(new Set(times).size).toBe(times.length);
+    });
+  });
 });
