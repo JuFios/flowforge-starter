@@ -58,6 +58,11 @@ export class Receiver {
   };
 
   async start(): Promise<void> {
+    // Дозвіл тестового приймача один на процес: другий приймач мовчки перебрав би його в першого.
+    if (process.env.HTTP_FIXTURE_ORIGIN !== undefined)
+      throw new Error(
+        `another HTTP fixture is active: ${process.env.HTTP_FIXTURE_ORIGIN}`,
+      );
     this.server = createServer((req, res) => {
       const chunks: Buffer[] = [];
       req.on('data', (c: Buffer) => chunks.push(c));

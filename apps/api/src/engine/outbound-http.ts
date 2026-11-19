@@ -9,22 +9,55 @@ import {
   type Response,
   type RequestInit,
 } from 'undici';
-
-export const outboundTransport = { fetch: send };
-import { StepError } from './step-error';
-import { MAX_URL_LENGTH } from '../workflows/definition';
-import { getCorrelationId } from '../observability/correlation';
-
 import { outboundSettings } from '../config/outbound';
+import { getCorrelationId } from '../observability/correlation';
+import { MAX_URL_LENGTH } from '../workflows/definition';
+import { StepError } from './step-error';
+
+/** Транспорт запиту; тести підміняють його, щоб перевірити рішення до відправлення. */
+export const outboundTransport = { fetch: send };
 const REDIRECTS = new Set([301, 302, 303, 307, 308]);
 
 function denied(): StepError {
   return new StepError('http destination is not allowed', false);
 }
 
-export function checkAddress(address: string, origin: string): void {
+type OutboundSettings = ReturnType<typeof outboundSettings>;
+const SETTING_NAMES = [
+  'HTTP_FIXTURE_ORIGIN',
+  'HTTP_FIXTURE_ADDRESS',
+  'HTTP_DENY_CIDRS',
+  'HTTP_STEP_TIMEOUT_MS',
+  'HTTP_RESPONSE_BYTES',
+] as const;
+let cached: { key: string; settings: OutboundSettings } | undefined;
+
+/**
+ * Налаштування з оточення, розібрані один раз на набір значень (перевірка під час старту —
+ * env.validation.ts). Тести змінюють оточення між сценаріями, тож ключ — самі значення.
+ */
+function settingsNow(): OutboundSettings {
+  const key = JSON.stringify(SETTING_NAMES.map((name) => process.env[name]));
+  if (cached?.key !== key)
+    cached = { key, settings: outboundSettings(process.env) };
+  return cached.settings;
+}
+
+/** Адреси інтерфейсів самого хоста (зокрема публічні): з'єднання з ними — доступ до хоста. */
+function hostAddresses(): Set<string> {
+  const own = new Set<string>();
+  for (const item of Object.values(networkInterfaces()).flat())
+    if (item) own.add(ipaddr.process(item.address).toString());
+  return own;
+}
+
+export function checkAddress(
+  address: string,
+  origin: string,
+  settings = settingsNow(),
+  own = hostAddresses(),
+): void {
   const ip = ipaddr.process(address);
-  const settings = outboundSettings(process.env);
   if (origin === settings.origin && ip.toString() === settings.address) return;
   if (
     ip.range() !== 'unicast' ||
@@ -32,10 +65,7 @@ export function checkAddress(address: string, origin: string): void {
     ip.toString() === '168.63.129.16'
   )
     throw denied();
-  for (const item of Object.values(networkInterfaces()).flat()) {
-    if (item && ipaddr.process(item.address).toString() === ip.toString())
-      throw denied();
-  }
+  if (own.has(ip.toString())) throw denied();
   for (const [network, prefix] of settings.ranges) {
     if (network.kind() === ip.kind() && ip.match(network, prefix))
       throw denied();
@@ -54,11 +84,8 @@ function checkUrl(url: URL): void {
   if (isIP(host)) checkAddress(host, url.origin);
 }
 
-async function resolvePublic(
-  host: string,
-  origin: string,
-  signal: AbortSignal,
-) {
+/** Усі A та AAAA імені; перевіряє їх `connect` (змішаний набір відхиляється цілком). */
+async function resolveAll(host: string, signal: AbortSignal) {
   const resolver = new Resolver();
   const cancel = () => resolver.cancel();
   signal.throwIfAborted();
@@ -82,7 +109,6 @@ async function resolvePublic(
       throw Object.assign(new Error('DNS has no addresses'), {
         code: 'ENOTFOUND',
       });
-    for (const { address } of addresses) checkAddress(address, origin);
     return addresses;
   } finally {
     cancel();
@@ -94,15 +120,18 @@ function dispatcher(signal: AbortSignal): Agent {
   return new Agent({
     connections: 1,
     maxHeaderSize: 16384,
-    maxResponseSize: outboundSettings(process.env).bytes,
+    maxResponseSize: settingsNow().bytes,
     connect(options, done) {
       const host = options.hostname.replace(/^\[|\]$/g, '');
       const origin = new URL(options.protocol + '//' + options.host).origin;
       const establish = async () => {
         const answers = isIP(host)
           ? [{ address: host, family: isIP(host) }]
-          : await resolvePublic(host, origin, signal);
-        for (const { address } of answers) checkAddress(address, origin);
+          : await resolveAll(host, signal);
+        const settings = settingsNow(),
+          own = hostAddresses();
+        for (const { address } of answers)
+          checkAddress(address, origin, settings, own);
         signal.throwIfAborted();
         // net/tls отримує лише адреси з цього набору, а host і SNI лишаються оригінальними.
         buildConnector({
@@ -129,7 +158,7 @@ function dispatcher(signal: AbortSignal): Agent {
 }
 
 async function readLimited(response: Response): Promise<string> {
-  const max = outboundSettings(process.env).bytes;
+  const max = settingsNow().bytes;
   const encoding = response.headers.get('content-encoding')?.toLowerCase();
   if (encoding && encoding !== 'identity')
     throw new StepError('http response encoding is not supported', false);
@@ -164,7 +193,7 @@ export async function outboundHttp(
   const controller = new AbortController();
   const deadlines = [
     controller.signal,
-    AbortSignal.timeout(outboundSettings(process.env).timeoutMs),
+    AbortSignal.timeout(settingsNow().timeoutMs),
   ];
   if (signal) deadlines.push(signal);
   const operation = AbortSignal.any(deadlines);
