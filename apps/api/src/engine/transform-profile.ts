@@ -47,6 +47,18 @@ function invalid(): never {
 }
 
 /**
+ * Помилка обчислення JSONata: перевищення стеку, часу чи довжини послідовності — межа ресурсів;
+ * решта (типи операндів тощо) — помилка виразу над цими даними. Профіль (глибина AST, кількість
+ * вузлів, послідовність) робить стек і час практично недосяжними; їхні коди — запасна межа.
+ */
+export function evaluationFailure(error: unknown): Error {
+  const code = (error as { code?: unknown } | null)?.code;
+  return typeof code === 'string' && LIMIT_CODES.has(code)
+    ? new TransformLimitError()
+    : new TransformEvaluationError();
+}
+
+/**
  * Скільки байтів JSON щонайбільше читає шлях з іменованих кроків: значення за найглибшим
  * власним префіксом. На масиві шлях JSONata розходиться по елементах, тож межею є весь масив.
  */
@@ -195,9 +207,7 @@ export async function evaluateTransform(
     try {
       result = (await expression.evaluate(ctx)) as unknown;
     } catch (error) {
-      const code = (error as { code?: unknown }).code;
-      if (typeof code === 'string' && LIMIT_CODES.has(code)) invalid();
-      throw new TransformEvaluationError();
+      throw evaluationFailure(error);
     }
   } else {
     if (language !== undefined || !LEGACY_PATH.test(expr) || expr.length > 4096)

@@ -1,4 +1,9 @@
 import { StepExecutor } from '../../src/engine/step-executor';
+import {
+  evaluationFailure,
+  TransformEvaluationError,
+  TransformLimitError,
+} from '../../src/engine/transform-profile';
 describe('transform boundaries', () => {
   const execute = (expr: string, input: Record<string, unknown> = {}) =>
     new StepExecutor().execute(
@@ -79,5 +84,21 @@ describe('transform boundaries', () => {
     await expect(
       jsonata(`[${big.slice(1).join(', ')}]`, input),
     ).resolves.toEqual(Array(7).fill(false));
+  });
+
+  it.each([
+    ['D1011', TransformLimitError],
+    ['D1012', TransformLimitError],
+    ['D2015', TransformLimitError],
+    ['T2001', TransformEvaluationError],
+    [undefined, TransformEvaluationError],
+  ])('classifies JSONata error %s', (code, kind) => {
+    expect(evaluationFailure({ code })).toBeInstanceOf(kind);
+  });
+  it('classifies a native error without a code as an evaluation error', () => {
+    expect(evaluationFailure(new RangeError('stack'))).toBeInstanceOf(
+      TransformEvaluationError,
+    );
+    expect(evaluationFailure(null)).toBeInstanceOf(TransformEvaluationError);
   });
 });
