@@ -5,6 +5,51 @@ import type { AddressInfo } from 'node:net';
 import { outboundHttp } from '../../src/engine/outbound-http';
 
 describe('outbound HTTP socket and resource limits', () => {
+  it.each(['timeout', 'overflow'] as const)(
+    'closes the actual socket after %s and sends the next request',
+    async (mode) => {
+      let closed!: () => void;
+      const finished = new Promise<void>((resolve) => {
+        closed = resolve;
+      });
+      const server = createServer((req, res) => {
+        if (req.url === '/good') return void res.end('ok');
+        res.on('close', closed);
+        res.writeHead(200);
+        res.write(mode === 'overflow' ? 'x'.repeat(65) : 'x');
+      });
+      server.listen(0, '127.0.0.1');
+      await once(server, 'listening');
+      const origin =
+        'http://127.0.0.1:' + (server.address() as AddressInfo).port;
+      Object.assign(process.env, {
+        HTTP_FIXTURE_ORIGIN: origin,
+        HTTP_FIXTURE_ADDRESS: '127.0.0.1',
+        HTTP_RESPONSE_BYTES: '64',
+        HTTP_STEP_TIMEOUT_MS: '250',
+      });
+      try {
+        const call = (p: string) =>
+          outboundHttp(new URL(p, origin), 'GET', new Headers(), undefined);
+        await expect(call('/bad')).rejects.toThrow();
+        await finished;
+        await expect(call('/good')).resolves.toMatchObject({
+          status: 200,
+          body: 'ok',
+        });
+      } finally {
+        for (const name of [
+          'HTTP_FIXTURE_ORIGIN',
+          'HTTP_FIXTURE_ADDRESS',
+          'HTTP_RESPONSE_BYTES',
+          'HTTP_STEP_TIMEOUT_MS',
+        ])
+          delete process.env[name];
+        server.closeAllConnections();
+        await new Promise<void>((r) => server.close(() => r()));
+      }
+    },
+  );
   it('uses the addresses returned to the connector and rechecks the next hop', async () => {
     const seen: string[] = [];
     const server = createServer((req, res) => {

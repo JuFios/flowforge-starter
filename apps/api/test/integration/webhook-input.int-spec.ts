@@ -69,6 +69,29 @@ describe('webhook input is validated only after the signature', () => {
     expect(counts).toEqual([{ executions: 1, jobs: 1 }]);
   });
 
+  it('rolls back the receipt, execution and job together and accepts the retry', async () => {
+    const body = { recovery: true },
+      headers = sign(body);
+    await ds.query(
+      'ALTER TABLE webhook_deliveries ADD CONSTRAINT test_receipt_failure CHECK (false) NOT VALID',
+    );
+    try {
+      expect((await deliver(body, headers)).status).toBe(500);
+      const counts: unknown = await ds.query(
+        'SELECT (SELECT count(*)::int FROM executions) e,(SELECT count(*)::int FROM jobs) j,(SELECT count(*)::int FROM webhook_deliveries) d',
+      );
+      expect(counts).toEqual([{ e: 0, j: 0, d: 0 }]);
+    } finally {
+      await ds.query(
+        'ALTER TABLE webhook_deliveries DROP CONSTRAINT test_receipt_failure',
+      );
+    }
+    const first = await deliver(body, headers),
+      replay = await deliver(body, headers);
+    expect(first.status).toBe(202);
+    expect(await replay.json()).toEqual(await first.json());
+  });
+
   const invalidInputs: Array<[string, unknown]> = [
     ['an array', [1, 2]],
     ['an object above 64 KiB', { data: 'x'.repeat(64 * 1024) }],

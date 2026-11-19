@@ -119,6 +119,18 @@ describe('webhook upgrade, concurrent acceptance and revocation', () => {
       replies.map((r) => r.json() as Promise<{ executionId: string }>),
     );
     expect(results[0]).toEqual(results[1]);
+    const tx =
+      'SELECT "executionId" FROM webhook_deliveries WHERE "tenantId"=$1 AND "workflowId"=$2 AND "deliveryId"=$3';
+    const plan: unknown = await db.query('EXPLAIN (FORMAT JSON) ' + tx, [
+      tenant.id,
+      workflow.id,
+      'order-42',
+    ]);
+    expect(JSON.stringify(plan)).toContain('webhook_deliveries_pkey');
+    const initial = await db
+      .getRepository(Job)
+      .countBy({ executionId: results[0].executionId });
+    expect(initial).toBe(1);
     const counts = () =>
       db.query(
         'SELECT (SELECT count(*)::int FROM webhook_deliveries) AS receipts,(SELECT count(*)::int FROM executions) AS executions,(SELECT count(*)::int FROM jobs) AS jobs',
