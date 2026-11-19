@@ -334,6 +334,34 @@ describe('notification settings', () => {
     expect(new Set(seen).size).toBe(seen.length);
   });
 
+  it('keeps events created within the same millisecond on the pages', async () => {
+    await setup(a);
+    // Завершення під навантаженням: моменти створення різняться мікросекундами.
+    await ds.query(
+      `INSERT INTO outbox_events ("tenantId", "executionId", sequence, type, payload, "createdAt")
+       SELECT $1, gen_random_uuid(), 1, 'execution.succeeded', '{}',
+              '2026-11-19T10:00:00.123000Z'::timestamptz + make_interval(secs => g / 1000000.0)
+         FROM generate_series(1, 6) g`,
+      [a.tenant.id],
+    );
+    const seen: string[] = [];
+    let cursor: string | null = null;
+    do {
+      const page: {
+        body: { items: Array<{ id: string }>; nextCursor: string | null };
+      } = await call(
+        a,
+        'GET',
+        `/tenants/me/notifications/events?limit=1${cursor ? `&cursor=${cursor}` : ''}`,
+      );
+      expect(page.body.items[0]).not.toHaveProperty('cursorAt');
+      seen.push(...page.body.items.map((e) => e.id));
+      cursor = page.body.nextCursor;
+    } while (cursor);
+    expect(seen).toHaveLength(6);
+    expect(new Set(seen).size).toBe(6);
+  });
+
   it('isolates the new tables in the database itself (RLS), not only in the services', async () => {
     await setup(a);
     await completed(a);

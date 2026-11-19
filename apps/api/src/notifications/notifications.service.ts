@@ -4,6 +4,12 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import {
+  assertCanRotate,
+  keyViews,
+  planRevoke,
+  SigningKeyView,
+} from '../common/signing-keys';
 import { randomBytes, randomUUID } from 'node:crypto';
 import type { EntityManager } from 'typeorm';
 import { assertNotificationUrl } from '../engine/outbound-http';
@@ -14,12 +20,6 @@ import {
   ListEventsQuery,
   NotificationSettingsDto,
 } from './notifications.dto';
-
-/** Ключ підпису сповіщень: `current` діяв до ротації, `next` створено нею. Підпис — обома. */
-export interface SigningKeyView {
-  id: string;
-  role: 'current' | 'next';
-}
 
 export interface SettingsView {
   url: string;
@@ -59,23 +59,25 @@ const EVENT_COLUMNS = `id, "executionId", sequence, type, status, attempts,
 /** Секрет підпису: 32 випадкові байти, hex (показується лише раз). */
 const newSecret = () => randomBytes(32).toString('hex');
 
-/** Курсор сторінки подій: момент створення і id останньої події, base64url. */
-function encodeCursor(event: { createdAt: Date; id: string }): string {
-  return Buffer.from(
-    `${event.createdAt.toISOString()}|${event.id}`,
-    'utf8',
-  ).toString('base64url');
+/**
+ * Курсор сторінки подій: момент створення з точністю Postgres (мікросекунди: Date їх відкинув би, і
+ * події з тієї самої мілісекунди випадали б зі сторінок) і id останньої події, base64url.
+ */
+function encodeCursor(event: { cursorAt: string; id: string }): string {
+  return Buffer.from(`${event.cursorAt}|${event.id}`, 'utf8').toString(
+    'base64url',
+  );
 }
 
-function decodeCursor(raw: string): { createdAt: Date; id: string } {
+function decodeCursor(raw: string): { createdAt: string; id: string } {
   const text = Buffer.from(raw, 'base64url').toString('utf8');
   const match =
-    /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)\|([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/.exec(
+    /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z)\|([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/.exec(
       text,
     );
   if (!match || Number.isNaN(Date.parse(match[1])))
     throw new BadRequestException(['cursor is invalid']);
-  return { createdAt: new Date(match[1]), id: match[2] };
+  return { createdAt: match[1], id: match[2] };
 }
 
 /**
@@ -156,9 +158,7 @@ export class NotificationsService {
   /** Ротація: новий ключ `next` (секрет — лише в цій відповіді); підписи — обома, доки не відкличуть. */
   async rotate(tenantId: string): Promise<{ id: string; secret: string }> {
     return this.db.run(tenantId, async (em) => {
-      const row = await this.settings(em, tenantId, true);
-      if (row.nextSecretKeyId)
-        throw new ConflictException('Уже є два активні ключі');
+      assertCanRotate(pair(await this.settings(em, tenantId, true)));
       const id = randomUUID(),
         secret = newSecret();
       await em.query(
@@ -174,10 +174,11 @@ export class NotificationsService {
   async revoke(tenantId: string, rawId: string): Promise<void> {
     const id = rawId.toLowerCase();
     await this.db.run(tenantId, async (em) => {
-      const row = await this.settings(em, tenantId, true);
-      if (row.secretKeyId === id) {
-        if (!row.nextSecretKeyId)
-          throw new ConflictException('Потрібен хоча б один активний ключ');
+      const plan = planRevoke(
+        pair(await this.settings(em, tenantId, true)),
+        id,
+      );
+      if (plan === 'promote') {
         await em.query(
           `UPDATE notification_settings
               SET "secretKeyId" = "nextSecretKeyId", secret = "nextSecret",
@@ -185,7 +186,7 @@ export class NotificationsService {
             WHERE "tenantId" = $1`,
           [tenantId],
         );
-      } else if (row.nextSecretKeyId === id) {
+      } else if (plan === 'drop-next') {
         await em.query(
           `UPDATE notification_settings SET "nextSecretKeyId" = NULL, "nextSecret" = NULL,
                   "updatedAt" = now()
@@ -211,21 +212,29 @@ export class NotificationsService {
     if (after) {
       params.push(after.createdAt, after.id);
       where.push(
-        `("createdAt", id) < ($${params.length - 1}, $${params.length})`,
+        `("createdAt", id) < ($${params.length - 1}::timestamptz, $${params.length}::uuid)`,
       );
     }
-    const rows: EventView[] = await this.db.run(tenantId, (em) =>
-      em.query(
-        `SELECT ${EVENT_COLUMNS} FROM outbox_events WHERE ${where.join(' AND ')}
-          ORDER BY "createdAt" DESC, id DESC LIMIT $2`,
-        params,
-      ),
+    const rows: Array<EventView & { cursorAt: string }> = await this.db.run(
+      tenantId,
+      (em) =>
+        em.query(
+          `SELECT ${EVENT_COLUMNS},
+                  to_char("createdAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "cursorAt"
+             FROM outbox_events WHERE ${where.join(' AND ')}
+            ORDER BY "createdAt" DESC, id DESC LIMIT $2`,
+          params,
+        ),
     );
-    const items = rows.slice(0, limit);
+    const page = rows.slice(0, limit);
     return {
-      items,
+      items: page.map((row) => {
+        const { cursorAt, ...event } = row;
+        void cursorAt;
+        return event;
+      }),
       nextCursor:
-        rows.length > limit ? encodeCursor(items[items.length - 1]) : null,
+        rows.length > limit ? encodeCursor(page[page.length - 1]) : null,
     };
   }
 
@@ -303,13 +312,15 @@ export class NotificationsService {
   }
 }
 
+function pair(row: SettingsRow) {
+  return { current: row.secretKeyId, next: row.nextSecretKeyId };
+}
+
 function view(row: SettingsRow): SettingsView {
-  const keys: SigningKeyView[] = [{ id: row.secretKeyId, role: 'current' }];
-  if (row.nextSecretKeyId) keys.push({ id: row.nextSecretKeyId, role: 'next' });
   return {
     url: row.url,
     enabled: row.enabled,
     revision: row.revision,
-    keys,
+    keys: keyViews(pair(row)),
   };
 }
