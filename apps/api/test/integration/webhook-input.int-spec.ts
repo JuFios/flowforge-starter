@@ -92,6 +92,23 @@ describe('webhook input is validated only after the signature', () => {
     expect(await replay.json()).toEqual(await first.json());
   });
 
+  it('accepts empty signed bytes but rejects a signed JSON null', async () => {
+    for (const [body, expected] of [
+      ['', 202],
+      ['null', 400],
+    ] as const) {
+      const response = await fetch(running.baseUrl + '/hooks/' + workflowId, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          ...signedHeaders(workflowId, secret, body),
+        },
+        body,
+      });
+      expect(response.status).toBe(expected);
+    }
+    expect(await ds.getRepository(Execution).count()).toBe(1);
+  });
   const invalidInputs: Array<[string, unknown]> = [
     ['an array', [1, 2]],
     ['an object above 64 KiB', { data: 'x'.repeat(64 * 1024) }],
