@@ -7,6 +7,60 @@ const DEFINER = `SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp`
 const ISO = (expr: string) =>
   `to_char(${expr} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`;
 
+/** Той самий формат логічної події в обох версіях тригера. */
+export const terminalOutboxSql = (
+  lockSettings: boolean,
+) => `CREATE OR REPLACE FUNCTION public.outbox_on_execution() RETURNS trigger
+      LANGUAGE plpgsql ${DEFINER} AS $$
+      DECLARE
+        event_id uuid := gen_random_uuid();
+        corr varchar(128);
+        wf_version integer;
+      BEGIN
+        IF NEW."terminalCycles" <= OLD."terminalCycles" THEN
+          RETURN NULL;
+        END IF;
+        PERFORM 1 FROM public.notification_settings s
+          WHERE s."tenantId" = NEW."tenantId" AND s.enabled${lockSettings ? ' FOR NO KEY UPDATE' : ''};
+        IF NOT FOUND THEN
+          RETURN NULL;
+        END IF;
+        SELECT j."correlationId" INTO corr FROM public.jobs j
+          WHERE j."executionId" = NEW.id AND j."tenantId" = NEW."tenantId"
+          ORDER BY j."createdAt" DESC LIMIT 1;
+        SELECT v.version INTO wf_version FROM public.workflow_versions v
+          WHERE v.id = NEW."workflowVersionId" AND v."tenantId" = NEW."tenantId";
+        INSERT INTO public.outbox_events
+          (id, "tenantId", "executionId", sequence, type, payload, "correlationId")
+        VALUES (
+          event_id, NEW."tenantId", NEW.id, NEW."terminalCycles", 'execution.' || NEW.status,
+          jsonb_build_object(
+            'specVersion', 1,
+            'id', event_id,
+            'type', 'execution.' || NEW.status,
+            'createdAt', ${ISO('now()')},
+            'tenantId', NEW."tenantId",
+            'correlationId', COALESCE(corr, NEW."correlationId"),
+            'data', jsonb_build_object(
+              'executionId', NEW.id,
+              'sequence', NEW."terminalCycles",
+              'workflowId', NEW."workflowId",
+              'workflowVersion', wf_version,
+              'status', NEW.status,
+              'trigger', NEW.trigger,
+              'scheduledAt', ${ISO('NEW."scheduledAt"')},
+              'finishedAt', ${ISO('COALESCE(NEW."finishedAt", now())')},
+              'error', left(NEW.error, 1000)
+            )
+          )::text,
+          COALESCE(corr, NEW."correlationId")
+        );
+        -- Рядок налаштувань блокується, лише коли значення справді знижується.
+        UPDATE public.notification_settings SET "dueAt" = now()
+          WHERE "tenantId" = NEW."tenantId" AND ("dueAt" IS NULL OR "dueAt" > now());
+        RETURN NULL;
+      END $$`;
+
 const TENANT_TABLES = [
   'notification_settings',
   'outbox_events',
@@ -151,56 +205,7 @@ export class NotificationOutbox1796200000000 implements MigrationInterface {
         RETURN NEW;
       END $$`);
     // Подія циклу — у транзакції переходу. Payload серіалізується один раз і далі не змінюється.
-    await runner.query(`CREATE FUNCTION public.outbox_on_execution() RETURNS trigger
-      LANGUAGE plpgsql ${DEFINER} AS $$
-      DECLARE
-        event_id uuid := gen_random_uuid();
-        corr varchar(128);
-        wf_version integer;
-      BEGIN
-        IF NEW."terminalCycles" <= OLD."terminalCycles" THEN
-          RETURN NULL;
-        END IF;
-        PERFORM 1 FROM public.notification_settings s
-          WHERE s."tenantId" = NEW."tenantId" AND s.enabled;
-        IF NOT FOUND THEN
-          RETURN NULL;
-        END IF;
-        SELECT j."correlationId" INTO corr FROM public.jobs j
-          WHERE j."executionId" = NEW.id AND j."tenantId" = NEW."tenantId"
-          ORDER BY j."createdAt" DESC LIMIT 1;
-        SELECT v.version INTO wf_version FROM public.workflow_versions v
-          WHERE v.id = NEW."workflowVersionId" AND v."tenantId" = NEW."tenantId";
-        INSERT INTO public.outbox_events
-          (id, "tenantId", "executionId", sequence, type, payload, "correlationId")
-        VALUES (
-          event_id, NEW."tenantId", NEW.id, NEW."terminalCycles", 'execution.' || NEW.status,
-          jsonb_build_object(
-            'specVersion', 1,
-            'id', event_id,
-            'type', 'execution.' || NEW.status,
-            'createdAt', ${ISO('now()')},
-            'tenantId', NEW."tenantId",
-            'correlationId', COALESCE(corr, NEW."correlationId"),
-            'data', jsonb_build_object(
-              'executionId', NEW.id,
-              'sequence', NEW."terminalCycles",
-              'workflowId', NEW."workflowId",
-              'workflowVersion', wf_version,
-              'status', NEW.status,
-              'trigger', NEW.trigger,
-              'scheduledAt', ${ISO('NEW."scheduledAt"')},
-              'finishedAt', ${ISO('COALESCE(NEW."finishedAt", now())')},
-              'error', left(NEW.error, 1000)
-            )
-          )::text,
-          COALESCE(corr, NEW."correlationId")
-        );
-        -- Рядок налаштувань блокується, лише коли значення справді знижується.
-        UPDATE public.notification_settings SET "dueAt" = now()
-          WHERE "tenantId" = NEW."tenantId" AND ("dueAt" IS NULL OR "dueAt" > now());
-        RETURN NULL;
-      END $$`);
+    await runner.query(terminalOutboxSql(false));
     await runner.query(`CREATE TRIGGER execution_terminal_cycle
       BEFORE UPDATE OF status ON public.executions
       FOR EACH ROW EXECUTE FUNCTION public.execution_terminal_cycle()`);

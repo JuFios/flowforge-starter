@@ -36,6 +36,8 @@ import { WebhookDeliveries1796000000000 } from './1796000000000-WebhookDeliverie
 import { ScheduleProgress1796100000000 } from './1796100000000-ScheduleProgress';
 import { NotificationOutbox1796200000000 } from './1796200000000-NotificationOutbox';
 
+import { SerializeOutbox1796300000000 } from './1796300000000-SerializeOutbox';
+
 export const MIGRATIONS = [
   InitialSchema1794920217603,
   AddCorrelationId1794920232623,
@@ -63,4 +65,5 @@ export const MIGRATIONS = [
   WebhookDeliveries1796000000000,
   ScheduleProgress1796100000000,
   NotificationOutbox1796200000000,
+  SerializeOutbox1796300000000,
 ];
