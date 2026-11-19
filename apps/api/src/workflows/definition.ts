@@ -169,7 +169,7 @@ function validateStep(
       if (step.language !== undefined && step.language !== 'jsonata-v1')
         fail(where + '.language: невідома мова виразу');
       try {
-        compileProfile(expr, 0);
+        compileProfile(expr);
       } catch {
         fail(where + '.expr: вираз поза підтримуваним профілем JSONata');
       }

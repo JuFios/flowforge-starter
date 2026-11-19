@@ -1,14 +1,28 @@
 import { spawn } from 'node:child_process';
 import { resolve } from 'node:path';
-import { CONTEXT_BYTES, RESULT_BYTES } from './transform-profile';
+import {
+  CONTEXT_BYTES,
+  EXIT_EVALUATION,
+  RESULT_BYTES,
+} from './transform-profile';
 import type { StepContext } from './template';
 import { StepError } from './step-error';
+
+/**
+ * Вхід дочірнього процесу — скомпільований модуль поруч із цим. Із вихідних TS (jest) процес
+ * запускає збірку `dist`; її актуальність перевіряє `test/helpers/fresh-transform-build.ts`.
+ */
+export const TRANSFORM_CHILD = __filename.endsWith('.ts')
+  ? resolve(__dirname, '../../dist/engine/transform-child.js')
+  : resolve(__dirname, 'transform-child.js');
 
 const invalid = () =>
   new StepError(
     'transform: expression or result exceeds the supported profile',
     false,
   );
+const evaluationFailed = () =>
+  new StepError('transform: expression evaluation failed', false);
 
 export async function isolatedTransform(
   expr: string,
@@ -29,11 +43,7 @@ export async function isolatedTransform(
     '}';
   const child = spawn(
     process.execPath,
-    [
-      '--jitless',
-      '--max-old-space-size=32',
-      resolve(__dirname, '../../dist/engine/transform-child.js'),
-    ],
+    ['--jitless', '--max-old-space-size=32', TRANSFORM_CHILD],
     {
       env: {},
       stdio: ['pipe', 'pipe', 'ignore'],
@@ -74,6 +84,8 @@ export async function isolatedTransform(
       signal?.removeEventListener('abort', terminate);
       if (signal?.aborted) return fail(signal.reason);
       if (failure) return fail(failure);
+      if (!terminated && code === EXIT_EVALUATION)
+        return fail(evaluationFailed());
       if (terminated || code !== 0) return fail(invalid());
       try {
         done(

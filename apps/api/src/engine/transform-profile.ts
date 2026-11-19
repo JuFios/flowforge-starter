@@ -22,8 +22,56 @@ const OPS = new Set([
   'and',
   'or',
 ]);
+/** Вираз або його результат поза профілем чи межами ресурсів (README 3.3.6). */
+export class TransformLimitError extends Error {
+  constructor() {
+    super('unsupported');
+  }
+}
+/** Вираз у профілі, але обчислення над цими даними не вдалося (напр., арифметика над рядком). */
+export class TransformEvaluationError extends Error {
+  constructor() {
+    super('evaluation failed');
+  }
+}
+/** Коди виходу дочірнього процесу обчислення (isolated-transform.ts). */
+export const EXIT_LIMIT = 3;
+export const EXIT_EVALUATION = 4;
+/** Коди JSONata для перевищення меж послідовності, стеку й часу. */
+const LIMIT_CODES = new Set(['D1011', 'D1012', 'D2015']);
+/** Верхня оцінка проміжних значень для всіх посилань виразу на контекст. */
+export const PROJECTED_BYTES = 8 * 1024 * 1024;
+
 function invalid(): never {
-  throw new Error('unsupported');
+  throw new TransformLimitError();
+}
+
+/**
+ * Скільки байтів JSON щонайбільше читає шлях з іменованих кроків: значення за найглибшим
+ * власним префіксом. На масиві шлях JSONata розходиться по елементах, тож межею є весь масив.
+ */
+function referencedBytes(
+  ctx: StepContext,
+  names: string[],
+  cache: Map<string, number>,
+): number {
+  const key = names.join('.');
+  const known = cache.get(key);
+  if (known !== undefined) return known;
+  let value: unknown = ctx;
+  for (const name of names) {
+    if (value === null || typeof value !== 'object' || Array.isArray(value))
+      break;
+    if (!Object.hasOwn(value, name)) {
+      value = undefined;
+      break;
+    }
+    value = (value as Record<string, unknown>)[name];
+  }
+  const bytes =
+    value === undefined ? 0 : Buffer.byteLength(JSON.stringify(value) ?? '');
+  cache.set(key, bytes);
+  return bytes;
 }
 type Node = Record<string, unknown>;
 
@@ -32,13 +80,23 @@ function record(raw: unknown): Node {
   return raw as Node;
 }
 
-export function compileProfile(source: string, contextBytes: number) {
+/**
+ * Компілює вираз і перевіряє AST за закритим профілем. З контекстом виконання (воркер) додатково
+ * оцінює обсяг даних, які читають шляхи виразу; під час валідації визначення контексту немає.
+ */
+export function compileProfile(source: string, ctx?: StepContext) {
   if (source.length > 4096) return invalid();
-  const expression = jsonata(source, {
-    timeout: 250,
-    stack: 128,
-    sequence: 4096,
-  });
+  let expression: ReturnType<typeof jsonata>;
+  try {
+    expression = jsonata(source, {
+      timeout: 250,
+      stack: 128,
+      sequence: 4096,
+    });
+  } catch {
+    return invalid();
+  }
+  const sizes = new Map<string, number>();
   // Перелік полів закритий: модифікатори шляху й нові типи вузлів потребують окремого рішення.
   let count = 0,
     projected = 0;
@@ -72,8 +130,14 @@ export function compileProfile(source: string, contextBytes: number) {
         )
           invalid();
       }
-      projected += contextBytes;
-      if (projected > 8 * 1024 * 1024) invalid();
+      if (ctx) {
+        projected += referencedBytes(
+          ctx,
+          n.steps.map((v) => (v as Node).value as string),
+          sizes,
+        );
+        if (projected > PROJECTED_BYTES) invalid();
+      }
     } else if (['value', 'string', 'number'].includes(String(n.type))) fields();
     else if (
       n.type === 'binary' &&
@@ -124,25 +188,33 @@ export async function evaluateTransform(
   expr: string,
   language: unknown,
   ctx: StepContext,
-  bytes: number,
 ): Promise<string> {
   let result: unknown;
-  if (language === 'jsonata-v1')
-    result = (await compileProfile(expr, bytes).evaluate(ctx)) as unknown;
-  else {
+  if (language === 'jsonata-v1') {
+    const expression = compileProfile(expr, ctx);
+    try {
+      result = (await expression.evaluate(ctx)) as unknown;
+    } catch (error) {
+      const code = (error as { code?: unknown }).code;
+      if (typeof code === 'string' && LIMIT_CODES.has(code)) invalid();
+      throw new TransformEvaluationError();
+    }
+  } else {
     if (language !== undefined || !LEGACY_PATH.test(expr) || expr.length > 4096)
       invalid();
     let v: unknown = ctx;
     for (const field of expr.split('.').slice(1)) {
-      if (v === null || v === undefined) invalid();
+      // Як у старому JS-виразі: читання властивості відсутнього проміжного значення — помилка.
+      if (v === null || v === undefined) throw new TransformEvaluationError();
       v = Object.hasOwn(Object(v) as object, field)
         ? (v as Record<string, unknown>)[field]
         : undefined;
     }
-    result = v ?? null;
+    result = v;
   }
-  if (result === undefined || exceedsJsonDepth(result, MAX_STEP_RESULT_DEPTH))
-    invalid();
+  // Шлях без значення (у JSONata — відсутній збіг) дає null, однаково для обох мов.
+  if (result === undefined) result = null;
+  if (exceedsJsonDepth(result, MAX_STEP_RESULT_DEPTH)) invalid();
   const out = JSON.stringify(result, (_key, value: unknown) => {
     if (typeof value === 'number' && !Number.isFinite(value)) invalid();
     return value;
