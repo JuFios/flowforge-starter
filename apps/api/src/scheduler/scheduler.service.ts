@@ -172,31 +172,35 @@ export class SchedulerService
     const stop = this.metrics.tickDuration.startTimer();
     let fired = 0;
     try {
-      const remaining = new Map<string, Cursor>();
-      const turn = async (cursor: Cursor) => {
-        const result = await this.tenantTurn(cursor);
-        fired += result.fired;
-        if (result.next) remaining.set(cursor.tenantId, result.next);
-      };
-      let after: string | null = null;
-      for (;;) {
-        const tenants = await this.system.dueScheduleTenants(
-          after,
-          SCHEDULE_PAGE,
-        );
-        for (const { tenantId } of tenants) {
-          if (this.stopping) return fired;
-          await turn({ tenantId });
+      let continuing = new Map<string, Cursor>();
+      do {
+        const next = new Map<string, Cursor>();
+        const turn = async (cursor: Cursor) => {
+          const result = await this.tenantTurn(cursor);
+          fired += result.fired;
+          if (result.next) next.set(cursor.tenantId, result.next);
+        };
+        // Між квантами перевіряємо нові належні розклади за годинником БД.
+        // Спершу обслуговуємо тих, хто не мав продовження з попереднього раунду.
+        let after: string | null = null;
+        for (;;) {
+          const tenants = await this.system.dueScheduleTenants(
+            after,
+            SCHEDULE_PAGE,
+          );
+          for (const { tenantId } of tenants) {
+            if (this.stopping) return fired;
+            if (!continuing.has(tenantId)) await turn({ tenantId });
+          }
+          if (tenants.length < SCHEDULE_PAGE) break;
+          after = tenants[tenants.length - 1].tenantId;
         }
-        if (tenants.length < SCHEDULE_PAGE) break;
-        after = tenants[tenants.length - 1].tenantId;
-      }
-      // Ітератор Map відвідує повторно доданий ключ у кінці черги.
-      for (const [tenantId, cursor] of remaining) {
-        if (this.stopping) return fired;
-        remaining.delete(tenantId);
-        await turn(cursor);
-      }
+        for (const cursor of continuing.values()) {
+          if (this.stopping) return fired;
+          await turn(cursor);
+        }
+        continuing = next;
+      } while (continuing.size);
       return fired;
     } finally {
       stop();
