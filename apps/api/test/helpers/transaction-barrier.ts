@@ -1,5 +1,5 @@
 import { DataSource, QueryRunner } from 'typeorm';
-import { waitFor } from './queue';
+import { waitFor } from './wait-for';
 
 /** Чекає, доки інше з’єднання справді потребує блокування цієї транзакції. */
 export async function waitForBlocked(

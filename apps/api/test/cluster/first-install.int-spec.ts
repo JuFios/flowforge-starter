@@ -16,11 +16,13 @@ it('initializes two databases concurrently on a fresh PostgreSQL cluster', async
     url: url.href,
   }).initialize();
   const suffix = randomBytes(8).toString('hex');
-  const roles = [API_ROLE, WORKER_ROLE].map((group, i) => ({
-    group,
-    user: `ff_cold_${i}_${suffix}`,
-    password: randomBytes(24).toString('hex'),
-  }));
+  const roles = [0, 1].map((db) =>
+    ([API_ROLE, WORKER_ROLE] as const).map((group, i) => ({
+      group,
+      user: `ff_cold_${db}_${i}_${suffix}`,
+      password: randomBytes(24).toString('hex'),
+    })),
+  );
   const databases: string[] = [];
   const sources: DataSource[] = [];
   try {
@@ -61,11 +63,11 @@ it('initializes two databases concurrently on a fresh PostgreSQL cluster', async
       await barrier.release();
     }
     await Promise.all(
-      sources.map((ds) =>
+      sources.map((ds, i) =>
         ds.transaction(async (em) => {
           const query = (sql: string, params?: unknown[]) =>
             em.query(sql, params);
-          await provisionLoginRoles(query, roles);
+          await provisionLoginRoles(query, roles[i]);
           await assertSecurityPosture(query);
         }),
       ),
@@ -74,7 +76,7 @@ it('initializes two databases concurrently on a fresh PostgreSQL cluster', async
   } finally {
     await Promise.all(sources.map((ds) => ds.destroy()));
     for (const name of databases) await admin.query(`DROP DATABASE "${name}"`);
-    for (const role of roles)
+    for (const role of roles.flat())
       await admin.query(`DROP ROLE IF EXISTS "${role.user}"`);
     await admin.destroy();
   }
