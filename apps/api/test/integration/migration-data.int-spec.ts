@@ -651,6 +651,43 @@ describe('data migrations', () => {
     },
   );
 
+  it('repairs orphaned delivery attempts on upgrade while preserving the current lease and recorded outcomes', async () => {
+    await truncateAll(ds);
+    await revertThrough('CloseCancelledAttempts');
+    await ds.query(`WITH tenant AS (
+      INSERT INTO tenants(name,"apiKeyHash","webhookSecret") VALUES ('upgrade','upgrade-attempts','old') RETURNING id
+    ), events AS (
+      INSERT INTO outbox_events("tenantId","executionId",sequence,type,payload,status,attempts,"leaseToken","leaseUntil")
+      SELECT tenant.id,gen_random_uuid(),1,'execution.failed','{}',state,3,
+        CASE WHEN state='sending' THEN gen_random_uuid() END,
+        CASE WHEN state='sending' THEN now()+interval '1 hour' END
+      FROM tenant CROSS JOIN unnest(ARRAY['cancelled','sending','pending']) AS state
+      RETURNING id,"tenantId"
+    ) INSERT INTO outbox_attempts("eventId","tenantId",attempt,"senderId",outcome,"finishedAt")
+      SELECT id,"tenantId",n,'previous',CASE WHEN n=1 THEN 'timeout' END, CASE WHEN n=1 THEN now() END
+      FROM events CROSS JOIN generate_series(1,3) n`);
+    await ds.runMigrations({ transaction: 'each' });
+    const attempts = await ds.query<
+      Array<{
+        status: string;
+        attempt: number;
+        outcome: string | null;
+        closed: boolean;
+      }>
+    >(
+      `SELECT e.status,a.attempt,a.outcome,a."finishedAt" IS NOT NULL AS closed
+      FROM outbox_attempts a JOIN outbox_events e ON e.id=a."eventId"`,
+    );
+    expect(attempts).toHaveLength(9);
+    for (const row of attempts) {
+      const active = row.attempt === 3 && row.status === 'sending';
+      expect(row.closed).toBe(!active);
+      expect(row.outcome).toBe(
+        active ? null : row.attempt === 1 ? 'timeout' : 'interrupted',
+      );
+    }
+  });
+
   it('upgrades in-flight deliveries, hints, short schedules and unfinished executions from PR 5', async () => {
     await truncateAll(ds);
     await revertThrough('SerializeOutbox');
