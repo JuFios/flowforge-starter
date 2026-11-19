@@ -23,7 +23,7 @@ export class WebhookKeysService {
 
   list(tenantId: string): Promise<WebhookKeyView[]> {
     return this.db.run(tenantId, async (em) =>
-      describe(await keyIds(em, tenantId, false)),
+      toViews(await keyIds(em, tenantId, false)),
     );
   }
 
@@ -94,7 +94,7 @@ async function keyIds(
   return row;
 }
 
-function describe(keys: KeyIds): WebhookKeyView[] {
+function toViews(keys: KeyIds): WebhookKeyView[] {
   const views: WebhookKeyView[] = [{ id: keys.webhookKeyId, role: 'current' }];
   if (keys.nextWebhookKeyId)
     views.push({ id: keys.nextWebhookKeyId, role: 'next' });

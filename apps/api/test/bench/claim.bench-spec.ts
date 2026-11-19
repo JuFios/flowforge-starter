@@ -211,11 +211,12 @@ describe('claim throughput', () => {
     );
   }
 
-  /** Один прогін FIFO попередньої версії; завершення — як тоді. */
-  async function fifoRun(
-    pools: DataSource[],
-    completion: Completion,
-  ): Promise<RunResult> {
+  /**
+   * Один прогін FIFO попередньої версії; завершення — як тоді. Пули відкриваються на прогін і
+   * закриваються після нього: з’єднань одночасно не більше, ніж за послідовного порівняння.
+   */
+  async function fifoRun(completion: Completion): Promise<RunResult> {
+    const pools = await openFifoPools();
     const claimSql =
       completion === 'execution'
         ? FIFO_CLAIM_SQL + ', "executionId"'
@@ -262,6 +263,7 @@ describe('claim throughput', () => {
       await owner.query('ALTER TABLE jobs ENABLE TRIGGER USER');
       await owner.query('DROP INDEX "IDX_bench_fifo_claim"');
       await truncateAll(owner);
+      for (const ds of pools) await ds.destroy();
     }
   }
 
@@ -282,16 +284,11 @@ describe('claim throughput', () => {
     async (completion) => {
       const fifo: RunResult[] = [];
       const fair: RunResult[] = [];
-      const pools = await openFifoPools();
-      try {
-        for (let run = 0; run < RUNS; run++) {
-          // Парні прогони починає FIFO, непарні — справедлива черга.
-          if (run % 2 === 0) fifo.push(await fifoRun(pools, completion));
-          fair.push(await measure(fairLoop, completion));
-          if (run % 2 === 1) fifo.push(await fifoRun(pools, completion));
-        }
-      } finally {
-        for (const ds of pools) await ds.destroy();
+      for (let run = 0; run < RUNS; run++) {
+        // Парні прогони починає FIFO, непарні — справедлива черга.
+        if (run % 2 === 0) fifo.push(await fifoRun(completion));
+        fair.push(await measure(fairLoop, completion));
+        if (run % 2 === 1) fifo.push(await fifoRun(completion));
       }
       const share = median(fair.map((r, i) => r.perSecond / fifo[i].perSecond));
       const p95Ratio = median(fair.map((r, i) => r.p95 / fifo[i].p95));

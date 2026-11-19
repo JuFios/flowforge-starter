@@ -50,6 +50,8 @@ export type Responder = (
  * (за замовчуванням 200 з JSON `{ ok: true }`).
  */
 export class Receiver {
+  /** Приймач, що тримає дозвіл тестового приймача (HTTP_FIXTURE_*) у цьому реєстрі модулів. */
+  private static active?: Receiver;
   readonly requests: ReceivedRequest[] = [];
   private server?: Server;
   respond: Responder = (_req, res) => {
@@ -59,10 +61,11 @@ export class Receiver {
 
   async start(): Promise<void> {
     // Дозвіл тестового приймача один на процес: другий приймач мовчки перебрав би його в першого.
-    if (process.env.HTTP_FIXTURE_ORIGIN !== undefined)
+    if (Receiver.active)
       throw new Error(
-        `another HTTP fixture is active: ${process.env.HTTP_FIXTURE_ORIGIN}`,
+        `another receiver holds the HTTP fixture: ${Receiver.active.url('')}`,
       );
+    Receiver.active = this;
     this.server = createServer((req, res) => {
       const chunks: Buffer[] = [];
       req.on('data', (c: Buffer) => chunks.push(c));
@@ -99,7 +102,8 @@ export class Receiver {
   async stop(): Promise<void> {
     const server = this.server;
     if (!server) return;
-    if (process.env.HTTP_FIXTURE_ORIGIN === this.url('')) {
+    if (Receiver.active === this) {
+      Receiver.active = undefined;
       delete process.env.HTTP_FIXTURE_ORIGIN;
       delete process.env.HTTP_FIXTURE_ADDRESS;
     }
