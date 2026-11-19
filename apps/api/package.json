@@ -2,6 +2,9 @@
   "name": "flowforge-api",
   "version": "0.1.0",
   "private": true,
+  "engines": {
+    "node": "^20.12.0 || >=21.7.0"
+  },
   "scripts": {
     "build": "nest build",
     "start": "node dist/main",
@@ -18,11 +21,14 @@
     "pretest:integration": "nest build",
     "test:integration": "jest -c test/jest-integration.json",
     "test:all": "npm run test && npm run test:integration",
+    "bench:claim": "jest -c test/jest-bench.json",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "chaos": "tsc -p scripts/tsconfig.json && node dist/scripts/chaos-kill-worker.js",
     "chaos:postgres": "tsc -p scripts/tsconfig.json && node dist/scripts/chaos-restart-postgres.js",
+    "load:fairness": "tsc -p scripts/tsconfig.json && node dist/scripts/load-fairness.js",
     "chaos:sink:build": "tsc -p scripts/tsconfig.json",
+    "db:migrate": "node dist/database/migrate.js",
     "db:provision": "node dist/database/provision.js"
   },
   "dependencies": {

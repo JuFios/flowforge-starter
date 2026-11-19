@@ -24,7 +24,7 @@ services:
   # Одноразовий крок: міграції (власником схеми) і створення/оновлення runtime-ролей БД.
   migrate:
     <<: *api-image
-    command: ['sh', '-c', 'npm run migration:run && npm run db:provision']
+    command: ['sh', '-c', 'npm run db:migrate && npm run db:provision']
     environment:
       NODE_ENV: production
       MIGRATION_DATABASE_URL: postgres://flowforge:${POSTGRES_PASSWORD:?задайте POSTGRES_PASSWORD у .env}@postgres:5432/flowforge

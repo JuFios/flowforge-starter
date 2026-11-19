@@ -118,7 +118,7 @@ export function parseTrustProxy(
     if (family === 0 || rest.length > 0) return false;
     if (prefix === undefined) return true;
     if (!/^\d{1,3}$/.test(prefix)) return false;
-    return Number(prefix) <= (family === 4 ? 32 : 128);
+    return Number(prefix) > 0 && Number(prefix) <= (family === 4 ? 32 : 128);
   });
   return valid ? entries : undefined;
 }
