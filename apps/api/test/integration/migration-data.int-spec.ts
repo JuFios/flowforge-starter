@@ -650,4 +650,78 @@ describe('data migrations', () => {
       }
     },
   );
+
+  it('ScheduleProgress and NotificationOutbox upgrade stored schedules and executions without a flood or a duplicate', async () => {
+    await truncateAll(ds);
+    await revertThrough('ScheduleProgress');
+    const [tenant]: Array<{ id: string }> = await ds.query(
+      `INSERT INTO tenants (name, "apiKeyHash", "webhookSecret") VALUES ('old', 'h-upgrade', 's') RETURNING id`,
+    );
+    const [wf]: Array<{ id: string }> = await ds.query(
+      `INSERT INTO workflows ("tenantId", name, steps, cron, timezone)
+       VALUES ($1, 'nightly', '[]', '* * * * * *', 'Europe/Kyiv') RETURNING id`,
+      [tenant.id],
+    );
+    const [version]: Array<{ id: string }> = await ds.query(
+      `INSERT INTO workflow_versions ("workflowId", "tenantId", version, steps)
+       VALUES ($1, $2, 1, '[]') RETURNING id`,
+      [wf.id, tenant.id],
+    );
+    // Спрацювання, створене попередньою версією, — момент секунду тому.
+    const [{ at }]: Array<{ at: Date }> = await ds.query(
+      `SELECT date_trunc('second', now()) - interval '1 second' AS at`,
+    );
+    const [fired]: Array<{ id: string }> = await ds.query(
+      `INSERT INTO executions ("tenantId", "workflowId", "workflowVersionId", trigger, status, "scheduledAt", "finishedAt")
+       VALUES ($1, $2, $3, 'cron', 'succeeded', $4, now()) RETURNING id`,
+      [tenant.id, wf.id, version.id, at],
+    );
+    const [failed]: Array<{ id: string }> = await ds.query(
+      `INSERT INTO executions ("tenantId", "workflowId", "workflowVersionId", trigger, status, error, "finishedAt")
+       VALUES ($1, $2, $3, 'api', 'failed', 'old failure', now()) RETURNING id`,
+      [tenant.id, wf.id, version.id],
+    );
+    await ds.runMigrations({ transaction: 'each' });
+
+    const [upgraded]: Array<{
+      cursor: Date;
+      next: Date | null;
+      policy: string;
+    }> = await ds.query(
+      `SELECT "scheduleCursor" AS cursor, "nextFireAt" AS next, "missedRunPolicy" AS policy
+         FROM workflows WHERE id = $1`,
+      [wf.id],
+    );
+    // Відлік — з моменту оновлення: момент, уже створений попередньою версією, не повторюється, а
+    // моменти до оновлення не наздоганяються.
+    expect(upgraded.policy).toBe('run_once');
+    expect(upgraded.cursor.getTime()).toBeGreaterThanOrEqual(at.getTime());
+    expect(upgraded.next).not.toBeNull();
+    const cycles: Array<{ id: string; terminalCycles: number }> =
+      await ds.query(
+        'SELECT id, "terminalCycles" FROM executions WHERE id = ANY($1) ORDER BY id',
+        [[fired.id, failed.id]],
+      );
+    expect(cycles.map((c) => c.terminalCycles)).toEqual([1, 1]);
+    // Старі завершення сповіщень не створюють.
+    expect(await ds.query('SELECT 1 FROM outbox_events')).toEqual([]);
+    // Після налаштування сповіщень повтор старого виконання — другий цикл, подія з sequence 2.
+    await ds.query(
+      `INSERT INTO notification_settings ("tenantId", url, secret) VALUES ($1, 'https://receiver.example/hook', $2)`,
+      [tenant.id, 'a'.repeat(64)],
+    );
+    await ds.query(
+      `UPDATE executions SET status = 'pending', error = NULL WHERE id = $1`,
+      [failed.id],
+    );
+    await ds.query(
+      `UPDATE executions SET status = 'succeeded', "finishedAt" = now() WHERE id = $1`,
+      [failed.id],
+    );
+    const events: Array<{ sequence: number; type: string }> = await ds.query(
+      'SELECT sequence, type FROM outbox_events',
+    );
+    expect(events).toEqual([{ sequence: 2, type: 'execution.succeeded' }]);
+    await truncateAll(ds);
+  });
 });
