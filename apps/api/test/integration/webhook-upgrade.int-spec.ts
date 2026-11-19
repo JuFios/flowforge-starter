@@ -6,10 +6,12 @@ import { hashApiKey } from '../../src/auth/api-key.guard';
 import { testDatabaseUrl } from '../helpers/test-env';
 import { DataSource } from 'typeorm';
 import { migrate } from '../../src/database/migrate';
+import { ExecutionsService } from '../../src/executions/executions.service';
 import { Execution, Job } from '../../src/entities';
 import { RunningApp, startApp } from '../helpers/app';
 import {
   createExecution,
+  createTenant,
   createWorkflow,
   openTestDataSource,
   truncateAll,
@@ -29,6 +31,74 @@ describe('webhook upgrade, concurrent acceptance and revocation', () => {
   });
   afterAll(async () => {
     await db.destroy();
+  });
+
+  it('rechecks the verified key after a concurrent revocation and isolates key management', async () => {
+    await truncateAll(db);
+    const owner = await createTenant(db, 'owner'),
+      other = await createTenant(db, 'other');
+    const wf = await createWorkflow(db, owner.tenant.id);
+    const a = await startApp(),
+      b = await startApp();
+    services.push(a, b);
+    const manage = (key: string, method: string, suffix = '') =>
+      fetch(b.baseUrl + '/tenants/me/webhook-secrets' + suffix, {
+        method,
+        headers: { 'x-api-key': key },
+      });
+    expect((await manage('', 'POST')).status).toBe(401);
+    const original = (await (await manage(owner.apiKey, 'GET')).json()) as {
+      id: string;
+    }[];
+    expect(await (await manage(other.apiKey, 'GET')).json()).not.toEqual(
+      original,
+    );
+    expect(
+      (await manage(other.apiKey, 'DELETE', '/' + original[0].id)).status,
+    ).toBe(204);
+    expect(await (await manage(owner.apiKey, 'GET')).json()).toEqual(original);
+    expect((await manage(owner.apiKey, 'POST')).status).toBe(201);
+    const service = a.app.get(ExecutionsService),
+      enqueue = service.enqueueWebhook.bind(service);
+    let reached!: () => void, release!: () => void;
+    const verified = new Promise<void>((r) => {
+        reached = r;
+      }),
+      proceed = new Promise<void>((r) => {
+        release = r;
+      });
+    const spy = jest
+      .spyOn(service, 'enqueueWebhook')
+      .mockImplementationOnce(async (...args) => {
+        reached();
+        await proceed;
+        return enqueue(...args);
+      });
+    const request = fetch(a.baseUrl + '/hooks/' + wf.id, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        ...signedHeaders(wf.id, owner.tenant.webhookSecret, '{}'),
+      },
+      body: '{}',
+    });
+    try {
+      await Promise.race([
+        verified,
+        request.then(() => {
+          throw new Error('delivery ended before reaching enqueue');
+        }),
+      ]);
+      expect(
+        (await manage(owner.apiKey, 'DELETE', '/' + original[0].id)).status,
+      ).toBe(204);
+    } finally {
+      release();
+      spy.mockRestore();
+    }
+    expect((await request).status).toBe(401);
+    expect(await db.getRepository(Job).count()).toBe(0);
+    expect(await db.getRepository(Execution).count()).toBe(0);
   });
 
   it('keeps one receipt, execution and initial job across two APIs and rotates a migrated tenant without downtime', async () => {
