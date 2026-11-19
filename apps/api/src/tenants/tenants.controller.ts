@@ -91,6 +91,7 @@ export class TenantsController {
   async create(@Body() dto: CreateTenantDto) {
     const apiKey = `ff_${randomBytes(24).toString('hex')}`;
     const webhookSecret = randomBytes(24).toString('hex');
+    const webhookKeyId = randomUUID();
     // Під RLS рядок тенанта видно й можна вставити лише в його власному контексті, тож id
     // генерується тут, до вставки.
     const id = randomUUID();
@@ -101,6 +102,7 @@ export class TenantsController {
           name: dto.name,
           apiKeyHash: hashApiKey(apiKey),
           webhookSecret,
+          webhookKeyId,
           ...overridesFrom(dto.limits),
         }),
       );
@@ -109,6 +111,8 @@ export class TenantsController {
         name: tenant.name,
         apiKey,
         webhookSecret,
+        // ID початкового ключа: за ним власник відкликає ключ після ротації (README 3.3.7).
+        webhookKeyId,
         limits: await limitsView(em, id),
       };
     });

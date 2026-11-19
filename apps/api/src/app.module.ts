@@ -28,6 +28,7 @@ import { SchedulerService } from './scheduler/scheduler.service';
 import { TenancyModule } from './tenancy/tenancy.module';
 import { TenantsController } from './tenants/tenants.controller';
 import { WebhookKeysController } from './webhooks/webhook-keys.controller';
+import { WebhookKeysService } from './webhooks/webhook-keys.service';
 import { WebhooksController } from './webhooks/webhooks.controller';
 import { WorkflowsController } from './workflows/workflows.controller';
 import { WorkflowsService } from './workflows/workflows.service';
@@ -91,6 +92,7 @@ class ApiEnvironmentCheck implements OnModuleInit {
     ApiKeyGuard,
     WorkflowsService,
     ExecutionsService,
+    WebhookKeysService,
     SchedulerService,
     MetricsServer,
   ],
