@@ -1,16 +1,19 @@
-import { ConflictException, Injectable } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { randomBytes, randomUUID } from 'node:crypto';
 import type { EntityManager } from 'typeorm';
+import {
+  assertCanRotate,
+  keyViews,
+  planRevoke,
+  SigningKeyView,
+} from '../common/signing-keys';
 import { TenantDb } from '../tenancy/tenant-db';
 
 /**
  * Ключ підпису webhook-ів тенанта (README 3.3.7, «Ротація без простою»). `current` — ключ, що діяв
  * до останньої ротації; `next` — ключ, створений нею. Обидва приймаються, доки `current` не відкличуть.
  */
-export interface WebhookKeyView {
-  id: string;
-  role: 'current' | 'next';
-}
+export type WebhookKeyView = SigningKeyView;
 
 interface KeyIds {
   webhookKeyId: string;
@@ -40,9 +43,7 @@ export class WebhookKeysService {
     em: EntityManager,
     tenantId: string,
   ): Promise<{ id: string; secret: string }> {
-    const keys = await keyIds(em, tenantId, true);
-    if (keys.nextWebhookKeyId)
-      throw new ConflictException('Уже є два активні ключі');
+    assertCanRotate(pair(await keyIds(em, tenantId, true)));
     const id = randomUUID(),
       secret = randomBytes(24).toString('hex');
     await em.query(
@@ -59,15 +60,13 @@ export class WebhookKeysService {
     rawId: string,
   ): Promise<void> {
     const id = rawId.toLowerCase();
-    const keys = await keyIds(em, tenantId, true);
-    if (keys.webhookKeyId === id) {
-      if (!keys.nextWebhookKeyId)
-        throw new ConflictException('Потрібен хоча б один активний ключ');
+    const plan = planRevoke(pair(await keyIds(em, tenantId, true)), id);
+    if (plan === 'promote') {
       await em.query(
         'UPDATE tenants SET "webhookKeyId"="nextWebhookKeyId","webhookSecret"="nextWebhookSecret","nextWebhookKeyId"=NULL,"nextWebhookSecret"=NULL WHERE id=$1',
         [tenantId],
       );
-    } else if (keys.nextWebhookKeyId === id) {
+    } else if (plan === 'drop-next') {
       await em.query(
         'UPDATE tenants SET "nextWebhookKeyId"=NULL,"nextWebhookSecret"=NULL WHERE id=$1',
         [tenantId],
@@ -94,9 +93,10 @@ async function keyIds(
   return row;
 }
 
+function pair(keys: KeyIds) {
+  return { current: keys.webhookKeyId, next: keys.nextWebhookKeyId };
+}
+
 function toViews(keys: KeyIds): WebhookKeyView[] {
-  const views: WebhookKeyView[] = [{ id: keys.webhookKeyId, role: 'current' }];
-  if (keys.nextWebhookKeyId)
-    views.push({ id: keys.nextWebhookKeyId, role: 'next' });
-  return views;
+  return keyViews(pair(keys));
 }
