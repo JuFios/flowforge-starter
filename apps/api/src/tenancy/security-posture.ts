@@ -98,11 +98,7 @@ export const POSTURE: {
     },
     'auth_tenant(text)': { owner: SYSTEM_ROLE, execute: [API_ROLE] },
     'webhook_tenant(uuid)': { owner: SYSTEM_ROLE, execute: [API_ROLE] },
-    'scheduled_workflows(uuid,integer)': {
-      owner: SYSTEM_ROLE,
-      execute: [API_ROLE],
-    },
-    'scheduled_tenants(uuid,integer)': {
+    'due_schedule_tenants(uuid,integer)': {
       owner: SYSTEM_ROLE,
       execute: [API_ROLE],
     },

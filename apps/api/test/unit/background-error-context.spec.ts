@@ -9,9 +9,10 @@ import {
 import { JobRunnerService } from '../../src/engine/job-runner.service';
 import { QueueMetrics } from '../../src/engine/queue.metrics';
 import { StepExecutor } from '../../src/engine/step-executor';
-import { Workflow } from '../../src/entities';
 import { ExecutionsService } from '../../src/executions/executions.service';
 import { getCorrelationId } from '../../src/observability/correlation';
+import { MetricsService } from '../../src/observability/metrics.service';
+import { SchedulerMetrics } from '../../src/scheduler/scheduler.metrics';
 import { SchedulerService } from '../../src/scheduler/scheduler.service';
 import { SystemDb } from '../../src/tenancy/system-db';
 import { fakeTenantDb } from '../helpers/fake-tenant-db';
@@ -86,29 +87,55 @@ describe('background error logs keep the correlation context', () => {
 
   it('scheduler: a scheduled run that cannot be created', async () => {
     const seen: Array<string | undefined> = [];
-    const wf = { id: 'wf-1', cron: '* * * * * *' } as Workflow;
+    const wf = { id: 'wf-1', tenantId: 't-1', cron: '* * * * * *' };
     const system = {
-      scheduledTenants: (after: string | null) =>
-        Promise.resolve(after ? [] : [{ id: wf.id, tenantId: wf.tenantId }]),
+      dueScheduleTenants: (after: string | null) =>
+        Promise.resolve(after ? [] : [{ tenantId: wf.tenantId }]),
     } as unknown as SystemDb;
-    const db = fakeTenantDb({ find: () => Promise.resolve([wf]) } as never);
+    const db = fakeTenantDb({
+      create: (_type: unknown, fields: unknown) => fields,
+      query: (sql: string) =>
+        Promise.resolve(
+          sql.includes('FOR NO KEY UPDATE')
+            ? [
+                {
+                  ...wf,
+                  timezone: 'UTC',
+                  version: 1,
+                  missedRunPolicy: 'run_all',
+                  scheduleCursor: new Date(Date.now() - 5_000),
+                  nextFireAt: new Date(0),
+                  scheduleBlockedSince: null,
+                  scheduleError: null,
+                  now: new Date(),
+                },
+              ]
+            : sql.startsWith('SELECT id FROM workflows')
+              ? [{ id: wf.id }]
+              : [],
+        ),
+    } as never);
     const executions = {
-      enqueueScheduled: () => {
+      enqueueScheduledIn: () => {
         seen.push(getCorrelationId());
-        return Promise.reject(new Error('db down'));
+        // Помилка БД саме цього спрацювання (SQLSTATE), а не втрачене з'єднання.
+        return Promise.reject(
+          Object.assign(new Error('deadlock detected'), { code: '40P01' }),
+        );
       },
     } as unknown as ExecutionsService;
     const scheduler = new SchedulerService(
       system,
       db,
       executions,
-      config({ SCHEDULER_TICK_MS: 1000 }),
+      config({ SCHEDULER_TICK_MS: 1000, SCHEDULER_MISFIRE_GRACE_MS: 60_000 }),
+      new SchedulerMetrics(new MetricsService()),
     );
 
-    await scheduler.tick(new Date(Date.now() + 5000));
+    await scheduler.tick();
 
     expect(errors).toHaveLength(1);
-    expect(seen[0]).toEqual(expect.any(String));
+    expect(seen[0]).toMatch(/^cron:wf-1:\d+$/);
     expect(errors[0]).toMatchObject({
       correlationId: seen[0],
       fields: {

@@ -40,11 +40,10 @@ export const GROUP_FUNCTIONS: Readonly<Record<string, readonly string[]>> = {
   [API_ROLE]: [
     'app_current_tenant()',
     'auth_tenant(text)',
+    'due_schedule_tenants(uuid,integer)',
     'lock_tenant_usage()',
     'purge_rate_limits(integer)',
     'rate_limit_hit(text,integer,integer)',
-    'scheduled_tenants(uuid,integer)',
-    'scheduled_workflows(uuid,integer)',
     'tenant_limits()',
     'webhook_tenant(uuid)',
   ],

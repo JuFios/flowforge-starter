@@ -6,7 +6,7 @@ import { Job } from '../entities';
 /** Найдовше читання глибини черги для метрик, мс (або менше — за statement_timeout сесії). */
 const QUEUE_DEPTH_TIMEOUT_MS = 2_000;
 
-/** Розмір сторінки планувальника (`scheduled_tenants`); функція сама обмежує його 1000. */
+/** Розмір сторінки планувальника (`due_schedule_tenants`); функція сама обмежує його 1000. */
 export const SCHEDULE_PAGE = 500;
 
 /**
@@ -38,12 +38,15 @@ export class SystemDb {
     return row?.id ?? null;
   }
 
-  /** Сторінка тенантів з увімкненими розкладами після `after` (за id), до `limit` рядків. */
-  scheduledTenants(
+  /**
+   * Сторінка тенантів, у яких є належний розклад (`nextFireAt` настав), після `after` (за id), до
+   * `limit` рядків. Лише ідентифікатори: самі розклади планувальник читає в контексті тенанта.
+   */
+  dueScheduleTenants(
     after: string | null,
     limit = SCHEDULE_PAGE,
   ): Promise<Array<{ tenantId: string }>> {
-    return this.ds.query('SELECT * FROM scheduled_tenants($1, $2)', [
+    return this.ds.query('SELECT * FROM due_schedule_tenants($1, $2)', [
       after,
       limit,
     ]);

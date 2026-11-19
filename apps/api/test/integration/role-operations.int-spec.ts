@@ -11,7 +11,7 @@ import {
   openTestDataSource,
   truncateAll,
 } from '../helpers/db';
-import { api, Receiver, startWorker, waitFor } from '../helpers/queue';
+import { api, Receiver, sleep, startWorker, waitFor } from '../helpers/queue';
 import { TEST_ADMIN_TOKEN } from '../helpers/test-env';
 
 /**
@@ -165,13 +165,12 @@ describe('every operation works with the runtime roles', () => {
     });
     expect(hook.status).toBe(202);
 
-    // Планувальник: сторінки scheduled_workflows, workflow — у контексті тенанта.
+    // Планувальник: сторінки due_schedule_tenants, workflow і курсор — у контексті тенанта.
     await call('PATCH', `/workflows/${failing.body.id}`, {
       cron: '* * * * * *',
     });
-    const fired = await apiApp.app
-      .get(SchedulerService)
-      .tick(new Date(Date.now() + 3_000));
+    await sleep(1_500);
+    const fired = await apiApp.app.get(SchedulerService).tick();
     expect(fired).toBeGreaterThan(0);
 
     expect((await call('DELETE', `/workflows/${failing.body.id}`)).status).toBe(

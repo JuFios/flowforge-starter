@@ -71,11 +71,36 @@ export class ExecutionsService {
     return (await this.create(workflow, input, trigger, null)).execution;
   }
 
-  async enqueueScheduled(
+  /**
+   * Спрацювання розкладу в транзакції планувальника `em` (вона вже в контексті тенанта workflow і
+   * тримає блокування його рядка): облік тенанта → наявне виконання цього моменту → ліміт черги →
+   * виконання й задача. Повертає, чи створено нове. Повна черга — QueueFullException, і
+   * транзакція планувальника відкочується разом із курсором.
+   */
+  async enqueueScheduledIn(
+    em: EntityManager,
     workflow: Workflow,
     scheduledAt: Date,
+    correlationId: string,
   ): Promise<boolean> {
-    return (await this.create(workflow, {}, 'cron', null, scheduledAt)).created;
+    const usage = await this.lockUsage(em);
+    const existing = await em.findOneBy(Execution, {
+      tenantId: workflow.tenantId,
+      workflowId: workflow.id,
+      scheduledAt,
+    });
+    if (existing) return false;
+    const { created } = await this.insertExecution(
+      em,
+      workflow,
+      {},
+      'cron',
+      null,
+      scheduledAt,
+      correlationId,
+      usage,
+    );
+    return created;
   }
 
   /**
@@ -116,7 +141,6 @@ export class ExecutionsService {
     input: Record<string, unknown>,
     trigger: Execution['trigger'],
     idempotencyKey: string | null,
-    scheduledAt: Date | null = null,
   ): Promise<{ execution: Execution; created: boolean }> {
     const correlationId = getCorrelationId() ?? newCorrelationId();
     return this.db.run(workflow.tenantId, async (em) => {
@@ -124,14 +148,6 @@ export class ExecutionsService {
       // перевіряється після блокування: повтор уже прийнятого запиту повертає його виконання,
       // навіть коли черга тим часом заповнилась, і два однакові запити не займуть два місця.
       const usage = await this.lockUsage(em);
-      if (scheduledAt) {
-        const existing = await em.findOneBy(Execution, {
-          tenantId: workflow.tenantId,
-          workflowId: workflow.id,
-          scheduledAt,
-        });
-        if (existing) return { execution: existing, created: false };
-      }
       if (idempotencyKey !== null) {
         const existing = await this.findRun(
           em,
@@ -147,7 +163,7 @@ export class ExecutionsService {
         input,
         trigger,
         idempotencyKey,
-        scheduledAt,
+        null,
         correlationId,
         usage,
       );

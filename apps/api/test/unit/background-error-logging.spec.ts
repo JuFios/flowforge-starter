@@ -9,6 +9,8 @@ import { QueueMetrics } from '../../src/engine/queue.metrics';
 import { StepExecutor } from '../../src/engine/step-executor';
 import { Workflow } from '../../src/entities';
 import { ExecutionsService } from '../../src/executions/executions.service';
+import { MetricsService } from '../../src/observability/metrics.service';
+import { SchedulerMetrics } from '../../src/scheduler/scheduler.metrics';
 import { SchedulerService } from '../../src/scheduler/scheduler.service';
 import { SystemDb } from '../../src/tenancy/system-db';
 import { fakeTenantDb } from '../helpers/fake-tenant-db';
@@ -20,8 +22,38 @@ function dbError(): QueryFailedError {
   return new QueryFailedError(
     'SELECT 1',
     [SECRET],
-    new Error(`invalid input syntax for type uuid: "${SECRET}"`),
+    Object.assign(
+      new Error(`invalid input syntax for type uuid: "${SECRET}"`),
+      { code: '22P02' },
+    ),
   );
+}
+
+/** EntityManager планувальника: сторінка з одним workflow і його рядок під блокуванням. */
+function schedulerEm(wf: Partial<Workflow>) {
+  return {
+    create: (_type: unknown, fields: unknown) => fields,
+    query: (sql: string) =>
+      Promise.resolve(
+        sql.includes('FOR NO KEY UPDATE')
+          ? [
+              {
+                ...wf,
+                timezone: 'UTC',
+                version: 1,
+                missedRunPolicy: 'run_all',
+                scheduleCursor: new Date(Date.now() - 5_000),
+                nextFireAt: new Date(0),
+                scheduleBlockedSince: null,
+                scheduleError: null,
+                now: new Date(),
+              },
+            ]
+          : sql.startsWith('SELECT id FROM workflows')
+            ? [{ id: wf.id }]
+            : [],
+      ),
+  } as never;
 }
 
 function config(
@@ -54,13 +86,14 @@ describe('background loops log errors without input values', () => {
   it('scheduler: a failing tick', async () => {
     jest.useFakeTimers();
     const system = {
-      scheduledTenants: () => Promise.reject(dbError()),
+      dueScheduleTenants: () => Promise.reject(dbError()),
     } as unknown as SystemDb;
     const scheduler = new SchedulerService(
       system,
       fakeTenantDb(),
       {} as ExecutionsService,
       config({ SCHEDULER_TICK_MS: 1000 }),
+      new SchedulerMetrics(new MetricsService()),
     );
 
     scheduler.onApplicationBootstrap();
@@ -79,20 +112,21 @@ describe('background loops log errors without input values', () => {
       cron: '* * * * * *',
     } as Workflow;
     const system = {
-      scheduledTenants: (after: string | null) =>
-        Promise.resolve(after ? [] : [{ id: wf.id, tenantId: wf.tenantId }]),
+      dueScheduleTenants: (after: string | null) =>
+        Promise.resolve(after ? [] : [{ tenantId: wf.tenantId }]),
     } as unknown as SystemDb;
     const executions = {
-      enqueueScheduled: () => Promise.reject(dbError()),
+      enqueueScheduledIn: () => Promise.reject(dbError()),
     } as unknown as ExecutionsService;
     const scheduler = new SchedulerService(
       system,
-      fakeTenantDb({ find: () => Promise.resolve([wf]) } as never),
+      fakeTenantDb(schedulerEm(wf)),
       executions,
-      config({ SCHEDULER_TICK_MS: 1000 }),
+      config({ SCHEDULER_TICK_MS: 1000, SCHEDULER_MISFIRE_GRACE_MS: 60_000 }),
+      new SchedulerMetrics(new MetricsService()),
     );
 
-    await scheduler.tick(new Date(Date.now() + 5000));
+    await scheduler.tick();
 
     expect(logged).toHaveLength(1);
     expect(logged[0]).toContain('QueryFailedError');

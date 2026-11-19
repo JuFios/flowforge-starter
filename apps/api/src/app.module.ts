@@ -24,6 +24,7 @@ import { LimitsModule } from './limits/limits.module';
 import { MetricsController } from './observability/metrics.controller';
 import { MetricsServer } from './observability/metrics-server';
 import { ObservabilityModule } from './observability/observability.module';
+import { SchedulerMetrics } from './scheduler/scheduler.metrics';
 import { SchedulerService } from './scheduler/scheduler.service';
 import { TenancyModule } from './tenancy/tenancy.module';
 import { TenantsController } from './tenants/tenants.controller';
@@ -94,6 +95,7 @@ class ApiEnvironmentCheck implements OnModuleInit {
     ExecutionsService,
     WebhookKeysService,
     SchedulerService,
+    SchedulerMetrics,
     MetricsServer,
   ],
 })

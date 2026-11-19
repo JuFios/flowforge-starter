@@ -394,16 +394,26 @@ export class EnvironmentVariables extends DatabaseEnvironment {
   JOB_CLEANUP_INTERVAL_MS = 3_600_000;
 
   /**
-   * ТИМЧАСОВА МЕЖА — до переробки планувальника (ТЗ 3.3.8).
-   * Лише захищає setInterval від переповнення: більше за MAX_TIMER_MS Node мовчки
-   * перетворює на 1 мс. Допустиме запізнення cron вона не обмежує; змістовну межу
-   * (або відмову від фіксованого тіку) визначає переробка планувальника.
+   * Інтервал тіку планувальника: найбільше запізнення вчасного спрацювання (README 3.3.8). Тік
+   * обробляє лише належні розклади (індекс за `nextFireAt`), тож короткий інтервал не множить
+   * роботу на кількість розкладів.
    */
   @Type(() => Number)
   @IsInt()
   @Min(100)
   @Max(MAX_TIMER_MS)
   SCHEDULER_TICK_MS = 30_000;
+
+  /**
+   * Момент розкладу, старший за стільки мс на час обробки, вважається пропущеним (простій, БД
+   * недоступна, повна черга) і обробляється за політикою workflow (`missedRunPolicy`). Не менше
+   * за SCHEDULER_TICK_MS: інакше звичайне запізнення тіку рахувалося б пропуском.
+   */
+  @Type(() => Number)
+  @IsInt()
+  @Min(1_000)
+  @Max(MAX_TIMER_MS)
+  SCHEDULER_MISFIRE_GRACE_MS = 60_000;
 }
 
 /** Конфігурація процесу API: спільна плюс обов'язковий ADMIN_TOKEN. */
@@ -431,14 +441,23 @@ export function validateEnv(
 ): EnvironmentVariables {
   rejectOwnerCredentials(raw);
   outboundSettings(raw);
-  return validateAs(EnvironmentVariables, raw);
+  return checkSchedulerWindow(validateAs(EnvironmentVariables, raw));
+}
+
+/** Межа пропуску не коротша за інтервал тіку (SCHEDULER_MISFIRE_GRACE_MS). */
+function checkSchedulerWindow<T extends EnvironmentVariables>(env: T): T {
+  if (env.SCHEDULER_MISFIRE_GRACE_MS < env.SCHEDULER_TICK_MS)
+    throw new Error(
+      'Невалідна конфігурація оточення:\n  SCHEDULER_MISFIRE_GRACE_MS: не може бути меншим за SCHEDULER_TICK_MS',
+    );
+  return env;
 }
 
 /** Схема API: спільна плюс обов'язковий ADMIN_TOKEN. */
 export function validateApiEnv(raw: Record<string, unknown>): ApiEnvironment {
   rejectOwnerCredentials(raw);
   outboundSettings(raw);
-  const env = validateAs(EnvironmentVariables, raw);
+  const env = checkSchedulerWindow(validateAs(EnvironmentVariables, raw));
   // Явна перевірка: @IsOptional спільної схеми вимикає для цієї властивості будь-які інші
   // декоратори, зокрема @IsDefined.
   if (env.ADMIN_TOKEN === undefined)
