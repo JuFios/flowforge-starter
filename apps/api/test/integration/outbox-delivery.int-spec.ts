@@ -113,6 +113,34 @@ describe('notification delivery', () => {
     await ds.destroy();
   });
 
+  it('keeps a cancelled event fenced when the old receiver responds after a new PUT', async () => {
+    const old = await complete();
+    const worker = await sender();
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    receiver.respond = async (_req, res) => {
+      await pending;
+      res.writeHead(503).end();
+    };
+    const delivery = worker.deliverNext();
+    try {
+      await waitFor('old HTTP request', () => receiver.requests.length === 1);
+      const res = await fetch(`${api.baseUrl}/tenants/me/notifications`, {
+        method: 'DELETE',
+        headers: { 'x-api-key': apiKey },
+      });
+      expect(res.status).toBe(204);
+      await configureNotifications(api, apiKey, receiver.url('/new'));
+    } finally {
+      release();
+      await delivery;
+    }
+    expect((await event(old.id)).status).toBe('cancelled');
+    expect(await worker.deliverNext()).toBe(false);
+  });
+
   it('delivers the stored bytes once, signed, with the event id and the correlation id', async () => {
     const e = await complete();
     expect(e.status).toBe('pending');

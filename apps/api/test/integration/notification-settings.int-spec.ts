@@ -11,6 +11,10 @@ import {
   TestTenant,
   truncateAll,
 } from '../helpers/db';
+import { NotificationsService } from '../../src/notifications/notifications.service';
+import { fakeTenantDb } from '../helpers/fake-tenant-db';
+import { waitForBlocked } from '../helpers/transaction-barrier';
+
 import { verifyNotification } from '../helpers/notifications';
 import { api, Receiver } from '../helpers/queue';
 import { testApiDatabaseUrl } from '../helpers/test-env';
@@ -97,6 +101,52 @@ describe('notification settings', () => {
     );
     return rows[0].status;
   }
+
+  it.each(['delete first', 'completion first'])(
+    'serializes terminal events with removal: %s',
+    async (order) => {
+      await setup(a, '/old');
+      const wf = await createWorkflow(ds, a.tenant.id);
+      const execution = await createExecution(ds, wf);
+      const terminal = "UPDATE executions SET status='succeeded' WHERE id=$1";
+      const holder = ds.createQueryRunner();
+      await holder.connect();
+      await holder.startTransaction();
+      let waiting: Promise<unknown> | undefined;
+      try {
+        if (order === 'delete first') {
+          // Штатний сервіс завершує видалення, а COMMIT контролює тест.
+          await new NotificationsService(fakeTenantDb(holder.manager)).remove(
+            a.tenant.id,
+          );
+          waiting = ds.query(terminal, [execution.id]);
+        } else {
+          await holder.query(terminal, [execution.id]);
+          waiting = call(a, 'DELETE', '/tenants/me/notifications');
+        }
+        await waitForBlocked(ds, holder);
+        await holder.commitTransaction();
+        await waiting;
+      } finally {
+        if (holder.isTransactionActive) await holder.rollbackTransaction();
+        await waiting;
+        await holder.release();
+      }
+      await setup(a, '/new');
+      const fresh = await completed(a);
+      expect(await sender.deliverNext()).toBe(true);
+      expect(
+        receiver.hits('/new').map((req) => req.headers['x-flowforge-event-id']),
+      ).toEqual([fresh]);
+      expect(await sender.deliverNext()).toBe(false);
+      expect(
+        await ds.query(
+          'SELECT status FROM outbox_events WHERE "executionId"=$1',
+          [execution.id],
+        ),
+      ).toEqual(order === 'delete first' ? [] : [{ status: 'cancelled' }]);
+    },
+  );
 
   it('shows the signing secret once and never again', async () => {
     const created = await setup(a);
