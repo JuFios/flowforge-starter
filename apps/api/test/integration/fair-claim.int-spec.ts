@@ -1,3 +1,4 @@
+import { assertClaimFairness } from '../helpers/claim-journal';
 import { DataSource } from 'typeorm';
 import { AppModule, WorkerModule } from '../../src/app.module';
 import { JobQueueService } from '../../src/engine/job-queue.service';
@@ -442,7 +443,9 @@ describe('fair claiming between tenants', () => {
   it('claims any other tenant at most (K-1)+C times while a ready tenant without running jobs waits (journal of 4 parallel claimers)', async () => {
     const K = 8;
     const C = 4;
-    for (let i = 0; i < K; i++) await backlog(`k${i}`, 200, 1_000 + i);
+    const ready: string[] = [];
+    for (let i = 0; i < K; i++)
+      ready.push(await backlog(`k${i}`, 200, 1_000 + i));
     // У кожного тенанта після завершення є черга і жодної задачі у роботі.
     await owner.query('UPDATE tenants SET "maxConcurrentExecutions" = 1');
     let event = 0;
@@ -472,25 +475,7 @@ describe('fair claiming between tenants', () => {
     );
     // Для кожного тенанта: між завершенням його задачі (далі він готовий і без задач у роботі)
     // і його наступним захопленням інших захоплено не більше (K-1)+C разів.
-    const claims = [...journal].sort((x, y) => x.claimedAt - y.claimedAt);
-    let windows = 0;
-    for (const previous of claims) {
-      const next = claims.find(
-        (c) => c.tenant === previous.tenant && c.claimedAt > previous.claimedAt,
-      );
-      if (!next || next.requestedAt <= previous.finishedAt) continue;
-      windows++;
-      // Рахуємо завершені захоплення в підтвердженому вікні готовності:
-      // після COMMIT завершення і до початку наступного захоплення тенанта.
-      const others = claims.filter(
-        (c) =>
-          c.tenant !== previous.tenant &&
-          c.claimedAt > previous.finishedAt &&
-          c.claimedAt < next.requestedAt,
-      );
-      expect(others.length).toBeLessThanOrEqual(K - 1 + C);
-    }
-    expect(windows).toBeGreaterThan(300);
+    assertClaimFairness(journal, ready, C);
   });
 
   it('lets tenant B finish while most of the backlog of tenant A still waits (several workers)', async () => {
