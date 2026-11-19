@@ -1,6 +1,6 @@
 import { DataSource } from 'typeorm';
 import { WebhookDeliveries1796000000000 } from '../../src/database/migrations/1796000000000-WebhookDeliveries';
-import { createTenant, openTestDataSource } from '../helpers/db';
+import { createTenant, openTestDataSource, truncateAll } from '../helpers/db';
 import { provisionTestDatabase } from '../helpers/test-provision';
 
 describe('database migrations', () => {
@@ -48,6 +48,8 @@ describe('database migrations', () => {
   });
 
   it('reverts every migration and re-applies them cleanly', async () => {
+    // Повний down перевіряємо на порожній тестовій схемі. Відмова втратити ключ має окремий доказ.
+    await truncateAll(ds);
     const total = ds.migrations.length;
     for (let i = 0; i < total; i++)
       await ds.undoLastMigration({ transaction: 'each' });
