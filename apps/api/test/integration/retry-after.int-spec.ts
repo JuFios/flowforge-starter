@@ -39,6 +39,7 @@ describe('Retry-After on 429 and 503', () => {
       END $$ LANGUAGE plpgsql
       -- Тригер спрацьовує в транзакції воркера (роль без прав на службову таблицю тесту).
       SECURITY DEFINER SET search_path = pg_catalog, public;
+      REVOKE ALL ON FUNCTION test_record_retry_delay() FROM PUBLIC;
       DROP TRIGGER IF EXISTS test_record_retry_delay ON jobs;
       CREATE TRIGGER test_record_retry_delay AFTER UPDATE ON jobs
         FOR EACH ROW EXECUTE FUNCTION test_record_retry_delay();`);

@@ -7,6 +7,8 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { Logger } from 'nestjs-pino';
+import { CreateTenantDto } from './tenants/tenants.controller';
+import { LIMIT_FIELDS } from './tenants/tenant-limits.dto';
 import { getMetadataStorage } from 'class-validator';
 import { exceedsJsonDepth, jsonTooDeepMessage } from './common/json-depth';
 import { EnvironmentVariables, parseTrustProxy } from './config/env.validation';
@@ -27,17 +29,13 @@ class ApiValidationPipe extends ValidationPipe {
     // Тіла без DTO (вхід виконання, webhook) перевіряє parseRunInput — у webhook-а після підпису.
     if (
       metadata.type === 'body' &&
-      this.toValidate(metadata) &&
-      exceedsJsonDepth(value)
-    )
-      throw new BadRequestException(jsonTooDeepMessage('тіло запиту'));
-    if (
-      metadata.type === 'body' &&
       metadata.metatype &&
-      this.toValidate(metadata) &&
-      value !== null &&
-      typeof value === 'object'
+      this.toValidate(metadata)
     ) {
+      if (value === null || typeof value !== 'object' || Array.isArray(value))
+        throw new BadRequestException('тіло запиту має бути об’єктом');
+      if (exceedsJsonDepth(value))
+        throw new BadRequestException(jsonTooDeepMessage('тіло запиту'));
       // Перевіряємо вихідні ключі JSON, поки class-transformer ще не відкинув частину з них.
       const fields = getMetadataStorage().getTargetValidationMetadatas(
         metadata.metatype,
@@ -47,6 +45,20 @@ class ApiValidationPipe extends ValidationPipe {
       );
       const allowed = new Set(fields.map((field) => field.propertyName));
       const unknown = Object.keys(value).filter((key) => !allowed.has(key));
+      if (
+        metadata.metatype === CreateTenantDto &&
+        'limits' in value &&
+        value.limits &&
+        typeof value.limits === 'object' &&
+        !Array.isArray(value.limits)
+      ) {
+        const permitted = new Set<string>(LIMIT_FIELDS);
+        unknown.push(
+          ...Object.keys(value.limits)
+            .filter((k) => !permitted.has(k))
+            .map((k) => 'limits.' + k),
+        );
+      }
       if (unknown.length)
         throw new BadRequestException(
           unknown.map((key) => `property ${key} should not exist`),

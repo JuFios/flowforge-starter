@@ -11,7 +11,8 @@ import {
 import { Type } from 'class-transformer';
 import { randomBytes, randomUUID } from 'crypto';
 import {
-  IsOptional,
+  IsObject,
+  ValidateIf,
   IsString,
   MaxLength,
   MinLength,
@@ -21,14 +22,13 @@ import { EntityManager } from 'typeorm';
 import { hashApiKey } from '../auth/api-key.guard';
 import { IsStorableText } from '../common/storable-text';
 import { Tenant } from '../entities';
-import { effectiveLimits } from '../limits/effective-limits';
 import { RateLimit } from '../limits/rate-limit.guard';
 import { EffectiveLimits, TenantLimitOverrides } from '../tenancy/limits';
 import { TenantDb } from '../tenancy/tenant-db';
 import { AdminTokenGuard } from './admin-token.guard';
 import { LIMIT_FIELDS, TenantLimitsDto } from './tenant-limits.dto';
 
-class CreateTenantDto {
+export class CreateTenantDto {
   @IsString()
   @IsStorableText()
   @MinLength(2)
@@ -36,7 +36,8 @@ class CreateTenantDto {
   name: string;
 
   /** Перевизначення лімітів (необов'язково); без них — значення за замовчуванням. */
-  @IsOptional()
+  @ValidateIf((_object, value: unknown) => value !== undefined)
+  @IsObject()
   @ValidateNested()
   @Type(() => TenantLimitsDto)
   limits?: TenantLimitsDto;
@@ -60,12 +61,19 @@ function overridesFrom(
 
 async function limitsView(
   em: EntityManager,
-  tenant: Tenant,
+  id: string,
 ): Promise<TenantLimitsView> {
-  const overrides = Object.fromEntries(
-    LIMIT_FIELDS.map((field) => [field, tenant[field]]),
-  ) as unknown as TenantLimitOverrides;
-  return { overrides, effective: await effectiveLimits(em) };
+  const [view]: TenantLimitsView[] = await em.query(
+    `SELECT jsonb_build_object(
+       'maxConcurrentExecutions', t."maxConcurrentExecutions",
+       'maxQueueSize', t."maxQueueSize", 'rateLimit', t."rateLimit",
+       'webhookRateLimit', t."webhookRateLimit") AS overrides,
+       to_jsonb(l) AS effective
+       FROM tenants t CROSS JOIN public.tenant_limits() l WHERE t.id = $1`,
+    [id],
+  );
+  if (!view) throw new NotFoundException('Тенанта не знайдено');
+  return view;
 }
 
 /**
@@ -99,16 +107,14 @@ export class TenantsController {
         name: tenant.name,
         apiKey,
         webhookSecret,
-        limits: await limitsView(em, tenant),
+        limits: await limitsView(em, id),
       };
     });
   }
 
   @Get(':id/limits')
   getLimits(@Param('id', ParseUUIDPipe) id: string): Promise<TenantLimitsView> {
-    return this.db.run(id, async (em) =>
-      limitsView(em, await this.tenant(em, id)),
-    );
+    return this.db.run(id, (em) => limitsView(em, id));
   }
 
   /**
@@ -122,17 +128,10 @@ export class TenantsController {
     @Body() dto: TenantLimitsDto,
   ): Promise<TenantLimitsView> {
     return this.db.run(id, async (em) => {
-      await this.tenant(em, id);
       const changes = overridesFrom(dto);
       if (Object.keys(changes).length > 0)
         await em.update(Tenant, { id }, changes);
-      return limitsView(em, await this.tenant(em, id));
+      return limitsView(em, id);
     });
-  }
-
-  private async tenant(em: EntityManager, id: string): Promise<Tenant> {
-    const tenant = await em.findOne(Tenant, { where: { id } });
-    if (!tenant) throw new NotFoundException('Тенанта не знайдено');
-    return tenant;
   }
 }

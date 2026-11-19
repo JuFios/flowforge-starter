@@ -6,9 +6,10 @@ import {
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
-import { createHmac, timingSafeEqual } from 'crypto';
+import { createHmac } from 'crypto';
 import { isUUID } from 'class-validator';
 import type { Request } from 'express';
+import { safeEqual } from '../common/safe-equal';
 import { Tenant, Workflow } from '../entities';
 import { AuthFailureLimiter } from '../limits/auth-failure.limiter';
 import { effectiveLimits } from '../limits/effective-limits';
@@ -39,18 +40,10 @@ function expectedSignature(secret: string, body: unknown): string | undefined {
   return createHmac('sha256', secret).update(serialized).digest('hex');
 }
 
-/** Порівняння підписів за сталий час (довжина hex-підпису не секрет). */
-function sameSignature(actual: unknown, expected: string): boolean {
-  if (typeof actual !== 'string') return false;
-  const a = Buffer.from(actual);
-  const b = Buffer.from(expected);
-  return a.length === b.length && timingSafeEqual(a, b);
-}
-
 /**
  * Підпис webhook-а: hex HMAC-SHA256 від тіла запиту секретом тенанта (`x-signature`). Guard, а не
  * код обробника, — щоб ліміт частоти webhook-ів (наступний guard) рахувався лише після
- * підтвердженого підпису й на тенанта адресата. Невірний підпис рахується лімітом невдалих
+ * підтвердженого підпису й на тенанта адресата. Невірний підпис і невідомий адресат рахуються лімітом невдалих
  * автентифікацій з IP. Тіло на цей момент уже розібране (body-parser), але ще не перевірене:
  * неавтентифікований запит отримує 401, а не пояснення формату.
  */
@@ -82,12 +75,14 @@ export class WebhookSignatureGuard implements CanActivate {
           ? { workflow, tenant, limits: await effectiveLimits(em) }
           : null;
       }));
-    if (!target) throw new NotFoundException();
+    // Невідомий чи вимкнений адресат — теж невдала автентифікація (ліміт за IP): інакше перебір
+    // випадкових UUID без жодного ліміту навантажував би БД пошуком тенанта.
+    if (!target) return this.authFailures.reject(ctx, new NotFoundException());
 
     const expected = expectedSignature(target.tenant.webhookSecret, req.body);
     if (
       expected === undefined ||
-      !sameSignature(req.headers['x-signature'], expected)
+      !safeEqual(req.headers['x-signature'], expected)
     )
       return this.authFailures.reject(
         ctx,

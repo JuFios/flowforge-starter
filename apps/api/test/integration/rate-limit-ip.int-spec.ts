@@ -89,6 +89,25 @@ describe('limits by client IP', () => {
     expect(Number(fourth.headers.get('retry-after'))).toBeGreaterThan(0);
   });
 
+  // Невідомий адресат webhook-а — та сама невдала автентифікація: інакше перебір випадкових UUID
+  // без жодного ліміту навантажував би БД пошуком тенанта.
+  it('counts webhooks to an unknown workflow as failed authentications', async () => {
+    const hook = () =>
+      fetch(`${api.baseUrl}/hooks/${crypto.randomUUID()}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-signature': 'x' },
+        body: '{}',
+      });
+    const first = await hook();
+    expect(first.status).toBe(404);
+    expect(first.headers.get('x-ratelimit-remaining')).toBe('2');
+    expect((await hook()).status).toBe(404);
+    expect((await hook()).status).toBe(404);
+    const blocked = await hook();
+    expect(blocked.status).toBe(429);
+    expect(await blocked.json()).toMatchObject({ error: 'rate_limited' });
+  });
+
   it('answers 429 instead of 401 past the limit of failed authentications and lets valid keys through', async () => {
     const { apiKey } = await createTenant(owner);
     const wf = await fetch(`${api.baseUrl}/workflows`, {

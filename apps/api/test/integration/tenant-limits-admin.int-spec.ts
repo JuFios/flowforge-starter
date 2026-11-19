@@ -87,6 +87,72 @@ describe('tenant limits admin API', () => {
     expect(await read.json()).toEqual(body.limits);
   });
 
+  it('rejects an empty array in place of a PATCH limits object', async () => {
+    const { id } = (await (
+      await admin('POST', '/tenants', { name: 'patch-array' })
+    ).json()) as { id: string };
+    expect((await admin('PATCH', `/tenants/${id}/limits`, [])).status).toBe(
+      400,
+    );
+  });
+
+  it('rejects reserved unknown keys inside the limits object', async () => {
+    expect(
+      (
+        await admin('POST', '/tenants', {
+          name: 'invalid',
+          limits: { constructor: 1 },
+        })
+      ).status,
+    ).toBe(400);
+  });
+
+  it('rejects an array of limits without creating a tenant', async () => {
+    const res = await admin('POST', '/tenants', {
+      name: 'invalid',
+      limits: [{ maxQueueSize: 1 }],
+    });
+    expect(res.status).toBe(400);
+    expect(await owner.query('SELECT id FROM tenants')).toHaveLength(0);
+  });
+
+  it('reads overrides and effective quotas from the same statement snapshot', async () => {
+    const { id } = (await (
+      await admin('POST', '/tenants', {
+        name: 'snapshot',
+        limits: { maxQueueSize: 2 },
+      })
+    ).json()) as { id: string };
+    const ds = apiApp.app.get(DataSource);
+    let updated = false;
+    const observer = {
+      afterQuery: async (event: { query: string }) => {
+        if (
+          !updated &&
+          /FROM "tenants"|FROM (?:public\.)?tenants\b/i.test(event.query)
+        ) {
+          updated = true;
+          await owner.query('UPDATE tenants SET "maxQueueSize"=3 WHERE id=$1', [
+            id,
+          ]);
+        }
+      },
+    };
+    ds.subscribers.push(observer);
+    try {
+      const view = (await (
+        await admin('GET', `/tenants/${id}/limits`)
+      ).json()) as {
+        overrides: { maxQueueSize: number };
+        effective: { maxQueueSize: number };
+      };
+      expect(updated).toBe(true);
+      expect(view.overrides.maxQueueSize).toBe(view.effective.maxQueueSize);
+    } finally {
+      ds.subscribers.splice(ds.subscribers.indexOf(observer), 1);
+    }
+  });
+
   it('changes and resets overrides, leaving the omitted ones as they are', async () => {
     const { id } = (await (
       await admin('POST', '/tenants', { name: 'patch' })
@@ -155,6 +221,49 @@ describe('tenant limits admin API', () => {
       ).status,
     ).toBe(404);
     expect((await admin('GET', `/tenants/not-a-uuid/limits`)).status).toBe(400);
+  });
+
+  it('serializes new tenants with an in-flight change to defaults', async () => {
+    const writer = owner.createQueryRunner();
+    const creator = owner.createQueryRunner();
+    await writer.connect();
+    await creator.connect();
+    try {
+      await writer.startTransaction();
+      await writer.query('UPDATE limit_defaults SET "maxRunning"=1');
+      const [{ pid }]: Array<{ pid: number }> = (await creator.query(
+        'select pg_backend_pid() as pid',
+      )) as Array<{ pid: number }>;
+      let done = false;
+      const inserted: Promise<void> = creator
+        .query(
+          `INSERT INTO tenants(name,"apiKeyHash","webhookSecret") VALUES ('race','race','race')`,
+        )
+        .then(() => {
+          done = true;
+        });
+      try {
+        for (let i = 0; !done && i < 100; i++) {
+          const [{ blocked }]: Array<{ blocked: boolean }> = await owner.query(
+            'SELECT cardinality(pg_blocking_pids($1))>0 AS blocked',
+            [pid],
+          );
+          if (blocked) break;
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+      } finally {
+        await writer.commitTransaction();
+        await inserted;
+      }
+      expect(
+        await owner.query('SELECT "maxRunning" FROM tenant_usage'),
+      ).toEqual([{ maxRunning: 1 }]);
+    } finally {
+      if (writer.isTransactionActive) await writer.rollbackTransaction();
+      await writer.release();
+      await creator.release();
+      await provisionTestDatabase((sql, params) => owner.query(sql, params));
+    }
   });
 
   it('applies new defaults from db:provision to every tenant without its own override', async () => {
