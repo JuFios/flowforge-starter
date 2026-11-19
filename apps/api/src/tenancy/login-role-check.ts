@@ -52,6 +52,7 @@ export const GROUP_FUNCTIONS: Readonly<Record<string, readonly string[]>> = {
     'claim_job(text,integer)',
     'claim_outbox_event(text,integer,integer)',
     'expired_lease_tenants(uuid[],integer)',
+    'finish_outbox_event(uuid,uuid,double precision,text,integer)',
     'outbox_backlog()',
     'purge_delivered_events(integer,integer)',
     'purge_execution_history(integer,integer)',

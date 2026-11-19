@@ -344,26 +344,9 @@ export class OutboxSender implements BeforeApplicationShutdown {
           ) / 1000;
     const durationMs = Math.round(performance.now() - started);
     const current = await this.db.run(claimed.tenantId, async (em) => {
-      const [rows]: [unknown[], number] = await em.query(
-        `UPDATE outbox_events
-            SET status = CASE WHEN $4 THEN 'delivered' ELSE 'pending' END,
-                "leaseToken" = NULL, "leaseUntil" = NULL,
-                "nextAttemptAt" = CASE WHEN $4 THEN "nextAttemptAt"
-                                       ELSE now() + make_interval(secs => $5) END,
-                "deliveredAt" = CASE WHEN $4 THEN now() END,
-                "lastError" = CASE WHEN $4 THEN NULL ELSE $6 END,
-                "lastStatus" = $7
-          WHERE id = $1 AND "tenantId" = $2 AND "leaseToken" = $3 AND status = 'sending'
-          RETURNING id`,
-        [
-          claimed.id,
-          claimed.tenantId,
-          claimed.leaseToken,
-          delivered,
-          delaySeconds,
-          outcome,
-          httpStatus,
-        ],
+      const [row]: Array<{ applied: boolean }> = await em.query(
+        'SELECT public.finish_outbox_event($1,$2,$3,$4,$5) AS applied',
+        [claimed.id, claimed.leaseToken, delaySeconds, outcome, httpStatus],
       );
       await em.query(
         `UPDATE outbox_attempts
@@ -378,7 +361,7 @@ export class OutboxSender implements BeforeApplicationShutdown {
           durationMs,
         ],
       );
-      return rows.length === 1;
+      return row.applied;
     });
     this.metrics.observeAttempt(current ? outcome : 'stale', started);
     const fields = {

@@ -159,6 +159,10 @@ export const POSTURE: {
       owner: SYSTEM_ROLE,
       execute: [WORKER_ROLE],
     },
+    'finish_outbox_event(uuid,uuid,double precision,text,integer)': {
+      owner: SYSTEM_ROLE,
+      execute: [WORKER_ROLE],
+    },
     'outbox_backlog()': { owner: SYSTEM_ROLE, execute: [WORKER_ROLE] },
     'tenant_usage_on_tenant()': { owner: SYSTEM_ROLE, execute: [] },
     'tenant_usage_on_defaults()': { owner: SYSTEM_ROLE, execute: [] },
