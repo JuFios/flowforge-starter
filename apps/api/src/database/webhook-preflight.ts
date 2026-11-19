@@ -1,4 +1,5 @@
 import source from './data-source';
+import { toSafeError } from '../observability/safe-error';
 import { CONTEXT_BYTES, LEGACY_PATH } from '../engine/transform-profile';
 
 /** Звіт перед перемиканням. Виводить тільки ідентифікатори і позиції кроків. */
@@ -50,7 +51,12 @@ async function main(): Promise<void> {
     await source.destroy();
   }
 }
-void main().catch(() => {
-  console.error('Webhook upgrade preflight failed');
+void main().catch((error: unknown) => {
+  // Причина без вхідних даних (toSafeError прибирає значення з повідомлень драйвера).
+  const { type, message, code } = toSafeError(error);
+  console.error(
+    'Webhook upgrade preflight failed: ' +
+      JSON.stringify({ type, message, code }),
+  );
   process.exitCode = 1;
 });
