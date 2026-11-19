@@ -10,6 +10,14 @@ export class SerializeOutbox1796300000000 implements MigrationInterface {
     await runner.query(
       'LOCK TABLE public.executions, public.notification_settings, public.outbox_events IN SHARE ROW EXCLUSIVE MODE',
     );
+    // Короткий успадкований запис з майбутньою підказкою має бути видимим оператору одразу.
+    await runner.query(`WITH schedules AS (
+      SELECT id, regexp_replace(cron,'^[[:space:]]+|[[:space:]]+$','','g') AS source
+      FROM public.workflows WHERE cron IS NOT NULL)
+      UPDATE public.workflows w SET "nextFireAt"=NULL,
+        "scheduleError"='cron requires five or six fields or a supported alias'
+      FROM schedules s WHERE w.id=s.id AND s.source NOT IN ('@yearly','@monthly','@weekly','@daily','@hourly')
+        AND cardinality(regexp_split_to_array(s.source,'[[:space:]]+')) NOT IN (5,6)`);
     await runner.query(terminalOutboxSql(true));
     await runner.query(`CREATE FUNCTION public.finish_outbox_event(
       event_id uuid, token uuid, delay_seconds double precision, result text, http_status integer
