@@ -651,6 +651,76 @@ describe('data migrations', () => {
     },
   );
 
+  it('upgrades in-flight deliveries, hints, short schedules and unfinished executions from PR 5', async () => {
+    await truncateAll(ds);
+    await revertThrough('SerializeOutbox');
+    const [{ id: tenantId }] = await ds.query<Array<{ id: string }>>(
+      `INSERT INTO tenants(name,"apiKeyHash","webhookSecret") VALUES ('upgrade','upgrade-hash','old') RETURNING id`,
+    );
+    const [{ id: wf }] = await ds.query<Array<{ id: string }>>(
+      `INSERT INTO workflows("tenantId",name,steps,cron,"scheduleCursor","nextFireAt") VALUES ($1,'legacy','[]','* *',now(),now()+interval '1 year') RETURNING id`,
+      [tenantId],
+    );
+    const [{ id: version }] = await ds.query<Array<{ id: string }>>(
+      `INSERT INTO workflow_versions ("workflowId","tenantId",version,steps) VALUES ($1,$2,1,'[]') RETURNING id`,
+      [wf, tenantId],
+    );
+    const [{ id: execution }] = await ds.query<Array<{ id: string }>>(
+      `INSERT INTO executions("tenantId","workflowId","workflowVersionId") VALUES ($1,$2,$3) RETURNING id`,
+      [tenantId, wf, version],
+    );
+    await ds.query(
+      `INSERT INTO notification_settings ("tenantId",url,secret,"dueAt") VALUES ($1,'https://example.org',repeat('a',64),NULL)`,
+      [tenantId],
+    );
+    await ds.query(
+      `INSERT INTO outbox_events ("tenantId","executionId",sequence,type,payload,status,"leaseToken","leaseUntil")
+      VALUES ($1,gen_random_uuid(),1,'execution.failed','old bytes','sending',gen_random_uuid(),now()+interval '1 hour'),
+             ($1,gen_random_uuid(),1,'execution.failed','pending bytes','pending',NULL,NULL)`,
+      [tenantId],
+    );
+    const events = () =>
+      ds.query<unknown[]>(
+        'SELECT id,status,payload,"leaseToken","leaseUntil","nextAttemptAt" FROM outbox_events ORDER BY id',
+      );
+    const settings = () =>
+      ds.query<unknown[]>(
+        'SELECT url,enabled,revision,"secretKeyId",secret FROM notification_settings',
+      );
+    const before = await events(),
+      keys = await settings();
+    await ds.runMigrations({ transaction: 'each' });
+    expect(await events()).toEqual(before);
+    expect(await settings()).toEqual(keys);
+    expect(
+      await ds.query(
+        `SELECT "dueAt"="nextAttemptAt" AS correct FROM notification_settings JOIN outbox_events USING ("tenantId") WHERE status='pending'`,
+      ),
+    ).toEqual([{ correct: true }]);
+    expect(
+      await ds.query(
+        'SELECT cron,"nextFireAt","scheduleError" FROM workflows WHERE id=$1',
+        [wf],
+      ),
+    ).toEqual([
+      {
+        cron: '* *',
+        nextFireAt: null,
+        scheduleError: expect.any(String) as unknown,
+      },
+    ]);
+    await ds.query("UPDATE executions SET status='succeeded' WHERE id=$1", [
+      execution,
+    ]);
+    expect(
+      await ds.query(
+        'SELECT sequence,status FROM outbox_events WHERE "executionId"=$1',
+        [execution],
+      ),
+    ).toEqual([{ sequence: 1, status: 'pending' }]);
+    await truncateAll(ds);
+  });
+
   it('ScheduleProgress and NotificationOutbox upgrade stored schedules and executions without a flood or a duplicate', async () => {
     await truncateAll(ds);
     await revertThrough('ScheduleProgress');
