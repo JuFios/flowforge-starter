@@ -13,22 +13,26 @@ export function assertClaimFairness(
 ): void {
   const K = ready.length;
   const claims = [...journal].sort((x, y) => x.claimedAt - y.claimedAt);
-  let windows = 0;
-  for (const previous of claims) {
-    const next = claims.find(
-      (c) => c.tenant === previous.tenant && c.claimedAt > previous.claimedAt,
-    );
-    if (!next || next.requestedAt <= previous.finishedAt) continue;
-    windows++;
-    // Рахуємо завершені захоплення в підтвердженому вікні готовності:
-    // після COMMIT завершення і до початку наступного захоплення тенанта.
-    const others = claims.filter(
-      (c) =>
-        c.tenant !== previous.tenant &&
-        c.claimedAt > previous.finishedAt &&
-        c.claimedAt < next.requestedAt,
-    );
-    expect(others.length).toBeLessThanOrEqual(K - 1 + C);
+  expect(claims.length).toBeGreaterThanOrEqual(400);
+  const end = Math.max(...claims.map((c) => c.finishedAt)) + 1;
+  let interiorWindows = 0;
+  for (const tenant of ready) {
+    let since = 0;
+    const check = (until: number) => {
+      const others = claims.filter(
+        (c) =>
+          c.tenant !== tenant && c.claimedAt > since && c.claimedAt < until,
+      );
+      expect(others.length).toBeLessThanOrEqual(K - 1 + C);
+    };
+    for (const claim of claims.filter((c) => c.tenant === tenant)) {
+      if (claim.requestedAt > since) {
+        check(claim.requestedAt);
+        if (since > 0) interiorWindows++;
+      }
+      since = claim.finishedAt;
+    }
+    check(end);
   }
-  expect(windows).toBeGreaterThan(300);
+  expect(interiorWindows).toBeGreaterThan(300);
 }
