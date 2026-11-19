@@ -1,10 +1,11 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { EntityManager } from 'typeorm';
 import { EnvironmentVariables } from '../config/env.validation';
 import { Job } from '../entities';
 import { SystemDb } from '../tenancy/system-db';
 import { TenantDb } from '../tenancy/tenant-db';
+import { QueueMetrics } from './queue.metrics';
 
 export interface BackoffOptions {
   baseMs: number;
@@ -73,14 +74,27 @@ const REAP_BATCH = 100;
 /** Скільки тенантів із простроченими lease reaper бере за один запит. */
 const REAP_TENANTS = 100;
 
+/** Скільки тенантів одна промоція переводить до індексу готових. */
+const PROMOTE_BATCH = 100;
 /**
- * Найраніша готова задача (індекс IDX_jobs_claim) — тіло SECURITY DEFINER-функції
- * `claim_fifo_candidate()` (міграція TenantIsolation). Константа — для тесту плану запиту.
+ * Скільки спроб робить одне захоплення, поки кандидата щойно обслуговує інший воркер. Після них
+ * цикл воркера одразу пробує знову (без паузи опитування): невдала спроба означає, що система
+ * просувається — задачу взяв хтось інший.
+ */
+const CLAIM_ATTEMPTS = 10;
+/** Найдовше очікування рядка обліку тенанта-кандидата (його тримають лише короткі транзакції). */
+const CLAIM_LOCK_TIMEOUT = '2s';
+/** SQLSTATE lock_not_available: lock_timeout вичерпано. */
+const LOCK_NOT_AVAILABLE = '55P03';
+
+/**
+ * Найраніша готова задача тенанта ($1) — індекс IDX_jobs_tenant_queue; виконується під RLS у
+ * контексті цього тенанта. Константа — для тесту плану запиту.
  */
 export const CLAIM_CANDIDATE_SQL = `
-  SELECT j.id, j."tenantId" FROM jobs j
-   WHERE j.status = 'queued' AND j."runAt" <= now()
-   ORDER BY j."runAt"
+  SELECT id FROM jobs
+   WHERE "tenantId" = $1 AND status = 'queued' AND "runAt" <= clock_timestamp()
+   ORDER BY "runAt"
    LIMIT 1
    FOR UPDATE SKIP LOCKED`;
 
@@ -151,6 +165,7 @@ export class JobQueueService {
     private readonly db: TenantDb,
     private readonly system: SystemDb,
     private readonly config: ConfigService<EnvironmentVariables, true>,
+    @Optional() private readonly metrics?: QueueMetrics,
   ) {}
 
   /** Затримка перед наступною спробою, у секундах (для make_interval). */
@@ -173,33 +188,103 @@ export class JobQueueService {
   }
 
   /**
-   * Атомарно захоплює наступну готову задачу, або повертає null.
+   * Захоплює наступну задачу справедливо між тенантами (README, 3.3.5) або повертає null (готових
+   * задач немає) чи undefined (кандидатів щойно забирали інші воркери — варто одразу спробувати
+   * знову).
    *
-   * Вибір і захоплення — один оператор: `FOR UPDATE SKIP LOCKED` блокує вибраний рядок до кінця
-   * оператора, а конкурентні воркери пропускають заблоковані рядки й беруть наступні, тож одну
-   * задачу не може отримати двоє. `RETURNING *` повертає вже оновлений рядок. Кожне захоплення
-   * видає новий fencing-токен `lockToken`. Увесь час — за годинником БД, не процесу.
+   * 1. Промоція (окремий оператор, SKIP LOCKED): дозрілі тенанти стають членами індексу готових.
+   * 2. Спроба — одна транзакція: `claim_candidate` обирає тенанта з найменшою кількістю задач у
+   *    роботі, а серед рівних — найдавніше обслуженого; далі контекст цього тенанта, очікування
+   *    його рядка обліку (без SKIP LOCKED, з lock_timeout) і перевірка свіжості під блокуванням:
+   *    кандидат досі готовий, ненасичений і не обслужений, відколи його обрали. Тоді найраніша
+   *    готова задача захоплюється (SKIP LOCKED); тригер збільшує `running` і записує момент
+   *    обслуговування під уже взятим блокуванням, тож ліміт одночасних задач жорсткий.
+   * 3. Кандидата обслужив інший воркер — нова спроба в новій транзакції (транзакція не тримає двох
+   *    рядків обліку). Задачі не знайшлося — облік перераховується, кандидат виключається.
+   *
+   * Кожне захоплення видає новий fencing-токен `lockToken`. Увесь час — за годинником БД.
    */
-  async claimNext(workerId: string): Promise<ClaimedJob | null> {
-    const leaseStartedAt = performance.now();
-    return this.db.transaction(async (tx) => {
-      // Кандидата знаходить і блокує до кінця транзакції SECURITY DEFINER-функція; захоплення —
-      // уже в контексті тенанта задачі.
-      const [candidate]: Array<{ id: string; tenantId: string }> =
-        await tx.em.query('SELECT * FROM claim_fifo_candidate()');
-      if (!candidate) return null;
-      await tx.enter(candidate.tenantId);
-      const [rows]: [(Job & { claimedAt: Date })[], number] = await tx.em.query(
-        `UPDATE jobs
-              SET status = 'running', "lockedBy" = $1, "lockToken" = gen_random_uuid(),
-                  "lockedUntil" = now() + make_interval(secs => $2),
-                  attempts = attempts + 1
-            WHERE id = $3 AND "tenantId" = $4 AND status = 'queued'
-            RETURNING *, now() AS "claimedAt"`,
-        [workerId, this.leaseSeconds, candidate.id, candidate.tenantId],
-      );
-      return rows[0] ? { ...rows[0], leaseStartedAt } : null;
-    });
+  async claimNext(workerId: string): Promise<ClaimedJob | null | undefined> {
+    const stop = this.metrics?.claimDuration.startTimer();
+    try {
+      await this.system.promoteReadyTenants(PROMOTE_BATCH);
+      const exclude: string[] = [];
+      for (let attempt = 0; attempt < CLAIM_ATTEMPTS; attempt++) {
+        const outcome = await this.claimAttempt(workerId, exclude);
+        if (outcome.kind === 'claimed') return outcome.job;
+        if (outcome.kind === 'empty') return null;
+        this.metrics?.claimContention.inc({ reason: outcome.kind });
+        // Облік перераховано або рядок тримають довше за lock_timeout (ненормально довга
+        // транзакція тенанта): до кінця цього захоплення кандидат виключається, щоб не чекати на
+        // нього знову й не зупиняти обслуговування інших.
+        if (outcome.kind !== 'stale') exclude.push(outcome.tenantId);
+      }
+      return undefined;
+    } finally {
+      stop?.();
+    }
+  }
+
+  private async claimAttempt(
+    workerId: string,
+    exclude: string[],
+  ): Promise<
+    | { kind: 'claimed'; job: ClaimedJob }
+    | { kind: 'empty' }
+    | { kind: 'stale' }
+    | { kind: 'repair' | 'lock_timeout'; tenantId: string }
+  > {
+    let tenantId: string | undefined;
+    try {
+      return await this.db.transaction(async (tx) => {
+        await tx.em.query(`SET LOCAL lock_timeout = '${CLAIM_LOCK_TIMEOUT}'`);
+        const [candidate]: Array<{ tenantId: string; lastClaimedAt: string }> =
+          await tx.em.query('SELECT * FROM claim_candidate($1::uuid[])', [
+            exclude,
+          ]);
+        if (!candidate) return { kind: 'empty' as const };
+        tenantId = candidate.tenantId;
+        await tx.enter(candidate.tenantId);
+        const [usage]: Array<{
+          running: number;
+          maxRunning: number;
+          due: boolean;
+          lastClaimedAt: string;
+        }> = await tx.em.query('SELECT * FROM lock_tenant_usage()');
+        if (
+          !usage.due ||
+          usage.running >= usage.maxRunning ||
+          usage.lastClaimedAt !== candidate.lastClaimedAt
+        )
+          return { kind: 'stale' as const };
+        // Lease починається з цього оператора, а не з початку транзакції чи захоплення: очікування
+        // рядка обліку не скорочує lease ні в БД (clock_timestamp, а не now()), ні в воркера
+        // (локальний відлік — до надсилання оператора, тобто не пізніше за БД).
+        const leaseStartedAt = performance.now();
+        const [rows]: [(Job & { claimedAt: Date })[], number] =
+          await tx.em.query(
+            `UPDATE jobs
+                SET status = 'running', "lockedBy" = $1, "lockToken" = gen_random_uuid(),
+                    "lockedUntil" = clock_timestamp() + make_interval(secs => $2),
+                    attempts = attempts + 1
+              WHERE id = (${CLAIM_CANDIDATE_SQL.replace('$1', '$3')}) AND "tenantId" = $3
+              RETURNING *, clock_timestamp() AS "claimedAt"`,
+            [workerId, this.leaseSeconds, candidate.tenantId],
+          );
+        if (rows[0])
+          return {
+            kind: 'claimed' as const,
+            job: { ...rows[0], leaseStartedAt },
+          };
+        // Облік казав, що готова задача є, а її немає: перерахувати з фактичних задач.
+        await tx.em.query('SELECT refresh_tenant_usage()');
+        return { kind: 'repair' as const, tenantId: candidate.tenantId };
+      });
+    } catch (err) {
+      if ((err as { code?: string }).code === LOCK_NOT_AVAILABLE && tenantId)
+        return { kind: 'lock_timeout', tenantId };
+      throw err;
+    }
   }
 
   /**
@@ -243,8 +328,12 @@ export class JobQueueService {
     await this.markLockedJobDone(em, job);
   }
 
-  /** Викликач уже заблокував рядок через assertLease або вибірку прострочених задач. */
-  private async markLockedJobDone(em: EntityManager, job: Job): Promise<void> {
+  /**
+   * Задача виконана; викликач уже заблокував рядок через assertLease або вибірку прострочених
+   * задач. Це оновлення `jobs` зачіпає облік тенанта (тригер), тож у транзакції воно — останнє
+   * (README, «Порядок блокувань»).
+   */
+  async markLockedJobDone(em: EntityManager, job: Job): Promise<void> {
     await em.query(
       `UPDATE jobs SET status = 'done', attempts = GREATEST(attempts, 1), "lockedBy" = NULL, "lockedUntil" = NULL, "lockToken" = NULL,
                        "finishedAt" = now()
@@ -284,16 +373,25 @@ export class JobQueueService {
     retryAfterMs?: number,
   ): Promise<FailureOutcome> {
     const current = await this.assertLease(em, job);
-    const outcome: FailureOutcome = !retryable
-      ? 'failed'
-      : current.attempts < current.maxAttempts
-        ? 'retry'
-        : 'dead';
+    const outcome = this.failureOutcome(current, retryable);
     await this.applyFailure(em, current, error, outcome, retryAfterMs);
     return outcome;
   }
 
-  private async applyFailure(
+  /** Наслідок провалу спроби для задачі в стані `locked` (рядок, заблокований assertLease). */
+  failureOutcome(locked: Job, retryable: boolean): FailureOutcome {
+    return !retryable
+      ? 'failed'
+      : locked.attempts < locked.maxAttempts
+        ? 'retry'
+        : 'dead';
+  }
+
+  /**
+   * Записує наслідок провалу в рядок задачі, вже заблокований викликачем. Оновлення `jobs`
+   * зачіпає облік тенанта (тригер), тож у транзакції воно — останнє.
+   */
+  async applyFailure(
     em: EntityManager,
     job: Job,
     error: string,
@@ -398,7 +496,6 @@ export class JobQueueService {
           outcome = 'done';
         } else {
           outcome = job.attempts < job.maxAttempts ? 'retry' : 'dead';
-          await this.applyFailure(em, job, error, outcome);
         }
         if (outcome === 'dead') {
           const final = `${error}; no attempts left (${job.attempts}/${job.maxAttempts})`;
@@ -413,6 +510,9 @@ export class JobQueueService {
             [job.executionId, final, tenantId],
           );
         }
+        // Задача — останньою: її оновлення зачіпає облік тенанта (порядок блокувань).
+        if (outcome !== 'done')
+          await this.applyFailure(em, job, error, outcome);
         reaped.push({
           id: job.id,
           executionId: job.executionId,

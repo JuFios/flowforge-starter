@@ -27,6 +27,14 @@ export class QueueMetrics {
   readonly jobsPurged: Counter;
   /** Завершені виконання (з кроками й задачами), видалені після EXECUTION_RETENTION_DAYS. */
   readonly executionsPurged: Counter;
+  /** Тривалість одного захоплення (промоція, вибір кандидата, спроби) — за годинником воркера. */
+  readonly claimDuration: Histogram;
+  /**
+   * Спроби захоплення, що не дали задачі через конкуренцію: `stale` — кандидата щойно обслужив
+   * інший воркер, `lock_timeout` — рядок обліку тенанта не звільнився за lock_timeout, `repair` —
+   * облік тенанта розійшовся із задачами й перерахований (за інваріантами не має траплятися).
+   */
+  readonly claimContention: Counter<'reason'>;
 
   constructor(metrics: MetricsService) {
     const registers = [metrics.registry];
@@ -34,6 +42,20 @@ export class QueueMetrics {
       name: 'flowforge_job_claim_latency_seconds',
       help: 'Time from a job becoming ready (runAt) to a worker claiming it',
       buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 300],
+      registers,
+    });
+    this.claimDuration = new Histogram({
+      name: 'flowforge_job_claim_duration_seconds',
+      help: 'Time one claim takes (promotion, candidate selection, attempts)',
+      buckets: [
+        0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5,
+      ],
+      registers,
+    });
+    this.claimContention = new Counter({
+      name: 'flowforge_job_claim_contention_total',
+      help: 'Claim attempts that yielded no job because of concurrency (stale candidate, lock timeout, usage repair)',
+      labelNames: ['reason'],
       registers,
     });
     this.stepDuration = new Histogram({

@@ -3,6 +3,7 @@ import { DataSource } from 'typeorm';
 import { buildDataSourceOptions } from '../../src/database/database.options';
 import { Execution, Job, StepRun, Tenant, Workflow } from '../../src/entities';
 import { openTestDataSource, truncateAll } from '../helpers/db';
+import { provisionTestDatabase } from '../helpers/test-provision';
 import { testDatabaseEnv, testDatabaseUrl } from '../helpers/test-env';
 
 /** Підключення, сесія якого працює в заданому часовому поясі (як процес/сервер з іншим TimeZone). */
@@ -167,6 +168,7 @@ describe('TimestampsWithTimeZone migration', () => {
         );
 
       await session.runMigrations({ transaction: 'each' });
+      await provisionTestDatabase((sql, params) => session.query(sql, params));
 
       const [{ createdAt }]: Array<{ createdAt: Date }> = await session.query(
         `SELECT "createdAt" FROM "tenants" WHERE "id" = $1`,

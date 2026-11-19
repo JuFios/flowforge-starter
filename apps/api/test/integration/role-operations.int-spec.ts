@@ -204,7 +204,7 @@ describe('every operation works with the runtime roles', () => {
     let claimed: Awaited<ReturnType<JobQueueService['claimNext']>> = null;
     await waitFor('the reaped job to be claimable', async () => {
       claimed = await queue.claimNext('ops-worker');
-      return claimed !== null;
+      return Boolean(claimed);
     });
     expect(claimed!.executionId).toBe(lost.id);
     await queue.release(claimed!);

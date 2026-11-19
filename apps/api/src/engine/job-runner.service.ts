@@ -291,6 +291,7 @@ export class JobRunnerService implements BeforeApplicationShutdown {
     }
     try {
       const job = await this.queue.claimNext(this.workerId);
+      // undefined — кандидатів щойно забирали інші воркери: нове коло одразу, без паузи.
       if (this.claimFailures > 0) {
         this.logger.log(
           { consecutiveFailures: this.claimFailures },

@@ -43,6 +43,22 @@ export class SystemDb {
     ]);
   }
 
+  /** Просуває дозрілих тенантів до індексу готових (пачка, SKIP LOCKED); кількість просунутих. */
+  async promoteReadyTenants(batch: number): Promise<number> {
+    const [row]: Array<{ promoted: number }> = await this.ds.query(
+      'SELECT promote_ready_tenants($1) AS promoted',
+      [batch],
+    );
+    return row.promoted;
+  }
+
+  /** Глибина черги кожного тенанта з незавершеними задачами (з обліку, без сканування задач). */
+  queueDepthByTenant(): Promise<
+    Array<{ tenantId: string; queued: number; running: number }>
+  > {
+    return this.ds.query('SELECT * FROM queue_depth_by_tenant()');
+  }
+
   /** Тенанти з простроченими lease, крім `exclude` (уже оброблені в цьому проході). */
   async expiredLeaseTenants(
     exclude: string[],

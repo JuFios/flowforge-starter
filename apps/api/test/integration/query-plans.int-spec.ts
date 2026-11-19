@@ -11,7 +11,30 @@ import { openTestDataSource, truncateAll } from '../helpers/db';
 interface PlanNode {
   'Node Type': string;
   'Index Name'?: string;
+  'Shared Hit Blocks'?: number;
+  'Shared Read Blocks'?: number;
   Plans?: PlanNode[];
+}
+
+function nodes(node: PlanNode): PlanNode[] {
+  return [node, ...(node.Plans ?? []).flatMap(nodes)];
+}
+
+/** Тіло SQL-функції з каталогу (саме те, що виконується), з параметрами замість аргументів. */
+async function functionBody(
+  ds: DataSource,
+  name: string,
+  args: Record<string, string>,
+): Promise<string> {
+  const [{ src }]: Array<{ src: string }> = await ds.query(
+    `SELECT prosrc AS src FROM pg_proc
+      WHERE proname = $1 AND pronamespace = 'public'::regnamespace`,
+    [name],
+  );
+  return Object.entries(args).reduce(
+    (sql, [arg, param]) => sql.replaceAll(arg, param),
+    src,
+  );
 }
 
 function indexesIn(node: PlanNode): string[] {
@@ -78,7 +101,12 @@ describe('query plans of the queue use their indexes', () => {
   }
 
   it.each([
-    ['claiming the next ready job', CLAIM_CANDIDATE_SQL, [], 'IDX_jobs_claim'],
+    [
+      'claiming the next ready job of the chosen tenant',
+      CLAIM_CANDIDATE_SQL,
+      ['00000000-0000-4000-8000-000000000000'],
+      'IDX_jobs_tenant_queue',
+    ],
     [
       'finding expired leases of a tenant',
       EXPIRED_LEASES_SQL,
@@ -134,6 +162,120 @@ describe('query plans of the queue use their indexes', () => {
   ])('%s', async (_case, sql, params, index) => {
     const root = await plan(sql, params);
     expect(indexesIn(root)).toContain(index);
+    expect(hasSeqScan(root)).toBe(false);
+  });
+});
+
+/**
+ * Вибір кандидата на захоплення (README, 3.3.5) на 2000 тенантах: готові, насичені з різними
+ * лімітами, лише з майбутніми задачами, дозрілі, але не просунуті, і порожні. Гілка (a) — Index
+ * Scan за частковим індексом у порядку ключа (без Sort), тож час і кількість прочитаних сторінок
+ * не залежать від кількості насичених і неготових тенантів.
+ */
+describe('choosing a claim candidate among 2000 tenants', () => {
+  let ds: DataSource;
+
+  beforeAll(async () => {
+    ds = await openTestDataSource();
+    await truncateAll(ds);
+    // n 1..1000 — готові (0–2 у роботі), 1001..1400 — насичені (ліміт 1..5), 1401..1700 — лише
+    // майбутні задачі, 1701..1750 — дозрілі, але промоція їх ще не обробила, решта — порожні.
+    await ds.query(`
+      INSERT INTO tenants (name, "apiKeyHash", "webhookSecret", "maxConcurrentExecutions")
+      SELECT 'c-' || g, md5('key-' || g) || md5('hash-' || g), 'secret',
+             CASE WHEN g BETWEEN 1001 AND 1400 THEN 1 + g % 5 END
+        FROM generate_series(1, 2000) g`);
+    // Одне виконання на задачу (завершене: версія для плану не потрібна); стан і час задачі — у
+    // вході виконання.
+    await ds.query(`
+      WITH t AS (SELECT id, split_part(name, '-', 2)::int AS n, "maxConcurrentExecutions" AS lim
+                   FROM tenants)
+      INSERT INTO executions ("tenantId", "workflowId", status, "finishedAt", input)
+      SELECT t.id, gen_random_uuid(), 'succeeded', now(),
+             jsonb_build_object('status', s.status, 'runAt', s.run_at)
+        FROM t, LATERAL (
+          SELECT 'queued' AS status, now() - make_interval(mins => g) AS run_at
+            FROM generate_series(1, CASE WHEN t.n <= 1000 THEN 1 + t.n % 3
+                                         WHEN t.n <= 1400 THEN 2
+                                         WHEN t.n BETWEEN 1701 AND 1750 THEN 1 ELSE 0 END) g
+          UNION ALL
+          SELECT 'queued', now() + interval '1 hour'
+            FROM generate_series(1, CASE WHEN t.n BETWEEN 1401 AND 1700 THEN 1 ELSE 0 END)
+          UNION ALL
+          SELECT 'running', now()
+            FROM generate_series(1, CASE WHEN t.n <= 1000 THEN t.n % 3
+                                         WHEN t.n <= 1400 THEN t.lim ELSE 0 END)
+        ) s`);
+    await ds.query(`
+      INSERT INTO jobs ("tenantId", "executionId", status, "runAt", "lockToken", "lockedUntil")
+      SELECT "tenantId", id, input->>'status', (input->>'runAt')::timestamptz,
+             CASE WHEN input->>'status' = 'running' THEN gen_random_uuid() END,
+             CASE WHEN input->>'status' = 'running' THEN now() + interval '1 hour' END
+        FROM executions`);
+    // Відставання промоції: тенанти з настилою задачею, яких промоція ще не просунула.
+    await ds.query(`
+      UPDATE tenant_usage u SET ready = false FROM tenants t
+       WHERE t.id = u."tenantId" AND split_part(t.name, '-', 2)::int BETWEEN 1701 AND 1750`);
+    await ds.query(`ANALYZE tenant_usage`);
+    await ds.query(`ANALYZE jobs`);
+  });
+
+  afterAll(async () => {
+    await truncateAll(ds);
+    await ds.destroy();
+  });
+
+  it('reads the candidate from the partial indexes within 5 ms and 64 buffers', async () => {
+    const sql = await functionBody(ds, 'claim_candidate', {
+      p_exclude: '$1::uuid[]',
+    });
+    const [row]: Array<{
+      'QUERY PLAN': Array<{ Plan: PlanNode; 'Execution Time': number }>;
+    }> = await ds.query(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${sql}`, [[]]);
+    const { Plan: root, 'Execution Time': ms } = row['QUERY PLAN'][0];
+    expect(hasSeqScan(root)).toBe(false);
+    const branches = nodes(root).find(
+      (n) => n['Node Type'] === 'Append',
+    )!.Plans!;
+    const ready = branches.find((b) =>
+      indexesIn(b).includes('IDX_tenant_usage_claim'),
+    )!;
+    expect(ready).toBeDefined();
+    expect(nodes(ready).some((n) => n['Node Type'] === 'Sort')).toBe(false);
+    expect(
+      branches.some((b) => indexesIn(b).includes('IDX_tenant_usage_maturing')),
+    ).toBe(true);
+    expect(ms).toBeLessThanOrEqual(5);
+    expect(
+      (root['Shared Hit Blocks'] ?? 0) + (root['Shared Read Blocks'] ?? 0),
+    ).toBeLessThanOrEqual(64);
+  });
+
+  it('returns the best eligible tenant by (running, last claim, id), promoted or not', async () => {
+    const [best]: Array<{ tenantId: string }> = await ds.query(`
+      SELECT "tenantId" FROM tenant_usage
+       WHERE "nextRunAt" <= clock_timestamp() AND running < "maxRunning"
+       ORDER BY running, "lastClaimedAt", "tenantId" LIMIT 1`);
+    const [chosen]: Array<{ tenantId: string }> = await ds.query(
+      `SELECT "tenantId" FROM claim_candidate('{}')`,
+    );
+    expect(chosen.tenantId).toBe(best.tenantId);
+  });
+
+  it('promotes matured tenants through the maturing index, without a sequential scan', async () => {
+    const body = await functionBody(ds, 'promote_ready_tenants', {
+      p_batch: '100',
+    });
+    const update = /UPDATE public\.tenant_usage[\s\S]*?;/.exec(body)![0];
+    const root = await ds.transaction(async (em) => {
+      const [row]: Array<{ 'QUERY PLAN': Array<{ Plan: PlanNode }> }> =
+        await em.query(`EXPLAIN (ANALYZE, FORMAT JSON) ${update.slice(0, -1)}`);
+      // Лише план: зміни відкочуються.
+      await em.query('ROLLBACK');
+      await em.query('BEGIN');
+      return row['QUERY PLAN'][0].Plan;
+    });
+    expect(indexesIn(root)).toContain('IDX_tenant_usage_maturing');
     expect(hasSeqScan(root)).toBe(false);
   });
 });

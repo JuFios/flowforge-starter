@@ -1,6 +1,7 @@
 import 'reflect-metadata';
 import { createHash, createHmac, pbkdf2Sync, randomBytes } from 'node:crypto';
 import { DataSource } from 'typeorm';
+import { BUILT_IN_LIMIT_DEFAULTS, LIMIT_BOUNDS } from '../tenancy/limits';
 import { API_ROLE, SYSTEM_ROLE, WORKER_ROLE } from '../tenancy/roles';
 import { loadDotEnvIfPresent } from './cli-env';
 import { buildDataSourceOptions } from './database.options';
@@ -52,7 +53,7 @@ export function validateLoginRole(role: LoginRole): void {
     );
 }
 
-type Query = (sql: string, params?: unknown[]) => Promise<unknown>;
+export type Query = (sql: string, params?: unknown[]) => Promise<unknown>;
 
 /**
  * Створює або оновлює login-ролі процесів (ідемпотентно): роль без суперкористувача й BYPASSRLS,
@@ -108,6 +109,71 @@ export async function provisionLoginRoles(
     await query(`GRANT CONNECT ON DATABASE ${db} TO "${role.user}"`);
 }
 
+/** Значення лімітів тенантів за замовчуванням (`limit_defaults`; перевизначення — у тенанта). */
+export interface LimitDefaults {
+  maxRunning: number;
+  maxQueueSize: number;
+  rateLimit: number;
+  rateWindowMs: number;
+  webhookRateLimit: number;
+  webhookRateWindowMs: number;
+}
+
+/** Змінна env кожного значення за замовчуванням і її межі. */
+const LIMIT_ENV: Record<
+  keyof LimitDefaults,
+  [string, readonly [number, number]]
+> = {
+  maxRunning: ['TENANT_MAX_RUNNING', LIMIT_BOUNDS.maxRunning],
+  maxQueueSize: ['TENANT_MAX_QUEUE_SIZE', LIMIT_BOUNDS.maxQueueSize],
+  rateLimit: ['TENANT_RATE_LIMIT', LIMIT_BOUNDS.rateLimit],
+  rateWindowMs: ['TENANT_RATE_WINDOW_MS', LIMIT_BOUNDS.rateWindowMs],
+  webhookRateLimit: ['TENANT_WEBHOOK_RATE_LIMIT', LIMIT_BOUNDS.rateLimit],
+  webhookRateWindowMs: [
+    'TENANT_WEBHOOK_RATE_WINDOW_MS',
+    LIMIT_BOUNDS.rateWindowMs,
+  ],
+};
+
+/** Значення за замовчуванням з env (`TENANT_*`), а без змінної — вбудовані; поза межами — помилка. */
+export function limitDefaultsFromEnv(env: NodeJS.ProcessEnv): LimitDefaults {
+  const result = { ...BUILT_IN_LIMIT_DEFAULTS };
+  for (const key of Object.keys(LIMIT_ENV) as Array<keyof LimitDefaults>) {
+    const [name, [lo, hi]] = LIMIT_ENV[key];
+    const raw = env[name];
+    if (raw === undefined || raw === '') continue;
+    const value = Number(raw);
+    if (!/^\d+$/.test(raw) || value < lo || value > hi)
+      throw new Error(`${name} must be an integer ${lo}..${hi}`);
+    result[key] = value;
+  }
+  return result;
+}
+
+/**
+ * Записує значення лімітів за замовчуванням у `limit_defaults` (одне джерело для API й воркера);
+ * тригер переносить їх у облік тенантів без власних перевизначень.
+ */
+export async function provisionLimitDefaults(
+  query: Query,
+  limits: LimitDefaults,
+): Promise<void> {
+  await query(
+    `UPDATE limit_defaults
+        SET "maxRunning" = $1, "maxQueueSize" = $2, "rateLimit" = $3, "rateWindowMs" = $4,
+            "webhookRateLimit" = $5, "webhookRateWindowMs" = $6
+      WHERE id`,
+    [
+      limits.maxRunning,
+      limits.maxQueueSize,
+      limits.rateLimit,
+      limits.rateWindowMs,
+      limits.webhookRateLimit,
+      limits.webhookRateWindowMs,
+    ],
+  );
+}
+
 /** Login-ролі процесів з оточення `migrate` (compose) або локального запуску. */
 export function loginRolesFromEnv(env: NodeJS.ProcessEnv): LoginRole[] {
   const required = (name: string): string => {
@@ -138,6 +204,7 @@ async function main(): Promise<void> {
       'MIGRATION_DATABASE_URL is required for db:provision: the URL of the schema owner',
     );
   const roles = loginRolesFromEnv(process.env);
+  const limits = limitDefaultsFromEnv(process.env);
   const ds = await new DataSource(
     buildDataSourceOptions(
       validateDatabaseEnv({ ...process.env, DATABASE_URL: url }),
@@ -145,14 +212,16 @@ async function main(): Promise<void> {
     ),
   ).initialize();
   try {
-    await ds.transaction((em) =>
-      provisionLoginRoles((sql, params) => em.query(sql, params), roles),
-    );
+    await ds.transaction(async (em) => {
+      const query: Query = (sql, params) => em.query(sql, params);
+      await provisionLoginRoles(query, roles);
+      await provisionLimitDefaults(query, limits);
+    });
   } finally {
     await ds.destroy();
   }
   console.log(
-    `database roles provisioned: ${roles.map((r) => r.user).join(', ')}`,
+    `database roles provisioned: ${roles.map((r) => r.user).join(', ')}; tenant limit defaults: ${JSON.stringify(limits)}`,
   );
 }
 

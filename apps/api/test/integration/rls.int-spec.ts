@@ -209,7 +209,13 @@ const ROLES: Array<{
       `UPDATE step_runs SET status = 'failed'`,
       `DELETE FROM executions`,
       `DELETE FROM jobs`,
-      `SELECT * FROM claim_fifo_candidate()`,
+      `SELECT * FROM claim_candidate('{}')`,
+      `SELECT promote_ready_tenants(1)`,
+      `SELECT refresh_tenant_usage()`,
+      `SELECT * FROM queue_depth_by_tenant()`,
+      `SELECT * FROM tenant_usage`,
+      `SELECT * FROM limit_defaults`,
+      `UPDATE limit_defaults SET "maxRunning" = 1000`,
       `SELECT purge_finished_jobs(1, 1)`,
     ],
     update: `UPDATE executions SET error = 'touched' WHERE id = $1`,
@@ -224,6 +230,9 @@ const ROLES: Array<{
       `DELETE FROM jobs`,
       `SELECT auth_tenant('x')`,
       `SELECT webhook_tenant(gen_random_uuid())`,
+      `SELECT * FROM tenant_usage`,
+      `UPDATE tenant_usage SET running = 0`,
+      `SELECT * FROM limit_defaults`,
     ],
     update: `UPDATE executions SET error = 'touched' WHERE id = $1`,
   },
@@ -360,6 +369,46 @@ describe('SECURITY DEFINER functions', () => {
       expect(real).toBe(tenant.id);
     } finally {
       await runner.release();
+    }
+  });
+
+  it('lock and refresh only the usage row of the tenant in context, and refuse without one', async () => {
+    await truncateAll(owner);
+    const a = (await createTenant(owner, 'a')).tenant.id;
+    const b = (await createTenant(owner, 'b')).tenant.id;
+    const wfB = await createWorkflow(owner, b);
+    await owner.getRepository(Job).save({
+      tenantId: b,
+      executionId: (await createExecution(owner, wfB)).id,
+    });
+    const worker = await new DataSource({
+      type: 'postgres',
+      url: testWorkerDatabaseUrl(),
+    }).initialize();
+    try {
+      for (const role of [apiRole, worker])
+        await expect(
+          role.query('SELECT * FROM lock_tenant_usage()'),
+        ).rejects.toThrow(/tenant context is required/);
+      await expect(
+        worker.query('SELECT refresh_tenant_usage()'),
+      ).rejects.toThrow(/tenant context is required/);
+      // У контексті A: лише рядок A (задача B не видна й не рахується), навіть після перерахунку.
+      const usage = await worker.transaction(async (em) => {
+        await em.query(`SELECT set_config('app.tenant_id', $1, true)`, [a]);
+        await em.query('SELECT refresh_tenant_usage()');
+        return em.query<unknown[]>(
+          'SELECT queued, running FROM lock_tenant_usage()',
+        );
+      });
+      expect(usage).toEqual([{ queued: 0, running: 0 }]);
+      const [rowB]: Array<{ queued: number }> = await owner.query(
+        `SELECT queued FROM tenant_usage WHERE "tenantId" = $1`,
+        [b],
+      );
+      expect(rowB.queued).toBe(1);
+    } finally {
+      await worker.destroy();
     }
   });
 

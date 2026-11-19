@@ -123,7 +123,7 @@ export class CheckpointService {
   /** Виконання успішне: виконання й задача завершуються разом або ніяк. */
   async finish(job: Job, output: unknown): Promise<void> {
     await this.db.run(job.tenantId, async (em) => {
-      await this.queue.completeIn(em, job);
+      await this.queue.assertLease(em, job);
       await em.query(
         `UPDATE executions SET status = 'succeeded', output = $2, error = NULL, "finishedAt" = now()
           WHERE id = $1 AND "tenantId" = $3`,
@@ -133,6 +133,8 @@ export class CheckpointService {
           job.tenantId,
         ],
       );
+      // Задача — останньою: її оновлення зачіпає облік тенанта (порядок блокувань).
+      await this.queue.markLockedJobDone(em, job);
     });
   }
 
@@ -173,13 +175,7 @@ export class CheckpointService {
           WHERE "executionId" = $1 AND "tenantId" = $3 AND status = 'running'`,
         [job.executionId, error, job.tenantId],
       );
-      const outcome = await this.queue.failIn(
-        em,
-        job,
-        error,
-        retryable,
-        retryAfterMs,
-      );
+      const outcome = this.queue.failureOutcome(locked, retryable);
       if (outcome !== 'retry') {
         // Лічильник спроб — із БД: відповідь startStep, що зарахувала спробу, могла загубитися.
         const final =
@@ -192,6 +188,8 @@ export class CheckpointService {
           [job.executionId, final, job.tenantId],
         );
       }
+      // Задача — останньою: її оновлення зачіпає облік тенанта (порядок блокувань).
+      await this.queue.applyFailure(em, locked, error, outcome, retryAfterMs);
       return outcome;
     });
   }

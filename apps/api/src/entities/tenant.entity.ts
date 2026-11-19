@@ -1,11 +1,26 @@
 import {
+  Check,
   Column,
   CreateDateColumn,
   Entity,
   PrimaryGeneratedColumn,
 } from 'typeorm';
+import { TENANT_LIMIT_CHECKS } from '../tenancy/limits';
 
 @Entity('tenants')
+@Check(
+  'CHK_tenants_max_concurrent_executions',
+  TENANT_LIMIT_CHECKS.CHK_tenants_max_concurrent_executions,
+)
+@Check(
+  'CHK_tenants_max_queue_size',
+  TENANT_LIMIT_CHECKS.CHK_tenants_max_queue_size,
+)
+@Check('CHK_tenants_rate_limit', TENANT_LIMIT_CHECKS.CHK_tenants_rate_limit)
+@Check(
+  'CHK_tenants_webhook_rate_limit',
+  TENANT_LIMIT_CHECKS.CHK_tenants_webhook_rate_limit,
+)
 export class Tenant {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -20,6 +35,22 @@ export class Tenant {
   /** Секрет для підпису вхідних webhook-ів цього тенанта. */
   @Column()
   webhookSecret: string;
+
+  /**
+   * Перевизначення лімітів тенанта (NULL — значення за замовчуванням з `limit_defaults`): задачі в
+   * роботі, розмір черги (незавершені задачі), запити до API й webhook-и за вікно.
+   */
+  @Column({ type: 'int', nullable: true })
+  maxConcurrentExecutions: number | null;
+
+  @Column({ type: 'int', nullable: true })
+  maxQueueSize: number | null;
+
+  @Column({ type: 'int', nullable: true })
+  rateLimit: number | null;
+
+  @Column({ type: 'int', nullable: true })
+  webhookRateLimit: number | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;

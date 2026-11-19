@@ -11,6 +11,7 @@ import { RunIdempotencyKey1794993774584 } from './1794993774584-RunIdempotencyKe
 import { HistoryIndexes1794993930872 } from './1794993930872-HistoryIndexes';
 import { RecoverCheckpoints1795000000000 } from './1795000000000-RecoverCheckpoints';
 import { TenantIsolation1795100000000 } from './1795100000000-TenantIsolation';
+import { TenantUsage1795200000000 } from './1795200000000-TenantUsage';
 
 /**
  * Явний перелік міграцій у порядку застосування. Без glob-шаблонів, щоб однаково
@@ -31,4 +32,5 @@ export const MIGRATIONS = [
   HistoryIndexes1794993930872,
   RecoverCheckpoints1795000000000,
   TenantIsolation1795100000000,
+  TenantUsage1795200000000,
 ];

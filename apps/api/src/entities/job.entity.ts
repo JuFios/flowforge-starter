@@ -18,9 +18,11 @@ import { TENANT_ID_DEFAULT } from './tenant-column';
 export type JobStatus = 'queued' | 'running' | 'done' | 'failed' | 'dead';
 
 @Entity('jobs')
-// Захоплення: найраніша готова задача серед queued (часткий індекс не містить завершених задач,
-// яких з часом переважна більшість).
-@Index('IDX_jobs_claim', ['runAt'], { where: `"status" = 'queued'` })
+// Захоплення: найраніша готова задача тенанта-кандидата серед queued; облік — найраніша задача
+// тенанта в черзі. Частковий індекс не містить завершених задач, яких з часом переважна більшість.
+@Index('IDX_jobs_tenant_queue', ['tenantId', 'runAt'], {
+  where: `"status" = 'queued'`,
+})
 // Reaper: задачі в роботі з простроченим lease.
 @Index('IDX_jobs_lease', ['lockedUntil'], { where: `"status" = 'running'` })
 // Задача виконання: повтор виконання (POST /executions/:id/retry), видалення історії.

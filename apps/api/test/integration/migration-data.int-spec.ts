@@ -5,6 +5,7 @@ import { TenantDb } from '../../src/tenancy/tenant-db';
 import { DataSource } from 'typeorm';
 import { MIGRATIONS } from '../../src/database/migrations';
 import { openTestDataSource, truncateAll } from '../helpers/db';
+import { provisionTestDatabase } from '../helpers/test-provision';
 
 /**
  * Міграції, що перетворюють наявні дані (а не лише схему): БД відкочується до стану перед
@@ -22,6 +23,7 @@ describe('data migrations', () => {
     // старих форматів (без тенантів) очищаються до того, як TenantIsolation перевірить цілісність.
     await truncateAll(ds);
     await ds.runMigrations({ transaction: 'each' });
+    await provisionTestDatabase((sql, params) => ds.query(sql, params));
     await truncateAll(ds);
     await ds.destroy();
   });
