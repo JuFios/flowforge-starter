@@ -426,6 +426,59 @@ describe('notification settings', () => {
     }
   });
 
+  it('bounds attempt pages and walks the original history across later deliveries', async () => {
+    await setup(a);
+    const id = await completed(a);
+    const path = `/tenants/me/notifications/events/${id}`;
+    const addAttempts = async (start: number, end: number) =>
+      ds.transaction(async (em) => {
+        await em.query(
+          `INSERT INTO outbox_attempts ("tenantId","eventId",attempt,"senderId") SELECT $1,$2,g,\'sender\' FROM generate_series($3::int,$4::int) g`,
+          [a.tenant.id, id, start, end],
+        );
+        await em.query('UPDATE outbox_events SET attempts=$2 WHERE id=$1', [
+          id,
+          end,
+        ]);
+      });
+    type Page = {
+      attempts: Array<{ attempt: number }>;
+      nextAttemptsCursor: string | null;
+    };
+    await addAttempts(1, 101);
+    const first = await call<Page>(a, 'GET', path + '?limit=100');
+    expect(first.body.attempts).toHaveLength(100);
+    expect(first.body.nextAttemptsCursor).toEqual(expect.any(String));
+    await addAttempts(102, 102);
+    const tail = await call<Page>(
+      a,
+      'GET',
+      path + '?cursor=' + first.body.nextAttemptsCursor,
+    );
+    expect(tail.body.attempts.map((r) => r.attempt)).toEqual([101]);
+    expect(tail.body.nextAttemptsCursor).toBeNull();
+    expect((await call(a, 'GET', path + '?limit=101')).status).toBe(400);
+    expect(
+      (await call(b, 'GET', path + '?cursor=' + first.body.nextAttemptsCursor))
+        .status,
+    ).toBe(404);
+    const another = await completed(a);
+    expect(
+      (
+        await call(
+          a,
+          'GET',
+          `/tenants/me/notifications/events/${another}?cursor=${first.body.nextAttemptsCursor}`,
+        )
+      ).status,
+    ).toBe(400);
+    const legacy = await call<Page>(a, 'GET', path);
+    expect(legacy.body.attempts.map((r) => r.attempt)).toEqual(
+      Array.from({ length: 102 }, (_, j) => j + 1),
+    );
+    expect(legacy.body).not.toHaveProperty('nextAttemptsCursor');
+  });
+
   it('pages through events with a cursor without gaps or repeats', async () => {
     await setup(a);
     const ids: string[] = [];
