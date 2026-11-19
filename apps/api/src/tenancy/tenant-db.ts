@@ -36,8 +36,14 @@ export interface TenantTransaction {
 export class TenantDb {
   constructor(@InjectDataSource() private readonly ds: DataSource) {}
 
-  /** Транзакція в контексті тенанта. */
-  run<T>(tenantId: string, fn: (em: EntityManager) => Promise<T>): Promise<T> {
+  /**
+   * Транзакція в контексті тенанта. Невалідний id — відхилений проміс ще до звернення до БД
+   * (а не синхронний виняток, який обійшов би `.catch` викликача).
+   */
+  async run<T>(
+    tenantId: string,
+    fn: (em: EntityManager) => Promise<T>,
+  ): Promise<T> {
     assertTenantId(tenantId);
     return this.transaction(async (tx) => {
       await tx.enter(tenantId);

@@ -123,7 +123,9 @@ describe('JSON nesting depth', () => {
     async (depth) => {
       const res = await deliver(nested(depth));
       expect(res.status).toBe(401);
-      expect(await res.text()).not.toMatch(/JSON|64|рівн/);
+      // Лише текст помилки: випадковий correlationId (UUID) теж може містити «64».
+      const { message } = (await res.json()) as { message: unknown };
+      expect(JSON.stringify(message)).not.toMatch(/JSON|64|рівн/);
     },
   );
 

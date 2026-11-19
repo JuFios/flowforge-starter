@@ -38,18 +38,31 @@
 ## Запуск
 
 ```bash
-# один раз: випадковий адмін-токен у .env поруч із docker-compose.yml (файл у .gitignore)
-printf 'ADMIN_TOKEN=%s\n' "$(openssl rand -hex 24)" > .env
+# один раз: випадкові секрети в .env поруч із docker-compose.yml (файл у .gitignore)
+for v in ADMIN_TOKEN POSTGRES_PASSWORD API_DB_PASSWORD WORKER_DB_PASSWORD; do
+  printf '%s=%s\n' "$v" "$(openssl rand -hex 24)"; done > .env
 docker-compose up --build
 ```
 
-Compose запускає API й воркери з `NODE_ENV=production` і бере `ADMIN_TOKEN` лише з `.env` у корені
-(або зі змінної оточення); без нього compose завершується з підказкою, а приклад
-`change-me-admin` чи очевидна заглушка зупиняють API помилкою валідації (див. «Конфігурація»).
-Шаблон — `.env.example` у корені.
+Секрети — лише з `.env` у корені (або зі змінних оточення); без будь-якого з них compose
+завершується з підказкою. Шаблон — `.env.example` у корені. Кожен сервіс отримує тільки свої:
 
-Порядок старту: `postgres` (healthy) → `migrate` (застосовує міграції й завершується з кодом 0)
-→ `api` і два `worker` (healthy за `/ready`) → `frontend` (healthy, коли відповідає сторінка).
+| Секрет | Хто отримує | Навіщо |
+|---|---|---|
+| `POSTGRES_PASSWORD` | `postgres`, `migrate` | власник схеми — суперкористувач `flowforge`: міграції й створення ролей |
+| `API_DB_PASSWORD` | `migrate`, `api` | роль `flowforge_api` (без BYPASSRLS), якою API ходить у БД |
+| `WORKER_DB_PASSWORD` | `migrate`, `worker` | роль `flowforge_worker` (без BYPASSRLS), якою ходить воркер |
+| `ADMIN_TOKEN` | лише `api` | службові ендпоінти `/tenants…` |
+
+Compose запускає API й воркери з `NODE_ENV=production`: приклад `change-me-admin` чи очевидна
+заглушка зупиняють API помилкою валідації (див. «Конфігурація»). Паролі ролей — лише латинські
+літери й цифри (щонайменше 24), бо потрапляють у URL підключення; `openssl rand -hex 24` підходить.
+CI перевіряє розподіл секретів за сервісами через `docker inspect` (job `compose`).
+
+Порядок старту: `postgres` (healthy) → `migrate` (застосовує міграції власником схеми, потім
+`db:provision` створює або оновлює runtime-ролі `flowforge_api` і `flowforge_worker`, і
+завершується з кодом 0) → `api` і два `worker` (healthy за `/ready`; кожен перед стартом перевіряє,
+що його роль не обходить RLS, див. 3.3.4) → `frontend` (healthy, коли відповідає сторінка).
 `docker-compose up -d --wait` повертає керування, коли всі сервіси healthy (або з помилкою). Схема БД будується лише міграціями,
 тож система піднімається з порожнього тому.
 
@@ -58,30 +71,70 @@ Compose запускає API й воркери з `NODE_ENV=production` і бе�
 | API | http://localhost:3000 (`/metrics` тут немає — 404) |
 | Метрики API | лише в мережі compose: `http://api:3200/metrics` |
 | Фронтенд | http://localhost:3001 |
-| Postgres | localhost:5432 (`flowforge` / `flowforge`) |
+| Postgres | лише `127.0.0.1:5432` (власник `flowforge`, пароль — `POSTGRES_PASSWORD` із `.env`) |
 | Воркери | лише в мережі compose, порт `3100` (`/health`, `/ready`, `/metrics`) |
 
 ### Локальний запуск поза docker
 
-Потрібні Node.js 20 і Docker (для Postgres). Якщо compose-стек уже запущено, звільніть порти:
-`docker-compose stop api worker frontend`.
+Потрібні Node.js 20 і Docker (для Postgres) та `.env` у корені з розділу вище. Якщо compose-стек
+уже запущено, звільніть порти: `docker-compose stop api worker frontend`.
 
 ```bash
 # з кореня репозиторію
+set -a; . ./.env; set +a          # секрети з кореневого .env у поточну оболонку
 docker-compose up -d postgres
 cd apps/api
-cp .env.example .env
-sed -i.bak 's/@postgres:/@localhost:/' .env   # хост БД для запуску поза docker
+cp .env.example .env              # несекретні налаштування; секрети — нижче, окремо для процесу
 npm ci
 npm run build
-npm run migration:run
-npm run start          # API на :3000
+# міграції й ролі — власником схеми (лише цим командам, не API й воркеру)
+MIGRATION_DATABASE_URL="postgres://flowforge:$POSTGRES_PASSWORD@localhost:5432/flowforge" \
+  npm run migration:run
+MIGRATION_DATABASE_URL="postgres://flowforge:$POSTGRES_PASSWORD@localhost:5432/flowforge" \
+  npm run db:provision
+# API на :3000 — своєю роллю
+DATABASE_URL="postgres://flowforge_api:$API_DB_PASSWORD@localhost:5432/flowforge" \
+  ADMIN_TOKEN="$ADMIN_TOKEN" npm run start
 ```
 
 Метрики API — `curl localhost:3200/metrics` (службовий порт `METRICS_PORT`).
-Воркер — в іншому терміналі, з `apps/api`: `npm run start:worker` (службовий HTTP на `:3100`).
+Воркер — в іншому терміналі, з `apps/api`, своєю роллю (службовий HTTP на `:3100`):
+
+```bash
+set -a; . ../../.env; set +a
+DATABASE_URL="postgres://flowforge_worker:$WORKER_DB_PASSWORD@localhost:5432/flowforge" \
+  npm run start:worker
+```
+
 Застосунок і CLI міграцій читають `apps/api/.env` (якщо файл є); змінні, задані в оточенні
-(як у docker-compose), мають пріоритет над файлом.
+(як у docker-compose), мають пріоритет над файлом. Облікові дані власника (`MIGRATION_DATABASE_URL`)
+у `apps/api/.env` не кладіть: API й воркер з ними не стартують (див. 3.3.4).
+
+### Оновлення з попередньої версії
+
+Том `pgdata`, створений попередньою версією (до ізоляції тенантів), оновлюється так (з кореня
+репозиторію, `.env` з чотирма секретами — як у «Запуск»):
+
+```bash
+docker-compose stop api worker frontend   # старі процеси не працюють під час міграції
+docker-compose up -d postgres
+# POSTGRES_PASSWORD діє лише для порожнього тому: власнику наявного тому пароль змінюють один раз.
+# Через локальний сокет контейнера старий пароль не потрібен; \password рахує verifier на клієнті,
+# тож пароль не потрапляє в лог Postgres. Введіть значення POSTGRES_PASSWORD із .env.
+docker-compose exec postgres psql -U flowforge -d flowforge -c '\password flowforge'
+docker-compose up --build --wait
+```
+
+Міграція `TenantIsolation` перед змінами перевіряє цілісність наявних даних і зупиняється з
+кількістю порушень (без самих даних), якщо знайде задачу чи крок без свого виконання, рядок
+невідомого тенанта або посилання між тенантами (див. «Міграції БД»).
+
+Перевірено (18.11.2026) на томі, створеному попередньою версією (стан після PR 2, e2fadbf), з даними
+через її API: два тенанти, по 5 виконань (3 успішні workflow, який потім видалено, 1 провалене, 1 на
+паузі `delay` 60 с). Після кроків вище: міграції й ролі застосовані, усі сервіси healthy; кожен
+тенант через API бачить лише свої 5 виконань; усі 18 кроків отримали тенанта свого виконання; історія
+видаленого workflow (6 виконань) збереглась; обидва виконання на паузі після оновлення продовжились і
+завершились (`succeeded` 8, `failed` 2).
 
 Фронтенд — з кореня репозиторію, в іншому терміналі:
 
@@ -198,11 +251,11 @@ OpenAPI-документація — буде заповнено.
 | `PORT` | `3000` | порт HTTP API |
 | `METRICS_PORT` | `3200` | службовий порт API лише для `GET /metrics`; compose його не публікує; `0` — випадковий вільний порт (тести) |
 | `HTTP_BODY_LIMIT` | `102400` | найбільше JSON-тіло запиту, байт, 69632..1048576 (нижня межа — визначення workflow 64 КіБ плюс решта полів); більше — 413 |
-| `DATABASE_URL` | — (обов'язкова) | `postgres://user:pass@host:5432/db` |
+| `DATABASE_URL` | — (обов'язкова, секрет) | підключення процесу **його власною роллю** без BYPASSRLS: API — `flowforge_api`, воркер — `flowforge_worker` (`postgres://<роль>:<пароль>@host:5432/db`); у `.env.example` лише закоментована підказка, compose задає її кожному сервісу окремо. Процес не стартує з роллю, що обходить RLS (3.3.4) |
 | `DB_CONNECT_TIMEOUT_MS` | `5000` | таймаут встановлення з'єднання з Postgres, 100..60000 мс (і для CLI міграцій) |
 | `DB_POOL_SIZE` | `10` | найбільше з'єднань із Postgres в одному процесі, 5..1000, не менше за `WORKER_CONCURRENCY + 4` (проблема 25); сума пулів усіх процесів має вміщатися в `max_connections` Postgres (100 за замовчуванням) |
 | `DB_STATEMENT_TIMEOUT_MS` | `30000` | межа одного SQL-запиту (`statement_timeout`) і простою відкритої транзакції (`idle_in_transaction_session_timeout`), 100..600000 мс; на CLI міграцій не діє |
-| `ADMIN_TOKEN` | — (обов'язкова, ≥ 12 символів) | токен `POST /tenants`; у `NODE_ENV=production` приклад і очевидні заглушки заборонені (див. нижче) |
+| `ADMIN_TOKEN` | — (обов'язкова лише для API, ≥ 12 символів, секрет) | токен службових ендпоінтів `/tenants…`; воркер його не отримує й без нього стартує; у `NODE_ENV=production` приклад і очевидні заглушки заборонені (див. нижче); у `.env.example` — закоментована підказка |
 | `LOG_LEVEL` | `info` | рівень логування pino |
 | `WORKER_CONCURRENCY` | `4` | паралельні цикли обробки в одному воркері |
 | `WORKER_HTTP_PORT` | `3100` | службовий HTTP воркера |
@@ -218,12 +271,27 @@ OpenAPI-документація — буде заповнено.
 | `SCHEDULER_TICK_MS` | `30000` | період тіку планувальника, 100..2147483647 мс — **тимчасова межа** (лише ліміт таймерів Node, див. «Що не встигли») |
 | `TEST_DATABASE_URL` | `postgres://flowforge:flowforge@localhost:5432/flowforge_test` | лише для інтеграційних тестів |
 
-**Адмін-токен і `NODE_ENV`.** `apps/api/.env.example` — приклад для локальної розробки
-(`NODE_ENV=development`, `ADMIN_TOKEN=change-me-admin`). У `NODE_ENV=production` валідація
+**Змінні кроку міграцій** (`migrate` у compose; не входять до конфігурації API й воркера, а
+`MIGRATION_DATABASE_URL` у їхньому оточенні — помилка валідації):
+
+| Змінна | За замовчуванням | Опис |
+|---|---|---|
+| `MIGRATION_DATABASE_URL` | — (обов'язкова для `migration:*` і `db:provision`) | власник схеми — **суперкористувач** Postgres: міграції створюють роль із BYPASSRLS і заповнюють таблиці під `FORCE ROW LEVEL SECURITY`, що інакше не бачило б рядків |
+| `API_DB_USER` / `API_DB_PASSWORD` | `flowforge_api` / — | login-роль API; `db:provision` створює її або оновлює пароль (ротація) |
+| `WORKER_DB_USER` / `WORKER_DB_PASSWORD` | `flowforge_worker` / — | login-роль воркера; ім'я має відрізнятися від ролі API |
+
+Пароль ролі — лише `[A-Za-z0-9]`, 24..256 символів (потрапляє в URL). `db:provision` передає
+серверу не пароль, а SCRAM-SHA-256 verifier, обчислений на клієнті (як `psql \password`), тож пароль
+не потрапляє ні в лог Postgres, ні в `pg_stat_statements`. Керувати суперкористувачем, власником
+схеми чи груповими ролями він відмовляється.
+
+**Адмін-токен і `NODE_ENV`.** `apps/api/.env.example` — несекретні налаштування для локальної
+розробки (`NODE_ENV=development`); секрети в ньому закоментовані, для `ADMIN_TOKEN` підказано
+`change-me-admin`. У `NODE_ENV=production` валідація
 відхиляє `ADMIN_TOKEN`, що містить `change-me`/`changeme`, `example`, `placeholder`, `default`,
 `password`, `secret`, `qwerty`, `12345` або має менше 8 різних символів; саме значення в помилці не
-друкується. docker-compose бере `apps/api/.env.example` як основу, але задає `NODE_ENV=production`
-і `ADMIN_TOKEN` із кореневого `.env`. Варіанти, що розглядались: окремий `NODE_ENV` для compose
+друкується. docker-compose бере `apps/api/.env.example` як основу (без секретів), задає
+`NODE_ENV=production`, а секрети — з кореневого `.env`, кожному сервісу лише його. Варіанти, що розглядались: окремий `NODE_ENV` для compose
 (приклад-токен працював би й далі в образі, який виглядає як production) і прибрати токен із
 прикладу зовсім (локальний запуск поза docker перестав би працювати «з коробки»). Обрано
 кореневий `.env`, якого немає в git: стандартний для compose механізм, секрет задає лише
@@ -239,10 +307,15 @@ OpenAPI-документація — буде заповнено.
 `apps/api/src/database/migrations`. Перелік міграцій явний (`migrations/index.ts`), без
 glob-шаблонів, тож однаково працює в зібраному `dist` і в тестах.
 
+Міграції виконує власник схеми — суперкористувач Postgres (`MIGRATION_DATABASE_URL`), а не
+runtime-роль API чи воркера; без суперкористувача `TenantIsolation` зупиняється з поясненням.
+
 ```bash
 cd apps/api
 npm run build
+export MIGRATION_DATABASE_URL="postgres://flowforge:$POSTGRES_PASSWORD@localhost:5432/flowforge"
 npm run migration:run       # застосувати
+npm run db:provision        # створити/оновити ролі flowforge_api і flowforge_worker (паролі — з оточення)
 npm run migration:revert    # відкотити останню
 npm run migration:show      # стан
 # нова міграція з різниці між сутностями і БД (потім додати її в migrations/index.ts):
@@ -280,10 +353,20 @@ npm run build && npm run migration:generate -- src/database/migrations/<Name>
   `UQ_executions_idempotency_key` (`tenantId`, ключ) для заголовка `Idempotency-Key` запуску.
 - `HistoryIndexes` — `IDX_jobs_execution` (задача виконання: повтор, очищення історії) і частковий
   `IDX_executions_finished` (очищення історії).
+- `TenantIsolation` — ізоляція тенантів у Postgres (3.3.4): групові ролі `flowforge_api_role`,
+  `flowforge_worker_role` (без BYPASSRLS) і `flowforge_system` (BYPASSRLS, власник SECURITY
+  DEFINER-функцій; усі три NOLOGIN, створюються ідемпотентно й не видаляються `down`, бо спільні для
+  кластера); `step_runs."tenantId"` (заповнюється з виконання); композитні FK `jobs`/`step_runs` →
+  `executions (id, "tenantId")` і `executions` → `workflow_versions (id, "tenantId")`, FK
+  `"tenantId"` → `tenants`; `FORCE ROW LEVEL SECURITY` і політика `tenant_isolation` на шести
+  тенантних таблицях; права ролей (README, «Операції → права»); `REVOKE CREATE ON SCHEMA public`.
+  Перед змінами перевіряє цілісність даних (задачі й кроки без виконання, рядки невідомого тенанта,
+  посилання між тенантами) і зупиняється з кількістю порушень; історія видаленого workflow і
+  завершені виконання без знімку (дозволені раніше) лишаються валідними.
 - `RecoverCheckpoints` звіряє старі кроки із зафіксованою версією. Якщо неможливо встановити, яке визначення вже мало зовнішній ефект, міграція зберігає історію кроків і завершує виконання з помилкою. Для такого виконання `/retry` повертає 409. Перед новим запуском оператор звіряє збережені результати з отримувачем. Для вже успішного виконання міграція закриває залишену в черзі задачу.
 
-Команди беруть `DATABASE_URL` і `DB_CONNECT_TIMEOUT_MS` з оточення або з `apps/api/.env` (решта
-конфігурації застосунку CLI не потрібна). `statement_timeout` на міграції не діє: зміна схеми
+Команди беруть `MIGRATION_DATABASE_URL` і `DB_CONNECT_TIMEOUT_MS` з оточення або з `apps/api/.env`
+(решта конфігурації застосунку CLI не потрібна). `statement_timeout` на міграції не діє: зміна схеми
 великої таблиці легітимно триває довше за запит застосунку.
 
 Для БД, створеної стартовим кодом через `synchronize` (наприклад, том `pgdata` після запуску
@@ -294,6 +377,7 @@ npm run build && npm run migration:generate -- src/database/migrations/<Name>
 
 ```bash
 docker-compose up -d postgres
+docker-compose exec postgres psql -U flowforge -d flowforge -c '\password flowforge'  # див. «Оновлення з попередньої версії»
 docker-compose exec -T postgres psql -U flowforge -d flowforge -c \
   "CREATE TABLE IF NOT EXISTS migrations (id SERIAL PRIMARY KEY, \"timestamp\" bigint NOT NULL, name varchar NOT NULL);
    INSERT INTO migrations (\"timestamp\", name) VALUES (1794920217603, 'InitialSchema1794920217603');"
@@ -324,7 +408,15 @@ npm run test:all            # обидва набори
   прогоном глобальний setup створює базу `flowforge_test` (якщо її немає), **видаляє схему
   `public` і будує її міграціями з нуля** — тож кожен прогін заодно перевіряє міграції.
   Запуск дозволений лише на базі з суфіксом `_test`. Файли виконуються послідовно; кожен тест
-  очищає таблиці (`test/helpers/db.ts`). Локально достатньо `docker-compose up -d postgres`.
+  очищає таблиці (`test/helpers/db.ts`). Локально достатньо `docker-compose up -d postgres` і
+  адреси тестової БД власником (суперкористувачем) з паролем із кореневого `.env`:
+  `export TEST_DATABASE_URL="postgres://flowforge:$POSTGRES_PASSWORD@localhost:5432/flowforge_test"`
+  (за замовчуванням — пароль `flowforge`, як у CI).
+- **Ролі в тестах — як у compose.** Глобальний setup після міграцій створює runtime-ролі
+  `flowforge_api_test` і `flowforge_worker_test` (`provisionLoginRoles`, окремі від ролей compose
+  імена, бо ролі спільні для кластера Postgres). Застосунок у тестах ходить у БД цими ролями
+  (`test/helpers/integration-env.ts`; воркер — своєю, через провайдер `RUNTIME_DATABASE_URL`), а
+  підготовка й перевірка даних — з'єднанням власника (`openTestDataSource`), яке обходить RLS.
 - `test/helpers` — підготовка БД, створення тенантів/workflow, запуск справжнього
   Nest-застосунку на випадковому порту (`startApp`), воркера з циклами обробки (`startWorker`) і
   зовнішнього отримувача http-кроків (`Receiver`). Інтервали черги в інтеграційних тестах короткі
@@ -338,6 +430,13 @@ npm run test:all            # обидва набори
   `retry-after`, `connection-pool` (64 цикли, повільна БД), `job-retention`, `unstorable-text`
   (U+0000 і одиночні сурогати), `webhook-input`, `body-limit`, `run-idempotency`
   (`Idempotency-Key` запуску), `execution-retry`, `execution-retention`.
+- Ізоляція тенантів (3.3.4): `tenant-isolation-api` (ключ тенанта B проти кожного ресурсу A),
+  `rls` (прямий SQL під ролями API й воркера: без контексту, зі сміттєвим контекстом, у контексті
+  іншого тенанта; заборонені операції; спроби обійти RLS; підміна імен через `pg_temp`),
+  `tenant-predicates` (предикати сервісів з обійденим RLS), `db-acl` (точна матриця прав),
+  `role-operations` (кожна операція справжніми ролями), `db-security-check` (відмова старту з
+  небезпечною роллю), `tenant-context-pool` (контекст не переживає транзакцію в пулі), `provision`
+  (ролі, SCRAM verifier, ротація пароля), `migration-data` (backfill і зупинка на порушеннях цілісності).
 - Перевірки часу в сценаріях черги спираються на факти з БД (`wakeAt`, `runAt`, `lockToken`,
   `attempts`) за годинником БД, а не на час процесу тесту.
 - Стабільність (18.11.2026, локально): увесь інтеграційний набір — 10 прогонів поспіль на
@@ -352,7 +451,7 @@ CI (`.github/workflows/ci.yml`):
 | `api` | format:check, lint, typecheck, unit, build |
 | `integration` | інтеграційні тести з `services: postgres` |
 | `frontend` | format:check, lint, build |
-| `compose` | `docker compose up --wait` з нуля: міграції, healthy API, рівно два healthy воркери і фронтенд, запуск workflow наскрізь (виконання `succeeded` зі збереженим `correlationId`); потім chaos-сценарії (`npm run chaos`: SIGKILL воркерів під навантаженням; `npm run chaos:postgres`: перезапуск Postgres під навантаженням) |
+| `compose` | `docker compose up --wait` з нуля: міграції, healthy API, рівно два healthy воркери і фронтенд, кожен сервіс отримує лише свої секрети (`docker inspect`), runtime-ролі без суперкористувача й BYPASSRLS, запуск workflow наскрізь (виконання `succeeded` зі збереженим `correlationId`); потім chaos-сценарії (`npm run chaos`: SIGKILL воркерів під навантаженням; `npm run chaos:postgres`: перезапуск Postgres під навантаженням) |
 
 Усі job-и мають `timeout-minutes`; у `compose` очікування готовності обмежене `--wait-timeout 180`,
 а кожен `curl` — `--max-time`, тож сервіс, що прийняв з'єднання й мовчить, валить job за таймаутом,
@@ -1336,6 +1435,101 @@ npm run lint           # ESLint, 0 попереджень
   поза блокуванням, що сам може загубитися. Прибирати такі рядки окремим проходом обслуговування:
   стан був би неправдивим до наступного проходу, а `fail()` уже тримає потрібне блокування.
 
+### 34. `GET /executions/:id` віддавав виконання іншого тенанта
+
+- **Що.** `ExecutionsController.get` не брав тенанта з ключа, а `ExecutionsService.get(id)` шукав
+  виконання лише за `id`. Ключ тенанта B за id виконання тенанта A отримував 200 з усім виконанням:
+  `input`, `output`, текстом помилок і кроками.
+- **Чому небезпечно.** Прямий витік даних між тенантами (ТЗ 3.2, «Ізоляція даних між тенантами»):
+  id виконань потрапляють у логи, webhook-и, повідомлення підтримки; UUID не є секретом доступу.
+- **Як відтворити.** `test/integration/tenant-isolation-api.int-spec.ts` — ключ тенанта B проти
+  кожного ресурсу тенанта A.
+
+  ```text
+  ✕ GET /executions/:id of another tenant is 404 and leaks nothing
+    Expected: 404
+    Received: 200
+  ✓ GET /executions of tenant B does not list executions of A
+  ✓ POST /executions/:id/retry of another tenant is 404 and changes nothing
+  ✓ workflow endpoints of another tenant are 404 and change nothing
+  ```
+
+- **Як виправлено.** `get(tenantId, id)` з предикатом `"tenantId"` для виконання й кроків; чуже
+  виконання — 404, як неіснуюче (без підказки, що id існує). Поверх цього — RLS (проблема 35): навіть
+  забутий предикат більше не відкриває чужих рядків. Обидва шари доводяться окремо: з прибраним
+  предикатом у сервісі HTTP-тест лишається зеленим завдяки RLS, але `tenant-predicates.int-spec.ts`
+  (сервіси на з'єднанні, що обходить RLS) червоніє:
+
+  ```text
+  ✕ executions of A are invisible and cannot be retried by B
+  ✓ GET /executions/:id of another tenant is 404 and leaks nothing
+  ```
+
+- **Альтернативи.** 403 замість 404: підтверджує існування чужого id. Guard, що перевіряє власника
+  ресурсу окремим запитом перед обробником: подвоює запити й легко забувається для нових
+  ендпоінтів; предикат у самому запиті й RLS під ним надійніші.
+
+### 35. Ізоляція тенантів трималася лише на фільтрах у коді: застосунок ходив у БД суперкористувачем
+
+- **Що.** API й воркер підключались ролью `flowforge` — суперкористувачем Postgres. Будь-який
+  запит без `where: { tenantId }` (як у проблемі 34) бачив і міг змінити дані всіх тенантів; у БД не
+  було ні RLS, ні обмежень, що не дали б рядку одного тенанта посилатися на виконання іншого
+  (`jobs.tenantId` могла не збігатися з тенантом виконання, `step_runs` тенанта не мали взагалі).
+- **Чому небезпечно.** ТЗ 3.3.4 вимагає захисту на рівні Postgres. З одним шаром кожна помилка в
+  новому запиті — витік; суперкористувач до того ж обходить будь-які політики, які додали б пізніше.
+- **Як відтворити.** `test/integration/rls.int-spec.ts` — прямий SQL тією самою роллю, що й застосунок
+  (`DATABASE_URL`), на коді до виправлення:
+
+  ```text
+  ✕ a query without tenant context sees no rows of tenants … jobs                 (6 таблиць)
+  ✕ a query with a malformed tenant context sees no rows of tenants … jobs        (6 таблиць)
+  ✕ tenant A sees none of the rows of tenant B in tenants … jobs                  (6 таблиць)
+  ✕ tenant A cannot change or delete rows of tenant B
+  ✕ tenant A cannot create rows in the name of tenant B
+  ✕ no row of one tenant can reference an execution of another, even when written by the owner
+  Tests:       21 failed, 21 total
+  ```
+
+- **Як виправлено.** Міграція `TenantIsolation` і шар `src/tenancy` (рішення — 3.3.4): ролі API й
+  воркера без BYPASSRLS, `FORCE ROW LEVEL SECURITY` і політика за `app.tenant_id` на кожній тенантній
+  таблиці, композитні FK у межах тенанта, вузькі SECURITY DEFINER-функції для крос-тенантних кроків;
+  кожен запит — у транзакції з транзакційно-локальним контекстом (`TenantDb`) і з явним предикатом;
+  процес не стартує з роллю, що обходить RLS. Після виправлення — 50 перевірок `rls.int-spec.ts`
+  зелені, плюс `db-acl`, `db-security-check`, `tenant-context-pool`, `role-operations`.
+- **Альтернативи.** Див. 3.3.4: схема чи БД на тенанта, роль на тенанта, BYPASSRLS для воркера,
+  контекст на рівні сесії.
+
+### 36. Compose відкривав БД суперкористувачем із відомим паролем і давав воркеру `ADMIN_TOKEN`
+
+- **Що.** `docker-compose.yml` задавав пароль суперкористувача `flowforge` прямо у файлі
+  (`POSTGRES_PASSWORD: flowforge`, публічний репозиторій), публікував порт 5432 на всіх інтерфейсах і
+  через спільний `env_file` + `environment` передавав `ADMIN_TOKEN` і URL суперкористувача кожному
+  сервісу, зокрема воркерам, яким вони не потрібні.
+- **Чому небезпечно.** Будь-хто в мережі хоста підключався до БД суперкористувачем з паролем із
+  репозиторію й обходив будь-яку ізоляцію; компрометація воркера (він виконує кроки тенантів)
+  давала адмін-токен і повний доступ до БД.
+- **Як відтворити.** Перевірка job `compose` (`docker inspect` оточення контейнерів) на стеку до
+  виправлення — значення приховано:
+
+  ```text
+  == flowforge-starter-worker-1
+  ADMIN_TOKEN=…
+  DATABASE_URL=postgres://flowforge:***@postgres:5432/flowforge
+  == flowforge-starter-api-1
+  DATABASE_URL=postgres://flowforge:***@postgres:5432/flowforge
+  postgres ports: {"5432/tcp":[{"HostIp":"","HostPort":"5432"}]}
+  flowforge | rolsuper = t
+  ```
+
+- **Як виправлено.** Секрети лише з кореневого `.env`, кожному сервісу — тільки його (таблиця в
+  «Запуск»); `POSTGRES_PASSWORD` обов'язковий, порт БД — `127.0.0.1:5432`; API й воркер — своїми
+  ролями; `ADMIN_TOKEN` обов'язковий лише для API (воркер його не отримує й без нього стартує);
+  облікові дані власника в оточенні runtime-процесу — помилка валідації. CI перевіряє розподіл
+  секретів і атрибути ролей (job `compose`).
+- **Альтернативи.** Docker secrets (файли): потребують зміни способу читання конфігурації в обох
+  процесах і не дають більшого захисту, ніж окремий `environment` кожного сервісу в compose;
+  лишити порт закритим зовсім: локальний запуск і тести поза docker перестали б працювати.
+
 ### Додаткові регресії PR2
 
 Відтворення в `apps/api` через `npm test -- --runInBand` та `npm run test:integration`. Інтеграційні перевірки використовують окрему БД PostgreSQL.
@@ -1455,6 +1649,15 @@ whose worker died…»): вони нічого не перевіряли, але
 | `test/integration/worker-crash.int-spec.ts`, `test/integration/execution-atomicity.int-spec.ts` | додано SIGKILL під час фіналізації та ліміт однієї спроби | відрізняє відновлення за checkpoint від випадкового успіху за рахунок додаткової спроби |
 | `test/integration/migration-data.int-spec.ts` › JobFinishedAt | тестова задача в черзі має виконання у стані `pending` зі знімком | окремо перевіряє відсутність часу завершення для активної задачі після всіх міграцій. Задачу вже успішного виконання тепер закриває RecoverCheckpoints |
 | `test/integration/worker-metrics.int-spec.ts` | додано паузи 0 і 150 мс та перевірки count і sum | виявляє пропущені, подвійні та передчасні спостереження тривалості паузи |
+| `test/helpers/global-setup.ts`, `integration-env.ts`, `test-env.ts`, `app.ts`; `worker-crash.int-spec.ts` | застосунок у тестах ходить у БД runtime-ролями (`flowforge_api_test`, `flowforge_worker_test`, створює global setup), воркер — своєю роллю через провайдер `RUNTIME_DATABASE_URL`; окремий процес воркера отримує URL ролі воркера | застосунок більше не працює суперкористувачем (проблема 35); тести перевіряють систему з тими самими правами, що й у compose. Підготовка й перевірка даних — як і раніше, з'єднанням власника |
+| `test/unit/background-error-*.spec.ts`, `claim-backoff.spec.ts`, `version-snapshot.spec.ts`, `worker-maintenance.spec.ts` | замість заглушок репозиторіїв — `fakeTenantDb` (`test/helpers/fake-tenant-db.ts`), планувальник отримує `SystemDb` зі сторінками workflow | сервіси читають БД лише через `TenantDb`/`SystemDb`; заглушки підставляють ті самі дані, перевірки (лог з кореляційним ID без секретів, неповторюваний провал без знімку, відступ захоплення, обслуговування) не змінені |
+| `test/integration/migration-data.int-spec.ts` | тести старих міграцій доганяють схему лише до `TenantIsolation` (`migrateBefore`); тест reaper-а, що проходить усі міграції, створює справжнього тенанта; `afterAll` очищає таблиці до повного застосування міграцій | дані старих форматів у цих тестах — без тенантів і з довільними посиланнями, яких `TenantIsolation` (свідомо) не приймає; їхні власні перевірки ті самі. Поведінку `TenantIsolation` на таких даних перевіряють нові тести там само |
+| `test/integration/timestamps.int-spec.ts`, `query-plans.int-spec.ts`, `queue-recovery.int-spec.ts`, `job-retention.int-spec.ts`, `execution-retention.int-spec.ts` | рядки створюються з наявними тенантом і виконанням того самого тенанта; `step_runs` — з `tenantId`; у `job-retention` очікувана кількість виконань — `6 + OLD_BULK` (масові задачі тепер мають свої виконання) | композитні FK і `step_runs.tenantId` (проблема 35) не допускають рядків, що посилаються на неіснуюче або чуже; перевірки (моменти часу, плани запитів, повернення 250 задач, очищення) ті самі |
+| `test/integration/query-plans.int-spec.ts` › expired leases | `EXPIRED_LEASES_SQL` отримує параметр тенанта | reaper обробляє прострочені задачі по тенанту, під RLS; індекс той самий |
+| `test/integration/retry-after.int-spec.ts`, `execution-atomicity.int-spec.ts` | тестові тригерні функції — `SECURITY DEFINER` | тригер спрацьовує в транзакції воркера, а роль воркера (свідомо) не має прав на службові таблицю й послідовність тесту; що саме імітує тригер, не змінено |
+| `test/integration/db-timeouts.int-spec.ts` › CLI | адресу недосяжного сервера задано через `MIGRATION_DATABASE_URL` | CLI міграцій тепер підключається власником схеми з цієї змінної; перевірка таймауту та сама |
+| `test/unit/env-example.spec.ts`, `test/unit/admin-token.spec.ts` | `DATABASE_URL` і `ADMIN_TOKEN` у `.env.example` — закоментовані підказки; перевіряється, що решта змінних є, а секретів у спільному файлі немає; підказане `change-me-admin` у production відхиляється | секрети кожен сервіс compose отримує окремо (проблема 36); заявлена поведінка (приклад повний і валідний, приклад-токен не діє в production) та сама |
+| `test/integration/json-depth.int-spec.ts` › «answers an unsigned webhook … with 401 and no details» | `not.toMatch(/JSON\|64\|рівн/)` перевіряє лише поле `message`, а не все тіло | тіло містить випадковий `correlationId`, а UUID містить «64» приблизно в кожному десятому прогоні — тест падав незалежно від поведінки; заявлена перевірка (у відповіді немає пояснення формату) та сама |
 
 ## Архітектурні рішення
 
@@ -1614,7 +1817,93 @@ fencing-токеном (`lockToken`) для володіння задачею. A
 черга перед задачею. Під час паузи виконання має статус `running` (окремого `waiting` немає).
 Межа паузи — 30 діб.
 
-### 3.3.4 Ізоляція тенантів у глибину — буде заповнено
+### 3.3.4 Ізоляція тенантів у глибину
+
+**Два незалежні шари.** (1) Код: кожен запит сервісу має явний предикат `"tenantId"` (виконання,
+кроки, задачі, workflow, версії), а чуже — 404, як неіснуюче. (2) Postgres: RLS з `FORCE` на кожній
+тенантній таблиці під ролями без BYPASSRLS. Шари доводяться окремо: `tenant-predicates.int-spec.ts`
+запускає сервіси на з'єднанні власника, що обходить RLS (прибраний предикат — червоний тест, хоча
+HTTP-тести зелені завдяки RLS, див. проблему 34), а `rls.int-spec.ts` — прямий SQL під runtime-ролями
+в обхід сервісів. Третій рубіж — композитні FK: рядок задачі чи кроку може посилатися лише на
+виконання свого тенанта, виконання — лише на знімок свого тенанта (FK-перевірки Postgres не залежать
+від RLS, тож це тримається навіть для власника схеми).
+
+**Варіанти.** Схема чи окрема БД на тенанта: міграції й пули з'єднань множаться на кількість тенантів,
+черга задач (одна таблиця, спільна для воркерів) розпадається. Лише фільтри в коді (стартовий стан):
+одна помилка в запиті — витік (проблема 34). Окрема роль Postgres на кожного тенанта (`SET ROLE`):
+ролі множаться, а застосунок, що перемикає роль, однаково може перемкнутися на будь-яку. Обрано RLS з
+однією політикою за контекстом `app.tenant_id` (підхід документації Postgres, «Row Security
+Policies») поверх предикатів у коді.
+
+**Ролі.** Міграція створює групові ролі (NOLOGIN, спільні для кластера, `down` їх не видаляє):
+`flowforge_api_role` і `flowforge_worker_role` — без BYPASSRLS, з правами лише на потрібні операції;
+`flowforge_system` — BYPASSRLS, власник SECURITY DEFINER-функцій. Login-ролі `flowforge_api` і
+`flowforge_worker` створює `db:provision` (крок `migrate`) з паролями з `.env`, кожна — член лише своєї
+групи, з правом `CONNECT` лише на свою БД (`PUBLIC` його не має). Окремі ролі API і воркера —
+найменші привілеї: API не може захоплювати задачі чи чистити історію, воркер — читати тенантів,
+workflow чи автентифікувати ключі. Міграції виконує суперкористувач: створення ролі з BYPASSRLS і
+backfill під `FORCE ROW LEVEL SECURITY` (під яким звичайний власник таблиці теж не бачить рядків)
+вимагають саме його.
+
+**Контекст тенанта.** Варіанти: сесійний `SET` під час видачі з'єднання з пулу (лишається на
+з'єднанні після повернення в пул — витік до наступного запиту); interceptor, що відкриває транзакцію
+на весь HTTP-запит (неявно, тримає з'єднання впродовж усього обробника); явна транзакція з
+транзакційно-локальним значенням. Обрано останнє: `TenantDb.run(tenantId, em => …)` — транзакція,
+перший оператор якої `set_config('app.tenant_id', $1, true)` (рівнозначно `SET LOCAL`): значення
+скидається на COMMIT/ROLLBACK, тож з'єднання з пулу контексту не несе (`tenant-context-pool.int-spec.ts`:
+пул на одне з'єднання, після COMMIT, ROLLBACK, помилки й `statement_timeout`). Політика порівнює
+колонку з `app_current_tenant()`: UUID із `current_setting('app.tenant_id', true)` або NULL — без
+контексту, з порожнім (скинутим) чи сміттєвим значенням не видно нічого й немає помилки приведення.
+Транзакція не може змінити тенанта, а невалідний id відхиляється ще до звернення до БД. Правило:
+усередині транзакції немає зовнішнього I/O (кроки виконуються поза транзакціями, PR 2);
+`idle_in_transaction_session_timeout` страхує. ESLint (`no-restricted-imports`) забороняє
+`@nestjs/typeorm` і `DataSource` поза `src/tenancy` і `src/database`, тож новий код не може обійти
+шар випадково (основний захист однаково — fail-closed RLS).
+
+**Крос-тенантні кроки.** Варіанти: BYPASSRLS для ролі воркера (вимикає захист для всього воркера,
+включно з виконанням кроків тенантів); виняток у політиці для службової ролі (умова в кожній політиці,
+легко помилитися); вузькі SECURITY DEFINER-функції. Обрано функції: вони лише знаходять, де є робота,
+і віддають ідентифікатори або кількості, а самі рядки застосунок читає й змінює вже під RLS у
+контексті конкретного тенанта. Власник — `flowforge_system`; `SET search_path = pg_catalog, public,
+pg_temp` (`pg_temp` явно останнім — інакше він шукається першим, документація Postgres «Writing
+SECURITY DEFINER Functions Safely»), усі імена в тілі кваліфіковані; `EXECUTE` — лише потрібній ролі,
+`PUBLIC` — нічого; аргументи обмежені. Підміну імен тимчасовою таблицею перевіряє `rls.int-spec.ts`.
+
+| Функція | Роль | Що віддає |
+|---|---|---|
+| `auth_tenant(api_key_hash)` | API | id тенанта за sha256 ключа (без секретів) |
+| `webhook_tenant(workflow_id)` | API | тенант увімкненого workflow — адресата webhook-а |
+| `scheduled_workflows(after, limit)` | API | `(id, tenantId)` workflow з розкладом, keyset-пагінація (планувальник читає всі сторінки) |
+| `claim_fifo_candidate()` | воркер | `(id, tenantId)` найранішої готової задачі, заблокованої до кінця транзакції захоплення |
+| `expired_lease_tenants(exclude, limit)` | воркер | тенанти з простроченими lease (reaper обробляє кожного під RLS) |
+| `purge_finished_jobs(days, batch)`, `purge_execution_history(days, batch)` | воркер | кількість видалених рядків, що вже підпадають під термін зберігання |
+
+**Операції → права** (таблиці; рядки звужує RLS). Перевіряється в обидва боки: `db-acl.int-spec.ts`
+звіряє каталог прав із цією таблицею точно (зайве право — такий самий провал, як відсутнє), а
+`role-operations.int-spec.ts` виконує кожну операцію справжніми ролями на непорожніх даних.
+
+| Роль | Права | Операції |
+|---|---|---|
+| `flowforge_api_role` | `tenants` S I U; `workflows` S I U D; `workflow_versions` S I; `executions` S I U; `step_runs` S; `jobs` S I U | автентифікація, створення тенанта, CRUD workflow, запуск (run/webhook/cron), `/retry` (`FOR UPDATE` потребує U), читання виконань, перевірка підпису webhook-а |
+| `flowforge_worker_role` | `workflow_versions` S; `executions` S U; `step_runs` S I U; `jobs` S U | захоплення під RLS, heartbeat, `assertLease` (`FOR UPDATE`), чекпоінти, пауза/пробудження, завершення, провал, повернення в чергу, reaper |
+| `flowforge_system` | S I U D на тенантні таблиці | тіла SECURITY DEFINER-функцій |
+
+`TRUNCATE` (обходить RLS), `REFERENCES`, `TRIGGER`, DDL, таблиця `migrations` — нікому з runtime-ролей;
+`CREATE` у схемі `public` відкликано в `PUBLIC`.
+
+**Перевірка на старті.** API і воркер не стартують, якщо їхня роль — суперкористувач, має BYPASSRLS,
+може діяти як роль із такими атрибутами, `flowforge_system` чи власник таблиць; якщо API ходить роллю
+воркера чи навпаки; якщо будь-яка доступна ролі таблиця схеми `public` не має RLS + FORCE + політики
+(нова таблиця, додана без політики, зупинить старт); якщо в оточенні є облікові дані власника
+(`MIGRATION_DATABASE_URL`). Вимкнути перевірку не можна (`db-security-check.int-spec.ts`).
+
+**Межа гарантії.** Контекст тенанта ставить сам runtime-процес після автентифікації: API — за ключем
+або підписом webhook-а, воркер — за `tenantId` захопленої задачі. RLS захищає від помилок коду (забутий
+предикат, неправильний id), а не від скомпрометованого процесу чи SQL-ін'єкції: та сама роль може
+задати будь-яке `app.tenant_id`. Від цього захищає параметризація всіх запитів і найменші права ролі
+(зокрема, API не може захоплювати задачі, а воркер — читати секрети тенантів). Між тенантами навмисно
+віддають дані лише функції з таблиці вище й лише те, що в ній перелічено.
+
 
 ### 3.3.5 Справедливе планування — буде заповнено
 
