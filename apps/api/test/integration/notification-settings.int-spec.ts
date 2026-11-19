@@ -426,6 +426,47 @@ describe('notification settings', () => {
     }
   });
 
+  it('keeps a delivered event and its attempts together while retention runs', async () => {
+    await setup(a);
+    const id = await completed(a);
+    expect(await sender.deliverNext()).toBe(true);
+    await ds.query(
+      `UPDATE outbox_events SET "deliveredAt"=now()-interval '2 days' WHERE id=$1`,
+      [id],
+    );
+    const purge = async () =>
+      (
+        await ds.query<Array<{ n: number }>>(
+          'SELECT purge_delivered_events(1,1) AS n',
+        )
+      )[0].n;
+    const reader = ds.createQueryRunner();
+    await reader.connect();
+    await reader.startTransaction();
+    try {
+      const query = reader.manager.query.bind(reader.manager);
+      let purged: number | undefined;
+      jest
+        .spyOn(reader.manager, 'query')
+        .mockImplementation(async (sql, params) => {
+          if (sql.includes('FROM outbox_attempts')) purged = await purge();
+          return query(sql, params) as Promise<unknown>;
+        });
+      const service = new NotificationsService(fakeTenantDb(reader.manager));
+      const page = await service.eventPage(a.tenant.id, id, 1);
+      expect(page.attempts.map((row) => row.attempt)).toEqual([1]);
+      expect(purged).toBe(0);
+      await reader.commitTransaction();
+      expect(await purge()).toBe(1);
+      expect(
+        (await call(a, 'GET', `/tenants/me/notifications/events/${id}`)).status,
+      ).toBe(404);
+    } finally {
+      if (reader.isTransactionActive) await reader.rollbackTransaction();
+      await reader.release();
+    }
+  });
+
   it('bounds attempt pages and walks the original history across later deliveries', async () => {
     await setup(a);
     const id = await completed(a);
