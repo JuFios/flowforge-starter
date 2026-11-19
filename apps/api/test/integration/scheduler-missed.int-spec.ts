@@ -65,6 +65,23 @@ describe('missed scheduled runs', () => {
     return { id, cursor };
   }
 
+  it('clears all scheduler hints when a schedule is removed', async () => {
+    const { id } = await stalled({}, 1000);
+    await ds.query(
+      `UPDATE workflows SET "scheduleError"='invalid', "scheduleBlockedSince"=now() WHERE id=$1`,
+      [id],
+    );
+    const res = await tenantCall(app, apiKey, 'PATCH', `/workflows/${id}`, {
+      cron: null,
+    });
+    expect(await res.json()).toMatchObject({
+      cron: null,
+      nextFireAt: null,
+      scheduleBlockedSince: null,
+      scheduleError: null,
+    });
+  });
+
   it('rejects invalid cron arity before updating the schedule', async () => {
     const { id } = await stalled({}, 1000);
     const state = () =>

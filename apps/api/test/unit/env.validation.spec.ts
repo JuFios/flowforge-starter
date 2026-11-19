@@ -61,6 +61,21 @@ describe('validateEnv', () => {
     });
   });
 
+  it.each([1, 99, 100, 5000])(
+    'accepts a %i ms step timeout with independent outbox settings',
+    (timeout) => {
+      for (const concurrency of [0, 1]) {
+        expect(
+          validateEnv({
+            ...base,
+            HTTP_STEP_TIMEOUT_MS: timeout,
+            OUTBOX_CONCURRENCY: concurrency,
+          }).HTTP_STEP_TIMEOUT_MS,
+        ).toBe(timeout);
+      }
+    },
+  );
+
   it('rejects a missing DATABASE_URL', () => {
     expect(() => validateEnv({ ADMIN_TOKEN: base.ADMIN_TOKEN })).toThrow(
       /DATABASE_URL/,

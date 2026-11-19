@@ -239,6 +239,22 @@ function reference(
   return [...result].sort((a, b) => a - b);
 }
 
+it('finds the last seasonal second after a dense month with bounded work', () => {
+  const start = new Date('2026-01-01T00:00:00Z');
+  const schedule = CronSchedule.parse('* * * * 1 *', 'UTC', start.getTime());
+  const original = schedule.next.bind(schedule);
+  const lookup = jest.spyOn(schedule, 'next').mockImplementation((at) => {
+    if (lookup.mock.calls.length > 40)
+      throw new Error('too many successor queries');
+    return original(at);
+  });
+  expect(
+    schedule
+      .lastAtOrBefore(new Date('2026-02-15T00:00:00Z'), start)
+      ?.toISOString(),
+  ).toBe('2026-01-31T23:59:59.000Z');
+});
+
 describe('cron schedule against an independent reference around transitions', () => {
   it.each([
     ['30 3 * * *', 'Europe/Kyiv', '2026-03-29T01:00:00Z', [30], [3]],

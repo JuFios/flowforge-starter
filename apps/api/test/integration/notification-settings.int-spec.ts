@@ -317,6 +317,22 @@ describe('notification settings', () => {
     expect(attempt.revision).toBe(2);
   });
 
+  it('closes the unfinished attempt when a tenant cancels a claimed event', async () => {
+    await setup(a);
+    const id = await completed(a);
+    await ds.query("SELECT * FROM claim_outbox_event('lost', 30000, 1)");
+    expect(await status(id)).toBe('sending');
+    expect((await call(a, 'DELETE', '/tenants/me/notifications')).status).toBe(
+      204,
+    );
+    expect(
+      await ds.query(
+        'SELECT outcome, "finishedAt" IS NOT NULL AS finished FROM outbox_attempts WHERE "eventId"=$1',
+        [id],
+      ),
+    ).toEqual([{ outcome: 'cancelled', finished: true }]);
+  });
+
   it('pauses pending events while disabled and cancels them when the settings are deleted', async () => {
     await setup(a);
     await call(a, 'PUT', '/tenants/me/notifications', {
