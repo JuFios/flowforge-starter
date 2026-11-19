@@ -141,6 +141,59 @@ describe('notification delivery', () => {
     expect(await worker.deliverNext()).toBe(false);
   });
 
+  it('reclaims a failed delivery at backoff before the previous lease expires', async () => {
+    const e = await complete();
+    const first = await sender(),
+      second = await sender();
+    let release!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    receiver.respond = async (_req, res) => {
+      await waiting;
+      res.writeHead(503, { 'Retry-After': '1' }).end();
+    };
+    const delivery = first.deliverNext();
+    let oldLease: Date;
+    try {
+      await waitFor('first HTTP attempt', () => receiver.requests.length === 1);
+      expect(await second.deliverNext()).toBe(false);
+      const [row] = await ds.query<Array<{ lease: Date; due: Date }>>(
+        'SELECT "leaseUntil" AS lease, "dueAt" AS due FROM outbox_events JOIN notification_settings USING ("tenantId") WHERE id=$1',
+        [e.id],
+      );
+      expect(row.due).toEqual(row.lease);
+      oldLease = row.lease;
+    } finally {
+      release();
+      await delivery;
+    }
+    expect(await second.deliverNext()).toBe(false);
+    await waitFor(
+      'database backoff deadline',
+      async () =>
+        (
+          await ds.query<Array<{ ready: boolean }>>(
+            'SELECT clock_timestamp() >= "nextAttemptAt" AS ready FROM outbox_events WHERE id=$1',
+            [e.id],
+          )
+        )[0].ready,
+    );
+    receiver.respond = (_req, res) => {
+      res.writeHead(204).end();
+    };
+    expect(await second.deliverNext()).toBe(true);
+    expect(
+      (
+        await ds.query<Array<{ before: boolean }>>(
+          'SELECT clock_timestamp() < $1::timestamptz AS before',
+          [oldLease],
+        )
+      )[0].before,
+    ).toBe(true);
+    expect((await event(e.id)).status).toBe('delivered');
+  });
+
   it('delivers the stored bytes once, signed, with the event id and the correlation id', async () => {
     const e = await complete();
     expect(e.status).toBe('pending');
