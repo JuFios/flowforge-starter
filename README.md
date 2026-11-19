@@ -22,7 +22,7 @@
 11. [Модель гарантій виконання](#модель-гарантій-виконання)
 12. [Потік виконання і межі транзакцій](#потік-виконання-і-межі-транзакцій)
 13. [Індекси і плани запитів](#індекси-і-плани-запитів)
-14. [Chaos- і навантажувальні сценарії](#chaos--і-навантажувальні-сценарії)
+14. [Chaos- і навантажувальні сценарії](#chaos--і-навантажувальні-сценарії) (зокрема справедливе планування)
 15. [Що не встигли або зробили б інакше](#що-не-встигли-або-зробили-б-інакше)
 
 ## Склад
@@ -38,7 +38,9 @@
 ## Запуск
 
 ```bash
-# один раз: випадкові секрети в .env поруч із docker-compose.yml (файл у .gitignore)
+# один раз: випадкові секрети в .env поруч із docker-compose.yml (файл у .gitignore);
+# права 0600 — до запису секретів, тож інші локальні користувачі файл не прочитають
+touch .env && chmod 600 .env
 for v in ADMIN_TOKEN POSTGRES_PASSWORD API_DB_PASSWORD WORKER_DB_PASSWORD; do
   printf '%s=%s\n' "$v" "$(openssl rand -hex 24)"; done > .env
 docker-compose up --build
@@ -76,34 +78,45 @@ CI перевіряє розподіл секретів за сервісами 
 
 ### Локальний запуск поза docker
 
-Потрібні Node.js 20 і Docker (для Postgres) та `.env` у корені з розділу вище. Якщо compose-стек
+Потрібні Node.js 20.12+ (гілка 20) або 21.7+ (21 і новіші), Docker (для Postgres) та `.env` у корені з розділу вище. Діапазон Node.js — `engines` у `apps/api/package.json`: команди нижче й CLI міграцій читають `.env` через `util.parseEnv`, якого немає в 20.0–20.11 і 21.0–21.6. Якщо compose-стек
 уже запущено, звільніть порти: `docker-compose stop api worker frontend`.
 
 ```bash
 # з кореня репозиторію
-set -a; . ./.env; set +a          # секрети з кореневого .env у поточну оболонку
+env -i HOME="$HOME" PATH="$PATH" bash -eu <<'LOCAL_API'
 docker-compose up -d postgres
 cd apps/api
 cp .env.example .env              # несекретні налаштування; секрети — нижче, окремо для процесу
 npm ci
 npm run build
+setting() {
+  node -e 'const {parseEnv}=require("node:util"), {readFileSync}=require("node:fs");
+    process.stdout.write(parseEnv(readFileSync("../../.env","utf8"))[process.argv[1]] ?? "")' "$1"
+}
 # міграції й ролі — власником схеми (лише цим командам, не API й воркеру)
-MIGRATION_DATABASE_URL="postgres://flowforge:$POSTGRES_PASSWORD@localhost:5432/flowforge" \
-  npm run migration:run
-MIGRATION_DATABASE_URL="postgres://flowforge:$POSTGRES_PASSWORD@localhost:5432/flowforge" \
+MIGRATION_DATABASE_URL="postgres://flowforge:$(setting POSTGRES_PASSWORD)@localhost:5432/flowforge" \
+  npm run db:migrate
+MIGRATION_DATABASE_URL="postgres://flowforge:$(setting POSTGRES_PASSWORD)@localhost:5432/flowforge" \
+  API_DB_PASSWORD="$(setting API_DB_PASSWORD)" WORKER_DB_PASSWORD="$(setting WORKER_DB_PASSWORD)" \
+  TENANT_MAX_RUNNING="$(setting TENANT_MAX_RUNNING)" TENANT_MAX_QUEUE_SIZE="$(setting TENANT_MAX_QUEUE_SIZE)" \
+  TENANT_RATE_LIMIT="$(setting TENANT_RATE_LIMIT)" TENANT_RATE_WINDOW_MS="$(setting TENANT_RATE_WINDOW_MS)" \
+  TENANT_WEBHOOK_RATE_LIMIT="$(setting TENANT_WEBHOOK_RATE_LIMIT)" TENANT_WEBHOOK_RATE_WINDOW_MS="$(setting TENANT_WEBHOOK_RATE_WINDOW_MS)" \
   npm run db:provision
 # API на :3000 — своєю роллю
-DATABASE_URL="postgres://flowforge_api:$API_DB_PASSWORD@localhost:5432/flowforge" \
-  ADMIN_TOKEN="$ADMIN_TOKEN" npm run start
+DATABASE_URL="postgres://flowforge_api:$(setting API_DB_PASSWORD)@localhost:5432/flowforge" \
+  ADMIN_TOKEN="$(setting ADMIN_TOKEN)" npm run start
+LOCAL_API
 ```
 
 Метрики API — `curl localhost:3200/metrics` (службовий порт `METRICS_PORT`).
 Воркер — в іншому терміналі, з `apps/api`, своєю роллю (службовий HTTP на `:3100`):
 
 ```bash
-set -a; . ../../.env; set +a
-DATABASE_URL="postgres://flowforge_worker:$WORKER_DB_PASSWORD@localhost:5432/flowforge" \
+env -i HOME="$HOME" PATH="$PATH" bash -eu <<'LOCAL_WORKER'
+worker_password="$(node -p 'require("node:util").parseEnv(require("node:fs").readFileSync("../../.env","utf8")).WORKER_DB_PASSWORD')"
+DATABASE_URL="postgres://flowforge_worker:$worker_password@localhost:5432/flowforge" \
   npm run start:worker
+LOCAL_WORKER
 ```
 
 Застосунок і CLI міграцій читають `apps/api/.env` (якщо файл є); змінні, задані в оточенні
@@ -134,7 +147,9 @@ docker-compose up --build --wait
 паузі `delay` 60 с). Після кроків вище: міграції й ролі застосовані, усі сервіси healthy; кожен
 тенант через API бачить лише свої 5 виконань; усі 18 кроків отримали тенанта свого виконання; історія
 видаленого workflow (6 виконань) збереглась; обидва виконання на паузі після оновлення продовжились і
-завершились (`succeeded` 8, `failed` 2).
+завершились (`succeeded` 8, `failed` 2). Повторено з усіма міграціями цього PR (облік і ліміти
+тенантів): облік обох тенантів після backfill дорівнює їхнім задачам, задачі на паузі захоплено й
+завершено новим справедливим захопленням, `db:provision` записав ліміти за замовчуванням.
 
 Фронтенд — з кореня репозиторію, в іншому терміналі:
 
@@ -148,8 +163,7 @@ npm run dev -- -p 3001
 
 ### Приклади запитів
 
-Створити тенанта (з кореня репозиторію; токен — `ADMIN_TOKEN` із `.env`; при локальному
-запуску поза docker — з `apps/api/.env`, тобто `change-me-admin`):
+Створити тенанта з кореня репозиторію. Для обох способів запуску токен `ADMIN_TOKEN` береться з кореневого `.env`.
 
 ```bash
 ADMIN_TOKEN="$(sed -n 's/^ADMIN_TOKEN=//p' .env)"
@@ -192,11 +206,38 @@ curl -X POST localhost:3000/executions/<executionId>/retry -H "x-api-key: $API_K
 Поки виконання стоїть на паузі (`delay`), воно має статус `running`, а час пробудження видно в
 `steps[i].wakeAt` відповіді `GET /executions/:id`.
 
+Ліміти тенанта (3.3.4): перевизначення — під час створення або пізніше (`null` — значення за
+замовчуванням); відповідь показує перевизначення й ефективні ліміти.
+
+```bash
+curl -X POST localhost:3000/tenants -H "x-admin-token: $ADMIN_TOKEN" -H 'content-type: application/json' \
+  -d '{"name":"acme","limits":{"maxConcurrentExecutions":3,"rateLimit":100}}'
+curl -X PATCH localhost:3000/tenants/<tenantId>/limits -H "x-admin-token: $ADMIN_TOKEN" \
+  -H 'content-type: application/json' -d '{"maxQueueSize":5000,"rateLimit":null}'
+curl localhost:3000/tenants/<tenantId>/limits -H "x-admin-token: $ADMIN_TOKEN"
+```
+
+Кожна відповідь, що пройшла через ліміт частоти, має `X-RateLimit-Limit`, `X-RateLimit-Remaining`
+і `X-RateLimit-Reset` (секунди до кінця вікна). Два різні 429:
+
+```text
+HTTP/1.1 429 Too Many Requests              ← частота запитів
+Retry-After: 37
+X-RateLimit-Limit: 600
+X-RateLimit-Remaining: 0
+{"statusCode":429,"error":"rate_limited","message":"забагато запитів; повторіть через 37 с","correlationId":"…"}
+
+HTTP/1.1 429 Too Many Requests              ← черга тенанта заповнена (без Retry-After)
+X-RateLimit-Remaining: 412
+{"statusCode":429,"error":"queue_full","message":"черга тенанта заповнена: не більше 100000 незавершених задач; повторіть, коли задачі завершаться","correlationId":"…"}
+```
+
 ### Основні ендпоінти
 
 | Метод | Шлях | Опис |
 |---|---|---|
-| POST | `/tenants` | створення тенанта (`x-admin-token`) |
+| POST | `/tenants` | створення тенанта (`x-admin-token`; необов'язково `limits`) |
+| GET/PATCH | `/tenants/:id/limits` | ліміти тенанта: перевизначення й ефективні значення (`x-admin-token`) |
 | POST/GET/PATCH/DELETE | `/workflows[/:id]` | керування workflow |
 | POST | `/workflows/:id/run` | запуск вручну (тіло — input; необов'язковий заголовок `Idempotency-Key`) |
 | GET | `/executions`, `/executions/:id` | виконання та їхні кроки |
@@ -256,6 +297,9 @@ OpenAPI-документація — буде заповнено.
 | `DB_POOL_SIZE` | `10` | найбільше з'єднань із Postgres в одному процесі, 5..1000, не менше за `WORKER_CONCURRENCY + 4` (проблема 25); сума пулів усіх процесів має вміщатися в `max_connections` Postgres (100 за замовчуванням) |
 | `DB_STATEMENT_TIMEOUT_MS` | `30000` | межа одного SQL-запиту (`statement_timeout`) і простою відкритої транзакції (`idle_in_transaction_session_timeout`), 100..600000 мс; на CLI міграцій не діє |
 | `ADMIN_TOKEN` | — (обов'язкова лише для API, ≥ 12 символів, секрет) | токен службових ендпоінтів `/tenants…`; воркер його не отримує й без нього стартує; у `NODE_ENV=production` приклад і очевидні заглушки заборонені (див. нижче); у `.env.example` — закоментована підказка |
+| `ADMIN_RATE_LIMIT` / `ADMIN_RATE_WINDOW_MS` | `30` / `60000` | запитів до `/tenants…` з однієї IP-адреси за вікно (1..10000 / 1000..3600000 мс); рахується кожен запит ще до перевірки токена |
+| `AUTH_FAILURE_RATE_LIMIT` / `AUTH_FAILURE_RATE_WINDOW_MS` | `30` / `60000` | невдалих автентифікацій (невірний `x-api-key`, невірний підпис webhook-а, webhook невідомому чи вимкненому workflow) з однієї IP-адреси за вікно; понад це — 429 замість 401/404, успішні запити не рахуються |
+| `TRUST_PROXY` | `false` | звідки брати IP клієнта для лімітів за IP: `false` — адреса з'єднання; кількість проксі-переходів `1..10` або перелік IP/підмереж проксі через кому — з `X-Forwarded-For` лише від них. `true` не приймається: тоді клієнт сам задавав би свою IP |
 | `LOG_LEVEL` | `info` | рівень логування pino |
 | `WORKER_CONCURRENCY` | `4` | паралельні цикли обробки в одному воркері |
 | `WORKER_HTTP_PORT` | `3100` | службовий HTTP воркера |
@@ -279,6 +323,14 @@ OpenAPI-документація — буде заповнено.
 | `MIGRATION_DATABASE_URL` | — (обов'язкова для `migration:*` і `db:provision`) | власник схеми — **суперкористувач** Postgres: міграції створюють роль із BYPASSRLS і заповнюють таблиці під `FORCE ROW LEVEL SECURITY`, що інакше не бачило б рядків |
 | `API_DB_USER` / `API_DB_PASSWORD` | `flowforge_api` / — | login-роль API; `db:provision` створює її або оновлює пароль (ротація) |
 | `WORKER_DB_USER` / `WORKER_DB_PASSWORD` | `flowforge_worker` / — | login-роль воркера; ім'я має відрізнятися від ролі API |
+| `TENANT_MAX_RUNNING` | `10` | ліміт одночасних задач тенанта за замовчуванням, 1..1000 |
+| `TENANT_MAX_QUEUE_SIZE` | `100000` | ліміт незавершених задач тенанта за замовчуванням, 1..10000000 |
+| `TENANT_RATE_LIMIT` / `TENANT_RATE_WINDOW_MS` | `600` / `60000` | запитів тенанта до API за вікно, 1..1000000 / 1000..3600000 мс |
+| `TENANT_WEBHOOK_RATE_LIMIT` / `TENANT_WEBHOOK_RATE_WINDOW_MS` | `600` / `60000` | webhook-ів тенанта за вікно (окрема квота) |
+
+Значення `TENANT_*` `db:provision` записує в таблицю `limit_defaults` — одне джерело для API і
+воркера (env цих процесів їх не містить, тож розійтися між процесами вони не можуть); у compose —
+з кореневого `.env` (необов'язково, див. `.env.example`). Перевизначення окремого тенанта — адмін-API.
 
 Пароль ролі — лише `[A-Za-z0-9]`, 24..256 символів (потрапляє в URL). `db:provision` передає
 серверу не пароль, а SCRAM-SHA-256 verifier, обчислений на клієнті (як `psql \password`), тож пароль
@@ -310,12 +362,29 @@ glob-шаблонів, тож однаково працює в зібраном�
 Міграції виконує власник схеми — суперкористувач Postgres (`MIGRATION_DATABASE_URL`), а не
 runtime-роль API чи воркера; без суперкористувача `TenantIsolation` зупиняється з поясненням.
 
+`npm run db:migrate` (`src/database/migrate.ts`; крок `migrate` у compose) виконує всі невиконані
+міграції в одній транзакції під advisory-локом і перед COMMIT звіряє каталог з інваріантами безпеки
+(розділ 3.3.4, «Інваріанти безпеки»): порушення відкочує все. Звірка виконується й тоді, коли нових
+міграцій немає. `migration:run` / `migration:revert` / `migration:show` лишаються для розробки (без
+звірки). Нова міграція, що додає таблицю чи функцію в `public`, оновлює також `POSTURE` у
+`src/tenancy/security-posture.ts`.
+
 ```bash
 cd apps/api
 npm run build
-export MIGRATION_DATABASE_URL="postgres://flowforge:$POSTGRES_PASSWORD@localhost:5432/flowforge"
-npm run migration:run       # застосувати
-npm run db:provision        # створити/оновити ролі flowforge_api і flowforge_worker (паролі — з оточення)
+# значення — з кореневого .env, без виконання його оболонкою (як у «Локальний запуск поза docker»)
+setting() {
+  node -e 'const {parseEnv}=require("node:util"), {readFileSync}=require("node:fs");
+    process.stdout.write(parseEnv(readFileSync("../../.env","utf8"))[process.argv[1]] ?? "")' "$1"
+}
+export MIGRATION_DATABASE_URL="postgres://flowforge:$(setting POSTGRES_PASSWORD)@localhost:5432/flowforge"
+npm run db:migrate          # застосувати й звірити інваріанти безпеки (одна транзакція)
+# створити/оновити ролі flowforge_api і flowforge_worker та значення лімітів за замовчуванням
+API_DB_PASSWORD="$(setting API_DB_PASSWORD)" WORKER_DB_PASSWORD="$(setting WORKER_DB_PASSWORD)" \
+  TENANT_MAX_RUNNING="$(setting TENANT_MAX_RUNNING)" TENANT_MAX_QUEUE_SIZE="$(setting TENANT_MAX_QUEUE_SIZE)" \
+  TENANT_RATE_LIMIT="$(setting TENANT_RATE_LIMIT)" TENANT_RATE_WINDOW_MS="$(setting TENANT_RATE_WINDOW_MS)" \
+  TENANT_WEBHOOK_RATE_LIMIT="$(setting TENANT_WEBHOOK_RATE_LIMIT)" TENANT_WEBHOOK_RATE_WINDOW_MS="$(setting TENANT_WEBHOOK_RATE_WINDOW_MS)" \
+  npm run db:provision
 npm run migration:revert    # відкотити останню
 npm run migration:show      # стан
 # нова міграція з різниці між сутностями і БД (потім додати її в migrations/index.ts):
@@ -356,13 +425,22 @@ npm run build && npm run migration:generate -- src/database/migrations/<Name>
 - `TenantIsolation` — ізоляція тенантів у Postgres (3.3.4): групові ролі `flowforge_api_role`,
   `flowforge_worker_role` (без BYPASSRLS) і `flowforge_system` (BYPASSRLS, власник SECURITY
   DEFINER-функцій; усі три NOLOGIN, створюються ідемпотентно й не видаляються `down`, бо спільні для
-  кластера); `step_runs."tenantId"` (заповнюється з виконання); композитні FK `jobs`/`step_runs` →
+  кластера; наявну роль з іншими атрибутами чи з сесіями міграція не змінює, а відмовляє); `step_runs."tenantId"` (заповнюється з виконання); композитні FK `jobs`/`step_runs` →
   `executions (id, "tenantId")` і `executions` → `workflow_versions (id, "tenantId")`, FK
   `"tenantId"` → `tenants`; `FORCE ROW LEVEL SECURITY` і політика `tenant_isolation` на шести
   тенантних таблицях; права ролей (README, «Операції → права»); `REVOKE CREATE ON SCHEMA public`.
   Перед змінами перевіряє цілісність даних (задачі й кроки без виконання, рядки невідомого тенанта,
   посилання між тенантами) і зупиняється з кількістю порушень; історія видаленого workflow і
   завершені виконання без знімку (дозволені раніше) лишаються валідними.
+- `TenantUsage` веде облік черги, зайнятих слотів і ефективних квот тенанта.
+- `TenantLimits` додає спільні лічильники частоти запитів і читання ефективних лімітів.
+- `TenantQuotaConsistency` узгоджує кеш квот із перевизначеннями тенантів та оновлює індекс і функції промоції й очищення.
+- `ScheduledTenants` додає пошук тенантів з увімкненими розкладами та частковий індекс за тенантом і workflow.
+- `ScheduledOccurrences` зберігає час спрацювання cron і забезпечує його унікальність для workflow.
+- `JobUsageTransitions` оновлює облік тенанта за одну зміну рядка при завершенні, повторній постановці або додаванні задачі. При вилученні задачі з черги перерахунок найранішого часу серіалізовано за тенантом.
+- `ClaimBusyReport` (нова ревізія `claim_job`): дозрілий тенант, якого промоція пропустила через `SKIP LOCKED`, дає busy, а не «черга порожня»; рівно вичерпаний бюджет промоції без решти дозрілих одразу переходить до вибору задачі.
+- `RateLimitLockTime` (нова ревізія `rate_limit_hit`): межа вікна ліміту частоти перевіряється за моментом після блокування рядка відра.
+- `RateLimitInsertTime` відкриває вікно після захоплення або створення відра, зокрема після відкату конкурентної вставки.
 - `RecoverCheckpoints` звіряє старі кроки із зафіксованою версією. Якщо неможливо встановити, яке визначення вже мало зовнішній ефект, міграція зберігає історію кроків і завершує виконання з помилкою. Для такого виконання `/retry` повертає 409. Перед новим запуском оператор звіряє збережені результати з отримувачем. Для вже успішного виконання міграція закриває залишену в черзі задачу.
 
 Команди беруть `MIGRATION_DATABASE_URL` і `DB_CONNECT_TIMEOUT_MS` з оточення або з `apps/api/.env`
@@ -387,7 +465,7 @@ docker-compose up --build
 
 Те саме з хоста — після кроків [«Локальний запуск поза docker»](#локальний-запуск-поза-docker)
 до `npm run build` включно (залежності встановлено, `DATABASE_URL` у `apps/api/.env` вказує на
-`localhost`): ті самі `psql`-команди, потім `npm run migration:run` з `apps/api`.
+`localhost`): ті самі `psql`-команди, потім `npm run db:migrate` з `apps/api`.
 
 Перевірено на БД, створеній стартовим кодом (і з даними в його форматі: дублікати `step_runs`,
 задачі в черзі, виконання вже видаленого workflow): після цього застосовуються решта міграцій, від
@@ -399,6 +477,10 @@ docker-compose up --build
 ```bash
 cd apps/api
 npm test                    # unit (без БД)
+# тестова БД — власником; пароль — POSTGRES_PASSWORD із кореневого .env (без нього — flowforge, як у CI)
+pw="$(node -e 'const {parseEnv}=require("node:util"), {existsSync, readFileSync}=require("node:fs");
+  const f="../../.env"; process.stdout.write((existsSync(f) && parseEnv(readFileSync(f,"utf8")).POSTGRES_PASSWORD) || "")')"
+export TEST_DATABASE_URL="postgres://flowforge:${pw:-flowforge}@localhost:5432/flowforge_test"
 npm run test:integration    # integration на реальному Postgres (спершу збирає dist: тест падіння воркера запускає dist/worker.js)
 npm run test:all            # обидва набори
 ```
@@ -409,14 +491,27 @@ npm run test:all            # обидва набори
   `public` і будує її міграціями з нуля** — тож кожен прогін заодно перевіряє міграції.
   Запуск дозволений лише на базі з суфіксом `_test`. Файли виконуються послідовно; кожен тест
   очищає таблиці (`test/helpers/db.ts`). Локально достатньо `docker-compose up -d postgres` і
-  адреси тестової БД власником (суперкористувачем) з паролем із кореневого `.env`:
-  `export TEST_DATABASE_URL="postgres://flowforge:$POSTGRES_PASSWORD@localhost:5432/flowforge_test"`
-  (за замовчуванням — пароль `flowforge`, як у CI).
+  адреси тестової БД власником (суперкористувачем) — `TEST_DATABASE_URL` з блоку вище (пароль
+  береться з кореневого `.env`, тож блок працює й у новому терміналі).
 - **Ролі в тестах — як у compose.** Глобальний setup після міграцій створює runtime-ролі
-  `flowforge_api_test` і `flowforge_worker_test` (`provisionLoginRoles`, окремі від ролей compose
-  імена, бо ролі спільні для кластера Postgres). Застосунок у тестах ходить у БД цими ролями
+  `flowforge_api_test_<суфікс>` і `flowforge_worker_test_<суфікс>` (`provisionLoginRoles`, окремі від
+  ролей compose імена, бо ролі спільні для кластера Postgres) з **випадковими на кожен прогін паролями**
+  (передаються тестовим процесам через оточення), а global teardown видаляє ці ролі. На спільному
+  кластері після тестів не лишається логінів із паролем із репозиторію, яким можна було б
+  підключитися до інших БД, де `CONNECT` для `PUBLIC` відкритий за замовчуванням. Перервався прогін —
+  лишаються ролі з невідомим паролем; наступний прогін змінить його. Тестові тригерні функції
+  створюються без `EXECUTE` для `PUBLIC`, як і службові: інакше перевірка на старті не пустила б процес. Застосунок у тестах ходить у БД цими ролями
   (`test/helpers/integration-env.ts`; воркер — своєю, через провайдер `RUNTIME_DATABASE_URL`), а
   підготовка й перевірка даних — з'єднанням власника (`openTestDataSource`), яке обходить RLS.
+- **Кластерні імена — з суфіксом прогону.** Усе, що тести створюють на рівні кластера (login-ролі,
+  допоміжні ролі сценаріїв, тимчасові БД), отримує ім'я з `clusterScopedName(base)`
+  (`test/helpers/test-env.ts`): суфікс — 8 символів sha256 від імені тестової БД. Два прогони з
+  різними `TEST_DATABASE_URL` на одному кластері не змінюють паролів і не видаляють ролей одне
+  одного, а прогін, що впав, лишає ролі з тим самим ім'ям, яке знайде наступний teardown. Групові
+  ролі (`flowforge_api_role`, `flowforge_worker_role`, `flowforge_system`) спільні за задумом
+  (3.3.4), тож сценарії, що на мить додають до них стороннього члена, видно й сусідньому прогону: на
+  цей час його перевірки на старті й `db:migrate` відмовляють. Для повністю незалежних прогонів
+  потрібні окремі кластери.
 - `test/helpers` — підготовка БД, створення тенантів/workflow, запуск справжнього
   Nest-застосунку на випадковому порту (`startApp`), воркера з циклами обробки (`startWorker`) і
   зовнішнього отримувача http-кроків (`Receiver`). Інтервали черги в інтеграційних тестах короткі
@@ -437,6 +532,16 @@ npm run test:all            # обидва набори
   `role-operations` (кожна операція справжніми ролями), `db-security-check` (відмова старту з
   небезпечною роллю), `tenant-context-pool` (контекст не переживає транзакцію в пулі), `provision`
   (ролі, SCRAM verifier, ротація пароля), `migration-data` (backfill і зупинка на порушеннях цілісності).
+- Ліміти й справедливість (3.3.4–3.3.5): `tenant-limits` і `tenant-queue-limit` (ліміт черги для
+  run, webhook, cron і `/retry`; ключ ідемпотентності під блокуванням), `rate-limit` (квота тенанта
+  між маршрутами й інстансами API, окрема квота webhook-ів, вікно, недоступний лічильник),
+  `rate-limit-ip` (адмін-ендпоінти, невдалі автентифікації, `TRUST_PROXY`), `tenant-limits-admin`
+  (адмін-API, межі, значення з db:provision), `tenant-concurrency` (жорсткий ліміт одночасних
+  задач), `fair-claim` (порядок обслуговування й межа за журналом захоплень), `claim-contention`
+  (зайняті кандидати, самовідновлення обліку), `queue-consistency` (облік точно дорівнює задачам під
+  змішаним навантаженням, без deadlock-ів), `queue-depth-metric`.
+- Бенчмарк захоплення: `npm run bench:claim` (`test/bench`, окрема конфігурація Jest; відносні
+  критерії й результати — «Chaos- і навантажувальні сценарії»).
 - Перевірки часу в сценаріях черги спираються на факти з БД (`wakeAt`, `runAt`, `lockToken`,
   `attempts`) за годинником БД, а не на час процесу тесту.
 - Стабільність (18.11.2026, локально): увесь інтеграційний набір — 10 прогонів поспіль на
@@ -449,9 +554,9 @@ CI (`.github/workflows/ci.yml`):
 | Job | Що перевіряє |
 |---|---|
 | `api` | format:check, lint, typecheck, unit, build |
-| `integration` | інтеграційні тести з `services: postgres` |
+| `integration` | інтеграційні тести з `services: postgres`, потім бенчмарк захоплення (`npm run bench:claim`: відносно FIFO на тому самому раннері) |
 | `frontend` | format:check, lint, build |
-| `compose` | `docker compose up --wait` з нуля: міграції, healthy API, рівно два healthy воркери і фронтенд, кожен сервіс отримує лише свої секрети (`docker inspect`), runtime-ролі без суперкористувача й BYPASSRLS, запуск workflow наскрізь (виконання `succeeded` зі збереженим `correlationId`); потім chaos-сценарії (`npm run chaos`: SIGKILL воркерів під навантаженням; `npm run chaos:postgres`: перезапуск Postgres під навантаженням) |
+| `compose` | `docker compose up --wait` з нуля: міграції, healthy API, рівно два healthy воркери і фронтенд, кожен сервіс отримує лише свої секрети (`docker inspect`), runtime-ролі без суперкористувача й BYPASSRLS, запуск workflow наскрізь (виконання `succeeded` зі збереженим `correlationId`); потім chaos-сценарії (`npm run chaos`: SIGKILL воркерів під навантаженням; `npm run chaos:postgres`: перезапуск Postgres під навантаженням) і навантажувальний сценарій справедливого планування (`npm run load:fairness`, з критеріями) |
 
 Усі job-и мають `timeout-minutes`; у `compose` очікування готовності обмежене `--wait-timeout 180`,
 а кожен `curl` — `--max-time`, тож сервіс, що прийняв з'єднання й мовчить, валить job за таймаутом,
@@ -503,12 +608,23 @@ npm run lint           # ESLint, 0 попереджень
   | `flowforge_job_claim_failures_total` | counter | невдалі спроби захоплення (БД недоступна); лог при цьому стримує backoff |
   | `flowforge_jobs_purged_total` | counter | завершені задачі, видалені після `JOB_RETENTION_DAYS` |
   | `flowforge_executions_purged_total` | counter | виконання (з кроками й задачами), видалені після `EXECUTION_RETENTION_DAYS` |
+  | `flowforge_job_claim_duration_seconds` | histogram | тривалість одного захоплення (промоція, вибір тенанта й задачі) за годинником воркера |
+  | `flowforge_claim_usage_repairs_total` | counter | рядки обліку тенантів, перераховані захопленням, бо розійшлись із задачами (за інваріантами — 0; інше значення — привід розбиратися) |
+  | `flowforge_queue_depth{tenant_id,state}` | gauge | задачі тенанта в черзі (`queued`, включно з паузами) і в роботі (`running`) — серія для кожного тенанта з незавершеними задачами |
+  | `flowforge_queue_depth_collect_errors_total` | counter | невдалі читання глибини черги: +1 на читання з БД, а не на кожен скрейп, що на нього чекав (тоді серій глибини немає, а не застарілі). Читання обмежене меншим із 2 с і `DB_STATEMENT_TIMEOUT_MS` |
 
   API: `flowforge_executions_retried_total` — виконання, поставлені на повтор через
-  `POST /executions/:id/retry`.
+  `POST /executions/:id/retry`; `flowforge_rate_limited_total{throttler}` — запити, відхилені 429
+  лімітом частоти (`tenant`, `webhook`, `admin`, `auth-failures`);
+  `flowforge_enqueue_rejected_total{reason,trigger}` — виконання, не створені через повну чергу
+  тенанта (`reason="queue_full"`, `trigger` — `api`, `webhook`, `cron`, `retry`).
 
-  Мітки — лише з фіксованого набору значень (без ID тенантів і задач). Глибина черги за тенантом —
-  буде заповнено (справедливе планування). Метрики віддаються лише на службових портах, які docker-compose не публікує:
+  **Глибина черги за тенантом** — з обліку `tenant_usage` (без сканування `jobs`), знімок кешується
+  на 5 с, читання обмежене 2 с. Мітка `tenant_id` — єдина мітка з ідентифікатором: кардинальність
+  дорівнює кількості тенантів із незавершеними задачами, тенант, що спорожнів, зникає на наступному
+  зборі. Значення глобальні — кожна репліка воркера віддає однакові, тож агрегувати так:
+  `max by (tenant_id, state) (flowforge_queue_depth)`. Решта міток — лише з фіксованого набору
+  значень. Метрики віддаються лише на службових портах, які docker-compose не публікує:
   в API — окремий HTTP-сервер на `METRICS_PORT` (`src/observability/metrics-server.ts`, лише
   `GET /metrics`, решта — 404), у воркері — `WORKER_HTTP_PORT`. На публічному порту API (`PORT`)
   `/metrics` дає 404. Збирач метрик звертається з внутрішньої мережі: `api:3200`, `worker:3100`
@@ -1027,7 +1143,7 @@ npm run lint           # ESLint, 0 попереджень
   після звірки підпису, `POST /workflows/:id/run` і далі використовує `RunInputPipe` (там guard
   автентифікує раніше за пайпи).
 - **Альтернативи.** Guard для webhook-а з перевіркою підпису: правильне місце, але підпис зараз
-  рахується над повторно серіалізованим тілом, і його переробка на сирі байти — PR 4 (беклог);
+  рахується над повторно серіалізованим тілом, і його переробка на сирі байти запланована на PR 4;
   тоді перевірка й переїде в guard.
 
 ### 19. `GET`/`HEAD` з тілом і запити, які fetch відмовляється надсилати, повторювались як мережеві збої
@@ -1082,7 +1198,7 @@ npm run lint           # ESLint, 0 попереджень
   substitution`, без звернення до мережі.
 - **Альтернативи.** Кодувати підставлені значення (`encodeURIComponent`): змінило б семантику
   наявних шаблонів (тенант може свідомо підставляти шлях із `/`). Рішення щодо екранування
-  шаблонів — у PR 4 (безпека шаблонізатора, беклог).
+  шаблонів — у PR 4 (безпека шаблонізатора).
 
 ### 21. Результат кроку з U+0000 або одиночним сурогатом валив чекпоінт
 
@@ -1530,6 +1646,101 @@ npm run lint           # ESLint, 0 попереджень
   процесах і не дають більшого захисту, ніж окремий `environment` кожного сервісу в compose;
   лишити порт закритим зовсім: локальний запуск і тести поза docker перестали б працювати.
 
+### 37. Тенант із глибокою чергою відсував усіх інших (захоплення FIFO)
+
+- **Що.** Захоплення брало найранішу готову задачу серед усіх тенантів (`ORDER BY "runAt"`). Тенант,
+  що поставив у чергу тисячі задач, займав усі слоти воркерів, доки не вичерпається його черга, а
+  задачі інших тенантів, поставлені пізніше, чекали на весь його backlog.
+- **Чому небезпечно.** ТЗ 3.3.5: один тенант не повинен суттєво збільшувати затримку задач інших.
+  Затримка тихого тенанта росла пропорційно чужій черзі — хвилини й години замість секунд.
+- **Як відтворити.** `test/integration/fair-claim.int-spec.ts` на коді до виправлення:
+
+  ```text
+  ✕ alternates a lone ready tenant with a tenant holding 2000 older jobs, one slot, real completions
+    - Expected  - 5
+    + Received  + 5          (усі 10 захоплень — тенант A)
+  ✕ claims each of 50 ready tenants once before any of them twice, one slot
+    Expected: 50
+    Received: 14
+  ✕ lets tenant B finish while most of the backlog of tenant A still waits (several workers)
+    Expected: > 2700
+    Received:   0            (B завершився лише після всіх 3000 задач A)
+  ```
+
+- **Як виправлено.** Облік на тенанта (`tenant_usage`, тригери) і справедливе захоплення: тенант із
+  найменшою кількістю задач у роботі, серед рівних — найдавніше обслужений, одним оператором
+  `FOR UPDATE SKIP LOCKED` (рішення й гарантія — 3.3.5). Вимірювання — «Навантажувальний сценарій
+  справедливого планування».
+- **Альтернативи.** Див. 3.3.5: черга з пріоритетом за віком, глобальна серіалізація рішень,
+  WFQ/DRR, очікування рядка кандидата.
+
+### 38. Тенант не мав жодних лімітів: черга, частота запитів і задачі в роботі — без меж
+
+- **Що.** Будь-який тенант міг ставити необмежено виконань (через API, webhook чи cron), робити
+  необмежено запитів і займати всі слоти воркерів; невдалі спроби ключа чи адмін-токена теж ніщо не
+  обмежувало.
+- **Чому небезпечно.** ТЗ 3.3.4 вимагає лімітів одночасних виконань, розміру черги й частоти
+  запитів; без них один тенант (навмисно чи помилкою інтеграції) вичерпує БД і воркери всіх.
+- **Як відтворити.** `test/integration/tenant-limits.int-spec.ts` на коді до виправлення:
+
+  ```text
+  ✕ rejects a run beyond the queue size of the tenant with 429 queue_full and creates nothing
+    Expected: 429
+    Received: 201
+  ✕ rejects requests beyond the request rate of the tenant with 429 rate_limited and Retry-After
+    Expected: 429
+    Received: 200
+  ```
+
+- **Як виправлено.** Ліміт одночасних задач — у захопленні (жорсткий, під блокуванням рядка обліку);
+  ліміт черги — під час кожної постановки атомарно з нею (429 `queue_full`, нічого не створюється,
+  cron пропускає спрацювання); частота — `@nestjs/throttler` зі сховищем у Postgres (429
+  `rate_limited`, заголовки `X-RateLimit-*`), окремо для API тенанта, його webhook-ів, адмін-ендпоінтів
+  і невдалих автентифікацій за IP. Значення за замовчуванням — `TENANT_*` (db:provision), перевизначення —
+  адмін-API (3.3.4, «Ліміти тенанта»).
+- **Альтернативи.** Див. 3.3.4: лічильник у пам'яті процесу (не працює між інстансами API), Redis
+  (заборонений), окремий env кожного процесу (ліміти розходились би), `count(*)` на кожну постановку.
+
+### Регресії ізоляції, квот і справедливості
+
+Запуск з `apps/api` — `npm test -- --runInBand` для локального запуску, конфігурації та оцінки вимірювань. Решту сценаріїв виконує `npm run test:integration` на окремій PostgreSQL 16 з іменем БД, що закінчується на `_test`.
+
+| Дефект і наслідок до виправлення | Як відтворити | Виправлення і розглянута альтернатива |
+|---|---|---|
+| Команди локального запуску, включно з `npm ci`, успадковували чотири секрети. Облікові дані власника БД потрапляли навіть до воркера | `local-start.spec.ts` запускає команди README з чотирма різними маркерами та перевіряє оточення кожної команди | Чиста оболонка, розбір кореневого dotenv через Node і явна передача потрібних значень. Список заборонених змінних довелося б оновлювати при кожному новому секреті |
+| Створення тенанта під час зміни типових квот залишало попереднє значення у воркера. У тесті API вже мав ліміт 1, облік мав 1000 | `tenant-limits-admin.int-spec.ts` утримує транзакцію provisioning під час вставки. `migration-data.int-spec.ts` оновлює базу з розбіжністю і власним перевизначенням | Тригер читає рядок типових квот під `FOR SHARE`. Коригувальна міграція перераховує наявний облік. Повторне читання в API не синхронізувало б воркер |
+| GET міг повернути різні версії перевизначень і ефективних квот. Масив вкладених лімітів створював тенанта з типовою квотою | `tenant-limits-admin.int-spec.ts` змінює квоту одразу після читання. HTTP-перевірки надсилають масив або невідоме вкладене поле та очікують 400 | Один SQL-запит для обох частин відповіді. Ключі перевіряються перед перетворенням DTO, форма — через `IsObject`. Підвищення рівня ізоляції усієї транзакції не потрібне для одного читання |
+| Два паралельні входи в одну транзакцію могли обидва змінити контекст. CIDR з нульовим префіксом проходив валідацію, але зупиняв Express | `tenant-context-pool.int-spec.ts` одночасно входить із двома UUID і перевіряє повторне отримання того самого з’єднання. `env.validation.spec.ts` перевіряє IPv4 та IPv6 | UUID резервується до першого очікування БД, входи того самого тенанта чекають спільного результату. Конфіг приймає підтримувані межі префікса. Перевірки тільки у викликачів залишали б решту шляхів незахищеними |
+| Provisioning міг змінити пароль ролі, яка вже мала власність, сторонні членства, права на стовпець або наперед встановлений контекст. Стартова перевірка бачила лише гранти на всю таблицю | `provision.int-spec.ts` перевіряє відмову до першої зміни ролі. `db-security-check.int-spec.ts` перевіряє старт із колонковим грантом на таблицю без RLS | Перевірки ролі, членств у двох напрямках, схемної власності, прав групи й налаштувань сесії. Фактичний доступ до стовпців перевіряється поряд з RLS. Автоматичне відкликання прав у наявної ролі могло б пошкодити інший сервіс |
+| Насичені тенанти витісняли B з пакета промоції. Пошук дозрілих задач і очищення вікон лімітера переглядали індекс далі поточного моменту | `fair-claim.int-spec.ts` ставить перед B три пакети насичених тенантів. `query-plans.int-spec.ts` перевіряє часову межу в `Index Cond` і читання сторінок для 25 000 майбутніх розкладів задач | Вільний слот враховується у предикаті часткового індексу і до `LIMIT`. Пошук використовує час початку оператора, lease — годинник моменту захоплення. Більший пакет лише збільшив би кількість тенантів, потрібну для появи дефекту |
+| Бенчмарк CI зафіксував 49,68% пропускної здатності FIFO при порозі 50%. Успішне завершення виконання вимагало трьох послідовних запитів після встановлення контексту тенанта | `tenant-predicates.int-spec.ts` рахує SQL-оператори та перевіряє відмову з чужим тенантом, виконанням чи токеном. `execution-atomicity.int-spec.ts` обриває останній запис тригером | Один оператор блокує задачу з чинним токеном, записує результат її виконання і завершує задачу. Залежності між CTE зберігають порядок блокувань. `query-plans.int-spec.ts` перевіряє під роллю воркера індексний пошук за ідентифікатором виконання. Бенчмарк окремо порівнює облік задачі й повний шлях завершення виконання |
+| Завершення та повторна постановка задачі двічі шукали рядок обліку тенанта. У CI медіана для черги становила 875 задач/с проти 1755 у FIFO (49,86%) | `fair-claim.int-spec.ts` підраховує звернення до `tenant_usage` через `pg_stat_xact_user_tables`. `queue-consistency.int-spec.ts` звіряє облік з фактичними задачами під конкурентним навантаженням і відкатами | Для переходів у чергу та звільнення слота достатньо одного атомарного UPDATE. При вилученні найранішої задачі функція спочатку бере блокування, потім шукає новий мінімум на свіжому знімку |
+| Помилка читання чекпоінтів утримувала слот до спливу lease | `durable-execution.int-spec.ts` перериває читання й перевіряє стан задачі одразу після спроби | Початкове читання виконання, знімка і чекпоінтів входить до штатного обробника повторів із перевіркою lease. Reaper повертає задачу, якщо сама БД недоступна для запису |
+| Перед першим спрацюванням B планувальник читав усі розклади. Поділ обходу на сторінки виявив повтор уже записаного спрацювання при помилці наступної сторінки | `scheduled-fairness.int-spec.ts` ставить B після 1200 розкладів A. Другий сценарій перериває пізнішу сторінку та повторює той самий тік | Keyset за тенантами, порції до 16 workflow під RLS та чергування тенантів. Час спрацювання фіксується разом з execution і job. Глобальне завантаження всіх workflow витрачає пам’ять і відкладає першу постановку |
+| Навантажувальний сценарій міг пройти без прогонів, із неповною контрольною фазою або після скидання метрик. Помилка вимірювання лишала backlog | `load-fairness.spec.ts` перевіряє параметри, незавершену фазу, обидва дедлайни, прогрес A, зміну воркера, скидання лічильників, завелику відповідь і збій збору метрик | Від 1 до 30 прогонів, успішні 30/30 в обох фазах, окремий лічильник прогресу A за час вимірювання B. Гістограми порівнюються для того самого процесу кожного воркера. Очищення за ID тестового тенанта має дедлайн. p95 лише за успішними виконаннями приховував би втрати |
+| Міграція давала BYPASSRLS наявній `flowforge_system`, не перевіривши, хто нею діє. Сторонній член групи процесу, адміністратор групи чи вкладена група читали б будь-якого тенанта. На PG<16 міграція не зупинялась | `migration-data.int-spec.ts`: член `flowforge_system`, адміністратор API-групи, група у worker-групі, view з власником `flowforge_system` → міграція відмовляє й нічого не змінює. `provision.int-spec.ts`, `db-security-check.int-spec.ts`: ті самі члени зупиняють provisioning і старт. `tenant-isolation-migration.spec.ts`: PG 15 → відмова до будь-якої ролі | Інваріанти членства перевіряються в міграції, `db:provision` і на старті. Маркер-коментар ролі підробний, а відмова за наявністю ролі ламає спільний кластер |
+| Власник БД зі startup-опцією `role=flowforge_api` проходив стартову перевірку як runtime-роль | `db-security-check.int-spec.ts` підключається власником з `options=-c role=…` | Порівняння `current_user` із `session_user` і роллю автентифікації backend-а. Перевірка атрибутів обох ролей окремо складніша, а розбіжна сесія для runtime-процесу не буває легітимною |
+| `db:provision` змінював пароль чужого логіна без членств і давав йому права застосунку | `provision.int-spec.ts`: наявний логін без членства → відмова, verifier пароля й членства без змін | Свій логін — лише член своєї групи. Ніколи не змінювати наявний логін — зламало б ротацію пароля |
+| Тік планувальника давав тенанту 16 workflow з усіма їхніми спрацюваннями: 16 секундних розкладів A — 192 постановки перед першою B, вимкнений розклад спрацьовував до кінця тіку | `scheduled-fairness.int-spec.ts` з успішними постановками: B не пізніше 16-ї спроби, кожне (workflow, момент) рівно один раз і за зростанням через дві сторінки; розклад, вимкнений посеред тіку, спиняється на межі раунду (16 спроб) | Бюджет 16 спроб на тенанта за раунд із курсором (workflow, останній момент). Ітератори в пам'яті чи глобальне впорядкування — пам'ять без межі |
+| Очищення backlog навантажувального сценарію падало на FK `step_runs`, якщо задача A чекала на повтор: відкочувалась уся пачка, backlog лишався | `load-fairness-cleanup.int-spec.ts`: задачі A з кроками в черзі на повтор, сусідній тенант | Кроки видаляються в тому самому операторі (FK `NO ACTION` перевіряється наприкінці оператора). `ON DELETE CASCADE` змінив би продуктову схему заради скрипта |
+| Читання глибини черги ставило `statement_timeout` 2 с навіть за `DB_STATEMENT_TIMEOUT_MS=100`, тож клієнтський `query_timeout` спрацьовував раніше за сервер | `queue-depth-timeout.int-spec.ts`: заглушка функції спить довше за межу за 100 мс, типового таймауту й сесії без таймауту → 57014 вчасно | Менше з 2 с і `statement_timeout` сесії на боці БД (враховує будь-яке джерело таймауту). Інжект конфігурації знав би лише env |
+| Одне невдале читання глибини черги рахувалося кожним одночасним скрейпом | `queue-depth-metrics.spec.ts`: два одночасні скрейпи, одне читання → +1; два послідовні → +2 | Лічильник — у спільній операції читання. Кешування невдачі приховувало б відновлення |
+| Команди «Міграції БД» і тестова адреса БД у README брали паролі з оточення оболонки: у новому терміналі — порожній пароль | `readme-commands.spec.ts` виконує блоки README в чистому оточенні з маркерами в кореневому `.env` | Читання через `parseEnv`, як у локальному запуску; `source .env` виконав би файл як скрипт |
+| Тригер обліку шукав новий `nextRunAt` через `min()`. Коли статистика не бачила свіжого backlog-у тенанта, план агрегував усю його чергу: одне захоплення з черги в 20 000 задач читало 20 001 рядок | `tenant-usage-next-run.int-spec.ts`: статистика лише іншого тенанта, autovacuum вимкнено, 20 000 задач, нове з'єднання, одне `claim_job` → кількість прочитаних рядків `jobs` і правильний `nextRunAt` | `ORDER BY "runAt" LIMIT 1` в обох версіях функції. `plan_cache_mode = force_custom_plan` не допоміг би: хибна оцінка походить зі статистики, а не з generic-плану |
+| Воркер кидав задачу з чинним lease, і reaper повторював її HTTP-крок: наступне продовження стартувало через третину lease після відповіді попереднього, а дедлайн рахувався від його старту. Відколи продовження — транзакція з контекстом тенанта, на повільнішому CI дві відповіді поспіль перевищували запас (`connection-pool.int-spec.ts`: 67 викликів замість 64) | `lease-keeper.spec.ts`: кожне продовження триває чверть lease → задачу не кинуто. Стрес-прогін `connection-pool` з удвічі повільнішим оновленням задач: до виправлення 2 падіння з 4, після — 5 з 5 зелені | Розклад від старту останнього успішного продовження, як уже було для першого. Довший lease чи менший запас лише відсунули б поріг |
+| Webhook невідомому чи вимкненому workflow отримував 404 ще до перевірки підпису й не рахувався жодним лімітом: перебір випадкових UUID без автентифікації й без меж навантажував БД пошуком тенанта | `rate-limit-ip.int-spec.ts`: три webhook-и випадковим UUID → 404 з `X-RateLimit-Remaining`, четвертий → 429 | Такий запит рахується лімітом невдалих автентифікацій за IP, як невірний ключ чи підпис. Окремий ліміт для 404 дублював би той самий захист від перебору |
+| Міграція перевіряла власність `flowforge_system` лише в цій БД, а BYPASSRLS надавала на весь кластер: definer-функція цієї ролі, заздалегідь створена в сусідній БД, після міграції читала рядки поза політикою | `system-role-bypass.int-spec.ts`: сусідня БД із RLS-таблицею (`USING (false)`) і definer-функцією `flowforge_system`; перевірка в транзакції, де роль ще без BYPASSRLS | Поки роль без BYPASSRLS — жодних її об'єктів у кластері (з назвами БД у помилці); з BYPASSRLS надання нічого не змінює. Окрема роль на БД змінила б сталі імена в усіх перевірках і матриці прав |
+| Перевірка на старті й `db:provision` не бачили зайвого `EXECUTE`: API-група з грантом на `claim_job` чи `PUBLIC` з `purge_execution_history` проходили, і API забирав би задачі або видаляв історію всіх тенантів | `db-security-check.int-spec.ts`: гранти групі, `PUBLIC`, тригерній функції і definer-функції в іншій схемі; `provision.int-spec.ts`: provisioning відмовляє без жодної зміни | Ефективні права (`has_function_privilege`, враховує `PUBLIC`) проти переліку функцій кожної групи; поза `public` — жодної доступної definer-функції. Перевірка лише прямих ACL пропустила б `PUBLIC` |
+| Інтеграційні тести лишали на кластері логіни `flowforge_*_test` з паролями з репозиторію: на спільному кластері ними можна було підключитися до інших БД із типовим `CONNECT` для `PUBLIC` | Після прогону `pg_roles` не містить тестових логінів; паролі тестів provisioning — випадкові | Випадкові паролі на прогін (global setup → оточення тестових процесів) і видалення ролей у global teardown. Тимчасовий кластер на прогін потребував би Testcontainers, який план не погоджує |
+| Захоплення просувало одну пачку (32) дозрілих тенантів: B за 64 дозрілими тенантами з задачами в роботі чекав три захоплення, а A без задач у роботі обслуговувався двічі — гарантію 3.3.5 порушено навіть без паралельних захоплень. Пропущена SKIP LOCKED єдина готова задача давала «черга порожня» і повну паузу опитування | `fair-claim.int-spec.ts`: 64 дозрілі тенанти перед B (до виправлення — A двічі), понад бюджет промоції (busy, потім B), заблокований рядок задачі (до — `null`) | Міграція `FairPromotion`: промоція до кінця з бюджетом на оператор і busy, якщо його вичерпано; прапорець пропущеної задачі. Промоція без меж ризикувала б `statement_timeout` і відкатом без прогресу; більша пачка лише збільшила б потрібну кількість тенантів |
+| Команда README створювала `.env` із секретами з правами 0644 (за типового `umask 022`): інші локальні користувачі читали б, зокрема, пароль суперкористувача Postgres | `readme-commands.spec.ts` виконує команду README і її копію з `.env.example` з `umask 022` — для нового файлу й наявного з 0644 | `touch .env && chmod 600 .env` до запису секретів (так само в CI). Лише `umask 077` не виправив би наявний файл |
+| README вимагав «Node.js 20», а команди й CLI міграцій викликають `util.parseEnv`, якого в 20.0–20.11 немає: запуск зупинявся на читанні `.env` | `readme-commands.spec.ts` звіряє діапазон у README з `engines` пакета API | `engines.node` `^20.12.0 \|\| >=21.7.0` і той самий діапазон у README: `util.parseEnv` з'явився в 21.7 і перенесений у 20.12, тож простий мінімум `>=20.12.0` пропускав 21.0–21.6. Власний розбір dotenv дублював би вбудований |
+| Стан каталогу, створений не FlowForge, лишав ізоляцію відкритою після успішної міграції: наявна `flowforge_system` з LOGIN і відкритою сесією отримувала BYPASSRLS; `ALTER DEFAULT PRIVILEGES` творця функцій лишав сторонній ролі `EXECUTE` на `purge_execution_history` після `REVOKE … FROM PUBLIC`; чужа дозвільна політика об'єднувалась із `tenant_isolation` через `OR` | `security-posture.int-spec.ts`: окрема БД на кожен варіант класу — default privileges на функції й таблиці, політика `USING (true)`, грант на стовпець, `EXECUTE` для `PUBLIC`, `CREATE` у `public`, чужа функція з `EXECUTE` для групи воркера, view системної ролі поза `public`, службова роль із LOGIN; одночасні запуски. `db-security-check.int-spec.ts`: той самий дрейф і сесія під службовою роллю зупиняють старт | Клас закрито одним механізмом — інваріантами безпеки (3.3.4): `db:migrate` звіряє каталог перед COMMIT і відкочує все, старт процесів відмовляє. Наявна службова роль із чужими атрибутами чи сесіями відхиляється, а не «лагодиться». Точкові перевірки під кожен сценарій (попередній підхід) щоразу лишали наступний варіант того самого класу |
+| Захоплення бачило «черга порожня», коли дозрілого тенанта промоція пропустила через `SKIP LOCKED` (його рядок обліку тримала коротка транзакція): воркер чекав повний інтервал опитування | `fair-claim.int-spec.ts`: інша транзакція тримає рядок обліку дозрілого не просунутого тенанта → захоплення повертає busy, після звільнення — задачу | Міграція `ClaimBusyReport`: такі тенанти враховуються в ознаці busy. Чекати на рядок (без `SKIP LOCKED`) серіалізувало б паралельні захоплення |
+| Рівно `PROMOTE_BUDGET` (1024) дозрілих тенантів: останній раунд промоції просував останніх кандидатів, але захоплення безумовно повертало busy — зайвий цикл | `fair-claim.int-spec.ts`: рівно 1024 дозрілі тенанти → перше захоплення одразу обирає задачу | Та сама міграція: на останньому раунді busy лише якщо дозрілі ще лишились. Більший бюджет лише зсунув би межу |
+| `rate_limit_hit` брав момент до очікування блокування рядка відра: запит, що чекав довше за залишок вікна, рахувався в старому вікні — 429 з додатним `Retry-After`, хоча нове вікно вже почалося | `rate-limit.int-spec.ts`: інша транзакція тримає рядок відра довше за вікно → після звільнення лічильник 1 і нове вікно | Міграція `RateLimitLockTime`: момент береться у виразах `ON CONFLICT DO UPDATE`, які Postgres обчислює вже під блокуванням (і після очікування конкурентної вставки). `SELECT … FOR UPDATE` перед upsert не покривав би гонку вставок; advisory-лок на ключ — ще один лок і колізії хешів |
+| Сталі кластерні імена тестів (login-ролі `flowforge_*_test`, допоміжні ролі, тимчасові БД): два прогони з різними `TEST_DATABASE_URL` на одному кластері змінювали паролі й видаляли ролі одне одного | `test-env.spec.ts`: різні тестові БД → різні імена; та сама БД → ті самі (teardown знаходить залишки) | `clusterScopedName` з суфіксом від імені тестової БД для всіх кластерних імен тестів. Випадковий суфікс на прогін не дав би прибрати залишки прогону, що впав |
+
 ### Додаткові регресії PR2
 
 Відтворення в `apps/api` через `npm test -- --runInBand` та `npm run test:integration`. Інтеграційні перевірки використовують окрему БД PostgreSQL.
@@ -1624,6 +1835,8 @@ whose worker died…»): вони нічого не перевіряли, але
 
 ## Зміни наявних тестів
 
+Під час виправлення PR №3 `provision.int-spec.ts` перевіряє явну відмову для стороннього членства до зміни пароля. `db-acl.int-spec.ts` включає вузьку функцію пошуку тенантів планувальника. Обидва `background-error-*.spec.ts` підставляють сторінку workflow й операцію постановки cron за новим контрактом, зберігаючи перевірки кореляції та захисту логів. У `query-plans.int-spec.ts` перевірка назви індексу доповнена перевіркою його часової умови. Додані регресійні сценарії та їхні причини наведено в таблиці вище.
+
 | Файл | Зміна | Обґрунтування |
 |---|---|---|
 | `test/definition.spec.ts`, `test/template.spec.ts`, `test/job-queue.spec.ts` | перенесено в `test/unit/`, змінено лише відносні шляхи імпорту | розділення unit / integration на окремі конфігурації Jest; зміст тестів не змінено |
@@ -1649,7 +1862,7 @@ whose worker died…»): вони нічого не перевіряли, але
 | `test/integration/worker-crash.int-spec.ts`, `test/integration/execution-atomicity.int-spec.ts` | додано SIGKILL під час фіналізації та ліміт однієї спроби | відрізняє відновлення за checkpoint від випадкового успіху за рахунок додаткової спроби |
 | `test/integration/migration-data.int-spec.ts` › JobFinishedAt | тестова задача в черзі має виконання у стані `pending` зі знімком | окремо перевіряє відсутність часу завершення для активної задачі після всіх міграцій. Задачу вже успішного виконання тепер закриває RecoverCheckpoints |
 | `test/integration/worker-metrics.int-spec.ts` | додано паузи 0 і 150 мс та перевірки count і sum | виявляє пропущені, подвійні та передчасні спостереження тривалості паузи |
-| `test/helpers/global-setup.ts`, `integration-env.ts`, `test-env.ts`, `app.ts`; `worker-crash.int-spec.ts` | застосунок у тестах ходить у БД runtime-ролями (`flowforge_api_test`, `flowforge_worker_test`, створює global setup), воркер — своєю роллю через провайдер `RUNTIME_DATABASE_URL`; окремий процес воркера отримує URL ролі воркера | застосунок більше не працює суперкористувачем (проблема 35); тести перевіряють систему з тими самими правами, що й у compose. Підготовка й перевірка даних — як і раніше, з'єднанням власника |
+| `test/helpers/global-setup.ts`, `integration-env.ts`, `test-env.ts`, `app.ts`; `worker-crash.int-spec.ts` | застосунок у тестах ходить у БД runtime-ролями (`flowforge_api_test_<суфікс>`, `flowforge_worker_test_<суфікс>`, створює global setup), воркер — своєю роллю через провайдер `RUNTIME_DATABASE_URL`; окремий процес воркера отримує URL ролі воркера | застосунок більше не працює суперкористувачем (проблема 35); тести перевіряють систему з тими самими правами, що й у compose. Підготовка й перевірка даних — як і раніше, з'єднанням власника |
 | `test/unit/background-error-*.spec.ts`, `claim-backoff.spec.ts`, `version-snapshot.spec.ts`, `worker-maintenance.spec.ts` | замість заглушок репозиторіїв — `fakeTenantDb` (`test/helpers/fake-tenant-db.ts`), планувальник отримує `SystemDb` зі сторінками workflow | сервіси читають БД лише через `TenantDb`/`SystemDb`; заглушки підставляють ті самі дані, перевірки (лог з кореляційним ID без секретів, неповторюваний провал без знімку, відступ захоплення, обслуговування) не змінені |
 | `test/integration/migration-data.int-spec.ts` | тести старих міграцій доганяють схему лише до `TenantIsolation` (`migrateBefore`); тест reaper-а, що проходить усі міграції, створює справжнього тенанта; `afterAll` очищає таблиці до повного застосування міграцій | дані старих форматів у цих тестах — без тенантів і з довільними посиланнями, яких `TenantIsolation` (свідомо) не приймає; їхні власні перевірки ті самі. Поведінку `TenantIsolation` на таких даних перевіряють нові тести там само |
 | `test/integration/timestamps.int-spec.ts`, `query-plans.int-spec.ts`, `queue-recovery.int-spec.ts`, `job-retention.int-spec.ts`, `execution-retention.int-spec.ts` | рядки створюються з наявними тенантом і виконанням того самого тенанта; `step_runs` — з `tenantId`; у `job-retention` очікувана кількість виконань — `6 + OLD_BULK` (масові задачі тепер мають свої виконання) | композитні FK і `step_runs.tenantId` (проблема 35) не допускають рядків, що посилаються на неіснуюче або чуже; перевірки (моменти часу, плани запитів, повернення 250 задач, очищення) ті самі |
@@ -1658,6 +1871,16 @@ whose worker died…»): вони нічого не перевіряли, але
 | `test/integration/db-timeouts.int-spec.ts` › CLI | адресу недосяжного сервера задано через `MIGRATION_DATABASE_URL` | CLI міграцій тепер підключається власником схеми з цієї змінної; перевірка таймауту та сама |
 | `test/unit/env-example.spec.ts`, `test/unit/admin-token.spec.ts` | `DATABASE_URL` і `ADMIN_TOKEN` у `.env.example` — закоментовані підказки; перевіряється, що решта змінних є, а секретів у спільному файлі немає; підказане `change-me-admin` у production відхиляється | секрети кожен сервіс compose отримує окремо (проблема 36); заявлена поведінка (приклад повний і валідний, приклад-токен не діє в production) та сама |
 | `test/integration/json-depth.int-spec.ts` › «answers an unsigned webhook … with 401 and no details» | `not.toMatch(/JSON\|64\|рівн/)` перевіряє лише поле `message`, а не все тіло | тіло містить випадковий `correlationId`, а UUID містить «64» приблизно в кожному десятому прогоні — тест падав незалежно від поведінки; заявлена перевірка (у відповіді немає пояснення формату) та сама |
+| `test/integration/queue-claim.int-spec.ts` | цикл захоплення продовжує на `undefined` («кандидатів саме захоплюють інші») і завершується на `null` | `claimNext` розрізняє порожню чергу й зайнятих кандидатів (3.3.5); перевірка (кожну задачу захоплено рівно один раз) та сама |
+| `test/helpers/global-setup.ts` → `test/helpers/test-provision.ts`; `migrations`, `migration-data`, `timestamps` | провіжинінг тестової БД винесено в хелпер і повторюється після тестів, що перезастосовують міграції; ліміт одночасних задач за замовчуванням у тестах — 1000 | міграція `TenantUsage` засіває вбудовані значення лімітів заново; наявні тести черги захоплюють десятки задач одного тенанта без завершення, а тести лімітів задають ліміти тенанта явно |
+| `test/helpers/integration-env.ts`, `test/helpers/db.ts` | `ADMIN_RATE_LIMIT` і `AUTH_FAILURE_RATE_LIMIT` у тестах — 10000; `truncateAll` очищає й `rate_limit_buckets` | усі тести ходять з 127.0.0.1, тож ліміти за IP інакше переходили б між тестами й файлами; тести цих лімітів (`rate-limit-ip.int-spec.ts`) задають свої значення |
+| `test/integration/db-acl.int-spec.ts`, `rls.int-spec.ts` | матриця прав і заборонені операції доповнені новими таблицями й функціями (`tenant_usage`, `limit_defaults`, `rate_limit_buckets`, `claim_job`, `lock_tenant_usage`, `tenant_limits`, `rate_limit_hit`, …); `claim_fifo_candidate` прибрано | захоплення FIFO замінено (проблема 37), нові об'єкти — частина матриці «Операції → права»; принцип перевірки (точна відповідність) той самий |
+| `test/integration/query-plans.int-spec.ts` › захоплення | план запиту задачі тенанта береться з тіла `claim_job` у каталозі й очікує `IDX_jobs_tenant_queue`; додано план вибору тенанта на 2000 тенантах | захоплення тепер — за тенантом (проблема 37); перевірка (потрібний індекс, без `Seq Scan`) та сама |
+| `test/integration/tenant-predicates.int-spec.ts` | `ExecutionsService` отримує `LimitsMetrics` | нова залежність (метрика відхилених постановок); перевірки ті самі |
+| `test/integration/role-operations.int-spec.ts` | очікування захоплення — `Boolean(claimed)` | `claimNext` може повернути `undefined` (зайняті кандидати); перевірка та сама |
+| `test/helpers/test-env.ts`, `global-setup.ts`, `test-provision.ts`, новий `global-teardown.ts`; `provision.int-spec.ts` | паролі тестових ролей — випадкові на прогін, ролі видаляються після прогону | на спільному кластері не лишається логінів із паролем із репозиторію; перевірки ті самі |
+| `execution-retry`, `retry-after`, `connection-pool`, `worker-crash`, `execution-atomicity`, `execution-errors` (`*.int-spec.ts`) | тестові тригерні функції створюються з `REVOKE ALL … FROM PUBLIC` | перевірка на старті тепер відхиляє будь-яке зайве `EXECUTE` групи процесу (зокрема через `PUBLIC`); тригер викликає функцію без права `EXECUTE`, тож поведінка тестів та сама |
+| `test/integration/query-plans.int-spec.ts` › промоція | план береться з вибору пачки (`SELECT … FROM tenant_usage m … SKIP LOCKED`), а не з `UPDATE … SET ready` | промоція тепер — вибір пачки й оновлення за її id (міграція `FairPromotion`); перевірка (`IDX_tenant_usage_maturing` з часовою межею в `Index Cond`, без `Seq Scan`, мало сторінок) та сама |
 
 ## Архітектурні рішення
 
@@ -1716,6 +1939,10 @@ fencing-токеном (`lockToken`) для володіння задачею. A
   LOCKED) RETURNING *` (проблема 6). Кожне захоплення видає новий `lockToken`.
 - **Lease і heartbeat.** `JOB_LEASE_MS` (30 с); `LeaseKeeper` продовжує lease кожну третину.
   Локальний строк дії та перше продовження відраховуються від моменту надсилання SQL захоплення за монотонним годинником.
+  Кожне наступне продовження призначене на третину lease від старту попереднього успішного, а не
+  від його відповіді: запас дедлайну (20% lease) з'їдає затримка одного продовження, а не двох
+  поспіль, тож повільна БД (продовження — транзакція з контекстом тенанта) не змушує воркер кинути
+  задачу з чинним lease.
   Якщо продовження змінило 0 рядків, lease забрали: `AbortSignal` скасовує поточний крок, і
   воркер більше нічого не пише. Тимчасова помилка БД не скасовує роботу одразу: спроби тривають,
   поки за годинником воркера лишається понад 20% lease.
@@ -1772,7 +1999,7 @@ fencing-токеном (`lockToken`) для володіння задачею. A
 Обмеження: опитування (`WORKER_POLL_INTERVAL_MS` з jitter) замість `LISTEN/NOTIFY` дає
 паузу до `1,5 × WORKER_POLL_INTERVAL_MS` у порожній черзі. До фактичної затримки захоплення
 додаються планування циклу й час запиту до БД (`flowforge_job_claim_latency_seconds`). Reaper
-бачить прострочений lease під час наступного проходу. Час відновлення включає роботу БД і backoff. Справедливість між тенантами в запиті захоплення — розділ 3.3.5 (буде заповнено).
+бачить прострочений lease під час наступного проходу. Час відновлення включає роботу БД і backoff. Справедливість між тенантами в запиті захоплення — розділ 3.3.5.
 
 ### 3.3.2 Durable execution
 
@@ -1839,7 +2066,7 @@ Policies») поверх предикатів у коді.
 `flowforge_api_role` і `flowforge_worker_role` — без BYPASSRLS, з правами лише на потрібні операції;
 `flowforge_system` — BYPASSRLS, власник SECURITY DEFINER-функцій. Login-ролі `flowforge_api` і
 `flowforge_worker` створює `db:provision` (крок `migrate`) з паролями з `.env`, кожна — член лише своєї
-групи, з правом `CONNECT` лише на свою БД (`PUBLIC` його не має). Окремі ролі API і воркера —
+групи. Provisioning видає `CONNECT` на цільову БД й відкликає його у `PUBLIC` саме там. Доступ до інших БД кластера визначають їхні власні ACL. Окремі ролі API і воркера —
 найменші привілеї: API не може захоплювати задачі чи чистити історію, воркер — читати тенантів,
 workflow чи автентифікувати ключі. Міграції виконує суперкористувач: створення ролі з BYPASSRLS і
 backfill під `FORCE ROW LEVEL SECURITY` (під яким звичайний власник таблиці теж не бачить рядків)
@@ -1864,7 +2091,8 @@ backfill під `FORCE ROW LEVEL SECURITY` (під яким звичайний �
 включно з виконанням кроків тенантів); виняток у політиці для службової ролі (умова в кожній політиці,
 легко помилитися); вузькі SECURITY DEFINER-функції. Обрано функції: вони лише знаходять, де є робота,
 і віддають ідентифікатори або кількості, а самі рядки застосунок читає й змінює вже під RLS у
-контексті конкретного тенанта. Власник — `flowforge_system`; `SET search_path = pg_catalog, public,
+контексті конкретного тенанта. Два свідомі винятки — операції, крос-тенантні за природою, що
+змінюють рядки самі й лише з явним предикатом: очищення (`purge_*`) і захоплення (`claim_job`, 3.3.5). Власник — `flowforge_system`; `SET search_path = pg_catalog, public,
 pg_temp` (`pg_temp` явно останнім — інакше він шукається першим, документація Postgres «Writing
 SECURITY DEFINER Functions Safely»), усі імена в тілі кваліфіковані; `EXECUTE` — лише потрібній ролі,
 `PUBLIC` — нічого; аргументи обмежені. Підміну імен тимчасовою таблицею перевіряє `rls.int-spec.ts`.
@@ -1873,10 +2101,18 @@ SECURITY DEFINER Functions Safely»), усі імена в тілі кваліф
 |---|---|---|
 | `auth_tenant(api_key_hash)` | API | id тенанта за sha256 ключа (без секретів) |
 | `webhook_tenant(workflow_id)` | API | тенант увімкненого workflow — адресата webhook-а |
-| `scheduled_workflows(after, limit)` | API | `(id, tenantId)` workflow з розкладом, keyset-пагінація (планувальник читає всі сторінки) |
-| `claim_fifo_candidate()` | воркер | `(id, tenantId)` найранішої готової задачі, заблокованої до кінця транзакції захоплення |
+| `scheduled_workflows(after, limit)` | API | ідентифікатори запланованих workflow для сумісності з попередньою версією |
+| `scheduled_tenants(after, limit)` | API | тенанти з увімкненими розкладами. Планувальник читає сторінки їхніх workflow під RLS |
+| `lock_tenant_usage()` | API | блокує рядок обліку тенанта **з контексту** до кінця транзакції й віддає його лічильники й ліміти (постановка; без контексту — помилка) |
+| `tenant_limits()` | API | ефективні ліміти тенанта з контексту (перевизначення або значення за замовчуванням) |
+| `rate_limit_hit(key, window_ms, cost)`, `purge_rate_limits(batch)` | API | лічильник фіксованого вікна ліміту частоти (годинник БД) і кількість видалених відер |
+| `claim_job(worker, lease_ms)` | воркер | одна захоплена задача (рядок задачі змінює сама функція з явним предикатом тенанта, 3.3.5), або ознаки «кандидати зайняті» й «облік перераховано» |
 | `expired_lease_tenants(exclude, limit)` | воркер | тенанти з простроченими lease (reaper обробляє кожного під RLS) |
 | `purge_finished_jobs(days, batch)`, `purge_execution_history(days, batch)` | воркер | кількість видалених рядків, що вже підпадають під термін зберігання |
+| `queue_depth_by_tenant()` | воркер | `(tenantId, queued, running)` тенантів із незавершеними задачами (метрика) |
+
+Тригерні функції обліку (`tenant_usage_on_job`, `…_on_tenant`, `…_on_defaults`) — теж власності
+`flowforge_system` і без `EXECUTE` для будь-кого: їх викликає лише тригер.
 
 **Операції → права** (таблиці; рядки звужує RLS). Перевіряється в обидва боки: `db-acl.int-spec.ts`
 звіряє каталог прав із цією таблицею точно (зайве право — такий самий провал, як відсутнє), а
@@ -1884,9 +2120,12 @@ SECURITY DEFINER Functions Safely»), усі імена в тілі кваліф
 
 | Роль | Права | Операції |
 |---|---|---|
-| `flowforge_api_role` | `tenants` S I U; `workflows` S I U D; `workflow_versions` S I; `executions` S I U; `step_runs` S; `jobs` S I U | автентифікація, створення тенанта, CRUD workflow, запуск (run/webhook/cron), `/retry` (`FOR UPDATE` потребує U), читання виконань, перевірка підпису webhook-а |
-| `flowforge_worker_role` | `workflow_versions` S; `executions` S U; `step_runs` S I U; `jobs` S U | захоплення під RLS, heartbeat, `assertLease` (`FOR UPDATE`), чекпоінти, пауза/пробудження, завершення, провал, повернення в чергу, reaper |
-| `flowforge_system` | S I U D на тенантні таблиці | тіла SECURITY DEFINER-функцій |
+| `flowforge_api_role` | `tenants` S I U; `workflows` S I U D; `workflow_versions` S I; `executions` S I U; `step_runs` S; `jobs` S I U | автентифікація, створення тенанта, ліміти тенанта (адмін-API), CRUD workflow, запуск (run/webhook/cron), `/retry` (`FOR UPDATE` потребує U), читання виконань, перевірка підпису webhook-а |
+| `flowforge_worker_role` | `workflow_versions` S; `executions` S U; `step_runs` S I U; `jobs` S U | heartbeat, `assertLease` (`FOR UPDATE`), чекпоінти, пауза/пробудження, завершення, провал, повернення в чергу, reaper (захоплення — функцією `claim_job`) |
+| `flowforge_system` | S I U D на тенантні таблиці, `tenant_usage`, `limit_defaults`, `rate_limit_buckets` | тіла SECURITY DEFINER-функцій і тригерів обліку |
+
+`tenant_usage` (облік), `limit_defaults` і `rate_limit_buckets` runtime-ролям недоступні зовсім:
+підробити лічильники чи ліміти неможливо, змінюють їх лише тригери й функції.
 
 `TRUNCATE` (обходить RLS), `REFERENCES`, `TRIGGER`, DDL, таблиця `migrations` — нікому з runtime-ролей;
 `CREATE` у схемі `public` відкликано в `PUBLIC`.
@@ -1894,8 +2133,49 @@ SECURITY DEFINER Functions Safely»), усі імена в тілі кваліф
 **Перевірка на старті.** API і воркер не стартують, якщо їхня роль — суперкористувач, має BYPASSRLS,
 може діяти як роль із такими атрибутами, `flowforge_system` чи власник таблиць; якщо API ходить роллю
 воркера чи навпаки; якщо будь-яка доступна ролі таблиця схеми `public` не має RLS + FORCE + політики
-(нова таблиця, додана без політики, зупинить старт); якщо в оточенні є облікові дані власника
-(`MIGRATION_DATABASE_URL`). Вимкнути перевірку не можна (`db-security-check.int-spec.ts`).
+(нова таблиця, додана без політики, зупинить старт); якщо група процесу має право `EXECUTE` на
+функцію схеми `public` поза своїм рядком таблиці функцій вище (прямий грант групі чи `PUBLIC`, напр.
+`claim_job` для API — він забирав би задачі, або тригерна функція обліку) чи на SECURITY DEFINER-функцію
+в будь-якій іншій несистемній схемі, до якої має `USAGE`; якщо в оточенні є облікові дані власника
+(`MIGRATION_DATABASE_URL`). Окрім цього, процес звіряє весь каталог з інваріантами безпеки (нижче, «Інваріанти безпеки»), тож чужий грант будь-якій ролі чи зайва політика теж зупиняють старт. Вимкнути перевірку не можна (`db-security-check.int-spec.ts`).
+Сесія мусить бути автентифікована саме runtime-роллю: `session_user` і роль, з якою увійшов backend
+(`pg_stat_activity`), збігаються з `current_user`. Інакше власник із startup-опцією `role=…` пройшов
+би перевірку як runtime-роль, а `RESET ROLE` повернув би йому права суперкористувача.
+
+**Хто може діяти службовою роллю.** Ролі спільні для кластера, тож перевіряється не лише роль процесу,
+а й чужі члени службових ролей. Член групи процесу сам виставляє будь-який `app.tenant_id`, а член
+`flowforge_system` обходить RLS. Тому:
+
+- у `flowforge_system` членів немає взагалі;
+- член `flowforge_api_role` чи `flowforge_worker_role` — лише login без атрибутів і ADMIN OPTION, що
+  не входить в інші ролі й сам не має членів (такі ролі створює `db:provision`). Права цих логінів в
+  інших БД кластера не враховуються: тести й compose законно живуть на одному кластері.
+
+Перевіряють це три точки: `TenantIsolation` перед тим, як дати `flowforge_system` BYPASSRLS (і ще вимагає,
+щоб `flowforge_system` не володіла жодним об'єктом цієї БД: заздалегідь створений view чи функція з її
+власником читали б усіх тенантів навіть після виходу автора з членства); `db:provision` до будь-якої
+зміни; старт API й воркера (пізніший `GRANT` зупиняє процес). Міграція вимагає PostgreSQL 16+: модель
+спирається на його правила членств (на PG16 творець ролі з CREATEROLE отримує на неї ADMIN OPTION, і
+перевірка це бачить; до PG16 CREATEROLE дозволяв призначити собі будь-яку роль). Варіанти: маркер
+`COMMENT ON ROLE` підробив би той самий, хто заздалегідь створив роль; відмова за самим фактом
+наявності ролі ламала б повторні прогони міграцій на спільному кластері.
+
+**BYPASSRLS діє на весь кластер.** Це атрибут ролі, а не БД, тож перше надання `flowforge_system`
+відкрило б обхід RLS і в інших БД кластера: definer-функція чи view цієї ролі, створені там заздалегідь,
+почали б читати рядки поза політикою. Тому, поки роль ще без BYPASSRLS, міграція вимагає, щоб вона не
+володіла нічим у жодній БД кластера (і спільними об'єктами), і називає БД, де знайдено об'єкти
+(`system-role-bypass.int-spec.ts`: пастка з RLS-таблицею й definer-функцією в сусідній БД). Якщо роль
+уже має BYPASSRLS (її налаштувала міграція іншої БД того самого кластера, напр. тестової поруч із
+compose), надання нічого в кластері не змінює, а об'єкти тієї БД законні. Альтернатива — окрема
+системна роль на кожну БД (`flowforge_system_<db>`): ізоляція повніша, але ім'я ролі перестає бути
+сталою, а від неї залежать міграції, матриця прав, перевірки на старті й compose; перевірка першого
+надання закриває той самий сценарій без цієї ціни.
+
+**Чий логін змінює `db:provision`.** Наявний логін вважається своїм, лише якщо він уже прямий член своєї
+групи: `CREATE ROLE` і `GRANT` виконуються в одній транзакції, тож роль від `db:provision` без членства
+не буває. Логін з тим самим ім'ям, що належить комусь іншому, лишається з паролем і без прав застосунку;
+помилка радить видалити роль або обрати інше ім'я (`API_DB_USER`, `WORKER_DB_USER`). Якщо членство
+зняли вручну, його відновлюють `GRANT flowforge_api_role TO <логін>` (або `flowforge_worker_role`).
 
 **Межа гарантії.** Контекст тенанта ставить сам runtime-процес після автентифікації: API — за ключем
 або підписом webhook-а, воркер — за `tenantId` захопленої задачі. RLS захищає від помилок коду (забутий
@@ -1905,13 +2185,252 @@ SECURITY DEFINER Functions Safely»), усі імена в тілі кваліф
 віддають дані лише функції з таблиці вище й лише те, що в ній перелічено.
 
 
-### 3.3.5 Справедливе планування — буде заповнено
+#### Модель загроз і непідтримуваний стан
+
+**Від кого захищаємо.** Тенант (будь-які запити з власним ключем, визначення workflow, вхід
+виконань, частота й обсяг запитів); відправник webhook-а (будь-хто в інтернеті); ціль кроку `http`
+і endpoint сповіщень (відповідь, редиректи, DNS, розмір, швидкість); користувач фронтенду. Жоден із
+них не повинен читати чи змінювати дані іншого тенанта, виконати код хоста, дістатися внутрішньої
+мережі, обійти ліміти чи вичерпати ресурси воркерів для інших. Система переживає падіння будь-якого
+процесу в будь-якій точці, кілька інстансів, рестарт і недоступність Postgres, повтори й дублікати,
+часові пояси й DST.
+
+**Кому довіряємо.** Оператору розгортання: суперкористувачу Postgres, що запускає міграції,
+власнику хоста й compose, тому, хто має доступ до `.env`.
+
+**Підтримуване розгортання.** PostgreSQL 16+, Node.js за `engines` з `apps/api/package.json`. Ролі
+`flowforge_api_role`, `flowforge_worker_role`, `flowforge_system`, login-ролі `db:provision` і
+об'єкти схеми `public` створюють і змінюють лише міграції й `db:provision`. Кластер може бути
+спільним з іншими БД FlowForge (тестова поруч із compose).
+
+**Непідтримуваний стан виявляється, а не захищається.** Ролі, гранти, `ALTER DEFAULT PRIVILEGES`,
+політики RLS, сесії чи об'єкти, які створив не FlowForge (заздалегідь, паралельно або вручну
+всупереч інструкції), система не намагається «обробити безпечно» сценарій за сценарієм. Вона
+відмовляється працювати: інваріанти безпеки нижче звіряють фактичний каталог із дозволеним
+переліком, міграції відкочуються, а API й воркер не стартують.
+
+#### Інваріанти безпеки
+
+`src/tenancy/security-posture.ts` (`findPostureViolations`) звіряє каталог Postgres із переліком
+`POSTURE` — кінцевим станом після всіх міграцій. Перевірка рольово-агностична: одержувачем може
+бути будь-яка роль, включно з `PUBLIC` і ролями, про які FlowForge нічого не знає.
+
+| Інваріант | Що звіряється |
+|---|---|
+| I-1 Службові ролі | Точні атрибути (`NOLOGIN`, без SUPERUSER/CREATEDB/CREATEROLE/REPLICATION, BYPASSRLS лише в `flowforge_system`), жодних налаштувань ролі, **жодної сесії** під службовою роллю в усьому кластері, жодних сторонніх членів; службові ролі не володіють і не мають прав ні на що в цій БД поза таблицями й функціями `public` (view чи definer-функція системної ролі в іншій схемі читали б усіх тенантів) |
+| I-2 Точні права | Для кожної функції, таблиці, view і послідовності `public`: власник і повний набір (одержувач, право), крім прав самого власника, точно за переліком. Без грантів із `GRANT OPTION`, без прав на окремі стовпці, без `CREATE` у `public` для будь-кого, крім власника. Невідомий об'єкт допустимий, лише якщо він належить власнику міграцій і нікому нічого не дає |
+| I-3 Точні політики | На кожній тенантній таблиці (`tenants`, `workflows`, `workflow_versions`, `executions`, `step_runs`, `jobs`, `tenant_usage`) — RLS + FORCE і рівно одна політика `tenant_isolation` (PERMISSIVE, усі команди, `PUBLIC`, точний вираз). Інші політики будь-де в `public` — порушення: дозвільні політики Postgres об'єднує через `OR`, тож одна чужа відкрила б рядки всім |
+
+**Де перевіряється.** (1) `npm run db:migrate` (`src/database/migrate.ts`, крок `migrate` у compose)
+виконує всі невиконані міграції й звірку в **одній транзакції** під `pg_advisory_xact_lock`: якщо
+каталог не відповідає переліку, транзакція відкочується й жодне надання (зокрема BYPASSRLS системній
+ролі) не набуває чинності. Звірка виконується й без нових міграцій, тож кожен запуск виявляє дрейф;
+два одночасні запуски виконуються по черзі. (2) Старт API й воркера (`DatabaseSecurityCheck`): дрейф
+після розгортання зупиняє процес. Процеси, що вже працюють, побачать дрейф лише після рестарту: зміну
+каталогу між рестартами може зробити тільки довірений оператор. Інтеграційні тести будують схему тим
+самим `migrate()`.
+
+**Наявна службова роль не «лагодиться».** `TenantIsolation` відмовляє, якщо наявна службова роль має
+інші атрибути (зокрема LOGIN) або сесії, замість `ALTER ROLE … NOLOGIN`: до COMMIT такої зміни роль
+ще пускала б нові сесії, і вони отримали б BYPASSRLS. Єдина зміна наявної ролі — BYPASSRLS для
+`flowforge_system` (для ролі, що вже має його від іншої БД кластера, вона нічого не змінює).
+
+**Нова таблиця чи функція.** Міграція, що додає об'єкт у `public`, має додати й запис у `POSTURE`
+(права, власник, політика). Без нього `db:migrate` відкотиться з повідомленням, що називає об'єкт.
+Повідомлення містять лише імена об'єктів і ролей (до 20), без даних тенантів.
+
+**Варіанти.** Окремі перевірки в кожній міграції під кожен сценарій (так було раніше: кожен новий
+сценарій «у кластері вже є чужий X» потребував нової латки). Окрема перевірка після `migration:run`
+(після COMMIT уже пізно: сесія, відкрита під роллю з LOGIN, отримала б BYPASSRLS). Звірка в
+транзакції міграцій і на старті закриває весь клас одним механізмом. Для чужої політики
+розглядалась і RESTRICTIVE-політика-страж: вона захищає лише від оператора, що додасть політику між
+рестартами, і додає ще одну поверхню, тож обрано точний набір політик.
+
+#### Ліміти тенанта
+
+**Контракт лімітів.** Значення за замовчуванням — `TENANT_*` (записує `db:provision` у
+`limit_defaults`), перевизначення окремого тенанта — адмін-API (`limits` у `POST /tenants`,
+`GET`/`PATCH /tenants/:id/limits`, `null` — значення за замовчуванням). Межі перевіряються і в API
+(400), і `CHECK`-обмеженнями в БД.
+
+| Ліміт (env за замовчуванням) | Межі | Одиниця | Перевизначення | Діє на |
+|---|---|---|---|---|
+| одночасні задачі (`TENANT_MAX_RUNNING`, 10) | 1..1000 | задач у стані `running` | `maxConcurrentExecutions` | нові **захоплення** |
+| розмір черги (`TENANT_MAX_QUEUE_SIZE`, 100 000) | 1..10 000 000 | незавершених задач: `queued` + `running`, включно з паузами `delay` | `maxQueueSize` | нові **постановки**: run, webhook, cron, `/retry` |
+| частота API (`TENANT_RATE_LIMIT` / `…_WINDOW_MS`, 600 / 60 с) | 1..1 000 000 / 1..3600 с | запитів тенанта за вікно, усі маршрути разом | `rateLimit` | запити з `x-api-key` |
+| частота webhook-ів (`TENANT_WEBHOOK_RATE_LIMIT` / `…_WINDOW_MS`, 600 / 60 с) | ті самі | webhook-ів тенанта за вікно — окрема квота | `webhookRateLimit` | webhook-и з чинним підписом |
+| адмін-ендпоінти (`ADMIN_RATE_LIMIT` / `…_WINDOW_MS`, 30 / 60 с) | 1..10 000 / 1..3600 с | запитів з однієї IP-адреси | — | кожен запит `/tenants…`, ще до перевірки токена |
+| невдалі автентифікації (`AUTH_FAILURE_RATE_LIMIT` / `…_WINDOW_MS`, 30 / 60 с) | ті самі | невдач з однієї IP-адреси | — | невірний ключ або підпис, webhook невідомому чи вимкненому workflow: понад ліміт — 429 замість 401/404; успішні запити не рахуються |
+
+«Одночасне виконання» — задача в стані `running`: пауза `delay` слоту не тримає (3.3.3), тож
+виконання на паузі обмежує ліміт черги, а не ліміт одночасних задач. Зниження ліміту нижче поточного
+використання нічого не перериває: задачі в роботі завершуються, черга лишається, а новим захопленням
+і постановкам діє новий ліміт. Задачі з простроченим lease рахуються в `running`, доки їх не поверне
+reaper.
+
+**Облік.** `tenant_usage` — рядок на тенанта: `queued`, `running`, найраніший `runAt` у черзі
+(`nextRunAt`), готовність, момент останнього захоплення, ефективні ліміти. Його веде SECURITY
+DEFINER-тригер на `jobs` у тій самій транзакції, що й зміна задачі, тож у кожному закоміченому стані
+лічильники **точно** дорівнюють агрегатам `jobs` (`queue-consistency.int-spec.ts` звіряє їх одним
+оператором — одним знімком — кожні 25 мс під змішаним навантаженням). Варіанти: `count(*)` на кожну
+постановку (O(розміру черги) і гонка без блокування), лічильники в коді сервісів (легко пропустити
+шлях — reaper, очищення, повтор), тригер. Ліміти за замовчуванням — у БД, а не в env кожного процесу:
+API і воркер не можуть розійтися.
+
+Після захоплення чи вилучення найранішої задачі тригер шукає новий `nextRunAt` як
+`ORDER BY "runAt" LIMIT 1` за `IDX_jobs_tenant_queue`, а не `min("runAt")`. Коли статистика ще не
+бачить свіжого backlog-у тенанта, планувальник оцінює його чергу в один рядок і для `min()` обирав
+агрегат по всіх задачах тенанта: одне захоплення з черги в 20 000 задач читало 20 001 рядок
+(`tenant-usage-next-run.int-spec.ts`). `LIMIT` зупиняє обхід на першому живому записі за будь-якої
+оцінки. Межа: записи індексу для вже захоплених задач пропускаються, доки Postgres не позначить їх
+мертвими, а для цього жодна відкрита транзакція не повинна їх бачити. Довга транзакція в кластері
+(аналітика, зависле з'єднання) знову робить пошук пропорційним кількості захоплень за час її життя,
+доки її не завершать і не мине vacuum таблиці `jobs`.
+
+**Ліміт черги.** Постановка (`ExecutionsService`) блокує рядок обліку тенанта
+(`lock_tenant_usage`) і лише під блокуванням шукає `Idempotency-Key`: повтор уже прийнятого запиту
+повертає його виконання (200), навіть коли черга тим часом заповнилась, а десять однакових
+паралельних запитів на останнє місце дають один 201 і дев'ять 200 з тим самим виконанням. Повна
+черга — 429 `queue_full` ще до будь-якої вставки (нічого не створено). `Retry-After` немає: коли
+звільниться місце, залежить від завершення задач і невідомо. `/retry`: виконання `FOR UPDATE` →
+облік → задача; при повній черзі — 429, виконання й чекпоінти без змін. Cron при повній черзі
+пропускає спрацювання (warn + `flowforge_enqueue_rejected_total{trigger="cron"}`), розклад іде далі.
+
+**Частота запитів.** `@nestjs/throttler` (документація Nest, «Rate Limiting») зі сховищем у Postgres:
+власне `ThrottlerStorage`, фіксоване вікно, атомарний upsert функцією `rate_limit_hit` за годинником
+БД — один лічильник на всі інстанси API. Guard розширює `ThrottlerGuard`:
+- ключ — `<ліміт>:<тенант або IP>` без імені обробника: одна квота на всі маршрути тенанта;
+- заголовки `X-RateLimit-Limit`, `X-RateLimit-Remaining` і `X-RateLimit-Reset` без суфікса імені на
+  кожній відповіді, що пройшла через ліміт, а на перевищенні — ще й `Retry-After` і тіло
+  `rate_limited`;
+- guard-и рівня контролера, тож `/health`, `/ready` і `/metrics` не обмежені.
+
+Webhook-и рахуються лише після чинного підпису й на тенанта адресата: підпис перевіряє guard
+(`WebhookSignatureGuard`, порівняння за сталий час), а не обробник. Недоступна БД — 5xx, а не
+мовчазний пропуск ліміту. Варіанти: лічильник у пам'яті (кожен інстанс рахував би окремо), Redis
+(заборонений), пряма таблиця під RLS (runtime-ролі могли б скидати свої лічильники). `UNLOGGED`
+для відер відкинуто: таблиця обнулялася б після падіння сервера й не реплікується; `fillfactor 70`
+лишає місце для HOT-оновлень лічильників. Відра, чиє вікно скінчилось, API видаляє пачками щохвилини.
+
+**IP клієнта.** Ліміти за IP беруть `req.ip`: без `TRUST_PROXY` — адресу з'єднання (заголовок
+`X-Forwarded-For` ігнорується, інакше клієнт сам вибирав би собі IP). За реверс-проксі —
+`TRUST_PROXY` з кількістю переходів або адресами проксі (Express `trust proxy`). IPv6 групується за
+підмережею /64, як у throttler-а. Фронтенд ходить до API серверним проксі з однієї адреси — ліміти за
+IP для його запитів і передача заголовків 429 браузеру заплановані на PR 6.
+
+
+### 3.3.5 Справедливе планування
+
+**Вимога.** Тенант, що поставив у чергу десятки тисяч задач, не повинен суттєво збільшувати затримку
+задач інших тенантів (проблема 37 — FIFO саме це й робив).
+
+**Порядок обслуговування.** Серед тенантів, у яких є готова задача (`nextRunAt ≤ now`) і які не
+досягли ліміту одночасних задач, наступним обслуговується той, у кого **найменше задач у роботі**, а
+серед рівних — **найдавніше обслужений** (`lastClaimedAt`), далі за `tenantId`; у нього береться
+найраніша готова задача. Тенанти, що вже працюють, ділять слоти за max-min, а тенант без задач у
+роботі ніколи не чекає за чужою глибиною черги. Новий тенант отримує `lastClaimedAt = момент
+створення` і стає в кінець черговості, а не перескакує тих, хто вже чекає.
+
+**Захоплення** — одна SECURITY DEFINER-функція `claim_job`, один оператор; стандартна для черг на
+Postgres схема `FOR UPDATE SKIP LOCKED` (документація Postgres, «The Locking Clause»), застосована
+двічі:
+
+```mermaid
+flowchart TD
+  P["промоція до кінця: усі тенанти, чия найраніша задача вже настала → ready (SKIP LOCKED, пачки по 128, до 1024 за оператор)"] --> T
+  T["тенант: ready AND running &lt; maxRunning<br/>ORDER BY running, lastClaimedAt, tenantId LIMIT 1<br/>FOR UPDATE SKIP LOCKED — IDX_tenant_usage_claim"] -- знайдено --> J
+  T -- "кандидати є, але всі зайняті" --> B["busy → воркер повторює за ~20 мс"]
+  J -- "єдину готову задачу тримає коротка транзакція" --> B
+  P -- "дозрілих більше за бюджет" --> B
+  T -- "кандидатів немає" --> N["null → пауза опитування"]
+  J["задача тенанта: queued, runAt ≤ now<br/>ORDER BY runAt LIMIT 1 FOR UPDATE SKIP LOCKED — IDX_jobs_tenant_queue"] -- знайдено --> U
+  J -- "немає (облік розійшовся)" --> R["перерахувати облік тенанта, лічильник repairs → наступний тенант"]
+  U["UPDATE job → running, lockToken, lockedUntil = clock_timestamp() + lease;<br/>тригер: running + 1, lastClaimedAt = now — під уже взятим блокуванням рядка тенанта"]
+```
+
+- **Жорсткий ліміт одночасних задач.** Рядок тенанта блокується в тому самому операторі; Postgres
+  перевіряє умову `running < maxRunning` на найновішій версії заблокованого рядка (EvalPlanQual), а
+  `running` збільшує тригер під цим блокуванням. Два захоплення одного тенанта не можуть разом
+  перевищити ліміт (`tenant-concurrency.int-spec.ts`: 50 паралельних циклів при ліміті 3 → рівно 3).
+- **Без черги блокувань.** Рядок, який тримає інша транзакція, пропускається: паралельні цикли
+  всіх воркерів розходяться по різних тенантах, а не чекають на рядок одного, і завершення задач
+  тенанта не стоять за захопленнями.
+- **Готовність без сканування.** Частковий індекс `IDX_tenant_usage_claim` має той самий предикат і
+  порядок, що й вибір, тож це Index Scan без Sort, O(log T) — насичені тенанти й тенанти лише з
+  майбутніми задачами в нього не потрапляють. «Настала задача» залежить від часу й не може бути
+  предикатом індексу: прапорець `ready` ставить тригер (коли задача вже готова) і промоція на
+  початку кожного захоплення (коли час минув), за індексом `IDX_tenant_usage_maturing`.
+- **Промоція до кінця, перш ніж обирати.** Захоплення просуває всіх тенантів, чия задача настала до
+  початку оператора, а вже потім обирає. Перша версія просувала одну пачку (32) за захоплення:
+  тенант B за 64 іншими дозрілими тенантами потрапляв до вибору лише на третьому захопленні, і
+  швидкий тенант A без задач у роботі тим часом обслуговувався двічі — без жодної конкуренції.
+  Тривалість одного оператора обмежена бюджетом (8 пачок по 128): якщо дозрілих більше, захоплення
+  нікого не обирає й повертає busy, а промоцію продовжують наступні (паралельні — різні рядки, SKIP
+  LOCKED). Так сплеск зі 100 000 тенантів, що дозріли в одну мить, не впирається в `statement_timeout`
+  і не відкочується без прогресу, а порядок вибору однаково враховує всіх дозрілих.
+- **Зайнята задача — busy.** Якщо SKIP LOCKED пропустив готову задачу тенанта (її рядок тримає коротка
+  транзакція), захоплення повертає busy, а не «черга порожня»: воркер повторює за мить, а не через повний
+  інтервал опитування. Облік при цьому не перераховується — він правильний.
+- **Lease** починається з самого захоплення (`clock_timestamp()`), а локальний відлік воркера — до
+  надсилання оператора, тобто не пізніше за БД.
+
+**Гарантія.** Поки тенант B має готову задачу, жодної в роботі й не досяг ліміту, кожен інший тенант
+захоплюється не більше одного разу (після захоплення його ключ гірший за ключ B), плюс захоплення,
+чий вибір почався раніше (не більше за кількість паралельних циклів C), плюс ті, що відбулися,
+поки рядок B тримала його ж коротка транзакція (постановка чи завершення його задачі — мілісекунди).
+Тобто від глибини черг інших тенантів затримка B не залежить. `fair-claim.int-spec.ts` перевіряє це за журналом захоплень (4 паралельні цикли, 8 тенантів, ≤ (K−1)+C
+захоплень інших за будь-яке очікування), а також: один слот і тенант із 2000 задач — строге чергування;
+B за 64 дозрілими тенантами з задачами в роботі — A не більше одного разу раніше за B; дозрілих більше за
+бюджет промоції — busy без вибору, далі найкращий за ключем; зайнята єдина задача — busy;
+50 тенантів — кожен раз, перш ніж будь-хто двічі; 150 тенантів, що дозріли одночасно (більше за пачку
+промоції), — кожен раз; затримка, що настала, поки рядок тенанта зайнятий, — обслуговується першим
+же захопленням після звільнення; насичені й лише з майбутніми задачами тенанти не заважають; новий
+тенант — у кінці черговості; кілька воркерів — B завершується, поки в A понад 90% backlog-у.
+
+**Варіанти, що розглядались.**
+- FIFO (стартовий стан) — проблема 37.
+- Найменше в роботі, далі найстаріша задача — на одному слоті тенант із давнішими задачами
+  обслуговується весь час.
+- Глобальна серіалізація рішень (одне захоплення за раз, advisory lock) — стеля пропускної
+  здатності для всіх тенантів.
+- WFQ/DRR із вагами — ваг ТЗ не вимагає, а стан дефіциту треба вести для кожного тенанта.
+- **Очікування рядка найкращого кандидата** з перевіркою свіжості під блокуванням (перша
+  реалізація в цьому PR) — строгіша межа, але паралельні цикли обирали того самого тенанта й
+  ставали в чергу на його рядок. Виміряно 160–950 захоплень/с і p95 39–180 мс (FIFO на тій самій
+  машині — ~2500/с, 8 мс), а за повільної БД завершення задач тенанта чекали за чергою захоплень,
+  доки не минали lease-и. Розподіл кандидатів між циклами (у процесі, потім advisory lock-ами) дав
+  лише 880–950/с.
+- Обрано стандартний `SKIP LOCKED` на рівні тенантів, а потім задач. Ціна — обхід тенанта лише на
+  мілісекунди його власних транзакцій.
+
+**Порядок блокувань.** Правило: у кожній транзакції воркера оновлення `jobs`, яке через тригер
+зачіпає рядок обліку тенанта, — останній оператор; захоплення не чекає ніколи.
+
+| Операція | Порядок |
+|---|---|
+| завершення, провал, пауза, повернення в чергу, чекпоінт, reaper | задача (`FOR UPDATE`) → виконання → облік (тригер) |
+| захоплення | облік (SKIP LOCKED) → задача (SKIP LOCKED) — без очікування |
+| постановка (run, webhook, cron) | облік (`lock_tenant_usage`) → нові рядки |
+| `/retry` | виконання → облік → задача (термінальна — її не тримає ні воркер, ні reaper) |
+| очищення | лише термінальні рядки, облік не змінюється |
+
+Ребра «тримає → чекає»: задача → виконання, виконання → облік, облік → термінальна задача (лише
+`/retry`). Ребра облік → облік немає, захоплення не чекає — циклу немає. Перевіряє
+`queue-consistency.int-spec.ts`: два воркери, постановка через API, повтори, reaper проти воркерів
+(lease відбирається посеред кроку), очищення, примусові ROLLBACK і транзакції, що тримають рядки
+обліку. Жодного deadlock-у, кожен знімок обліку точно дорівнює агрегатам `jobs`, `running` ніде не
+перевищує ліміт.
+
+**Вимірювання** — «Chaos- і навантажувальні сценарії»: бенчмарк захоплення й навантажувальний
+сценарій «шумного сусіда».
 
 ### 3.3.6 Безпечне виконання кроків — буде заповнено
 
 ### 3.3.7 Вхідні webhook-и — буде заповнено
 
-### 3.3.8 Планувальник — буде заповнено
+### 3.3.8 Планувальник
+
+Тік читає до 500 ідентифікаторів тенантів за сторінку. У раунді кожен тенант робить до 16 спроб постановки зі сторінки до 16 своїх workflow, потім хід переходить до наступного. Рахуються спроби, а не workflow: інакше 16 секундних розкладів одного тенанта за 30-секундний тік давали б 480 постановок поспіль перед першою постановкою сусіда. Після першого раунду обхід продовжується за курсорами тих, у кого лишилися спрацювання. Курсор — лише ідентифікатор workflow і момент останньої спроби, а сторінку перечитують щораунду, тож вимкнений чи змінений розклад враховується вже в наступному раунді. Розглянуті варіанти: одне спрацювання на workflow за раунд з ітераторами в пам'яті (пам'ять росте з кількістю розкладів, а тенант із тисячами workflow однаково домінує) і глобальне впорядкування всіх належних спрацювань за часом (пам'ять без межі). Кожне читання звільняє з’єднання перед постановкою задач. Повтор сторінки чи паралельна постановка того самого моменту спостерігають одне виконання завдяки блокуванню обліку тенанта та унікальному індексу `(tenantId, workflowId, scheduledAt)`. Гарантія діє протягом зберігання запису виконання. Політики пропущених під час простою спрацювань і часові пояси належать до етапу планувальника.
 
 ## Модель гарантій виконання
 
@@ -1925,6 +2444,10 @@ SECURITY DEFINER Functions Safely»), усі імена в тілі кваліф
 | Запуск через API | з `Idempotency-Key` — рівно одне виконання на ключ у тенанті (повтор того самого запиту повертає те саме виконання); без ключа — кожен запит створює нове, тож повтор клієнтом після обриву — щонайменше один раз | ключ зберігається, поки зберігається виконання (`EXECUTION_RETENTION_DAYS`) |
 | Повтор виконання (`/retry`) | продовжує з першого незавершеного кроку; завершені кроки не повторюються, повторений `http` має той самий `Idempotency-Key` | лише виконання `failed` свого тенанта; два одночасні повтори — проходить один |
 | Виконання | кожен цикл обробки доходить до одного кінцевого стану. Ручний `/retry` після `failed` відкриває новий цикл того самого execution зі збереженим знімком версії | поки є живий воркер; кожен крок має `JOB_MAX_ATTEMPTS` спроб, потім задача `dead`, а виконання `failed` |
+| Ліміт одночасних задач тенанта | нова задача тенанта береться в роботу, лише якщо його задач `running` менше за `maxRunning` | перевіряється під блокуванням рядка обліку в момент захоплення. Після зниження ліміту вже взяті задачі доробляються, тож `running` може тимчасово перевищувати новий ліміт; нових захоплень немає, доки `running` не стане меншим (`tenant-concurrency.int-spec.ts`) |
+| Ліміт черги тенанта | нова задача тенанта ставиться в чергу, лише якщо його незавершених задач менше за `maxQueueSize`; відхилена постановка (429 `queue_full`) нічого не створює | атомарно з постановкою; повтор того самого запиту з `Idempotency-Key` повертає вже прийняте виконання й без вільного місця; cron пропускає спрацювання. Після зниження ліміту вже прийняті задачі лишаються в черзі й виконуються (`tenant-queue-limit.int-spec.ts`) |
+| Ліміт частоти | у вікні не більше за ліміт запитів тенанта (API і webhook-и окремо), за IP — адмін-ендпоінтів і невдалих автентифікацій | один лічильник у Postgres на всі інстанси API; недоступна БД — 5xx, а не пропуск ліміту |
+| Справедливість | поки тенант готовий і без задач у роботі, кожен інший обслуговується не більше одного разу (+ захоплення, що вже почались, + обходи на час його власних коротких транзакцій) | 3.3.5, «Гарантія»; від глибини чужих черг затримка не залежить |
 | Вихідна подія | буде заповнено (outbox) | — |
 
 Що **не** гарантується: exactly-once для отримувача, який ігнорує `Idempotency-Key` (це
@@ -1942,7 +2465,7 @@ SECURITY DEFINER Functions Safely»), усі імена в тілі кваліф
 ```mermaid
 flowchart TD
   T["Тригер: POST /run, webhook, cron"] --> E["TX: execution (workflowVersionId) + job queued"]
-  E --> C["Захоплення: UPDATE … FOR UPDATE SKIP LOCKED → running, lockToken"]
+  E --> C["Захоплення (claim_job): тенант і його задача FOR UPDATE SKIP LOCKED → running, lockToken"]
   C --> L{"Наступний крок без succeeded?"}
   L -- "так, http / transform / log" --> S["TX: lease ✓, step_run running (attempts+1), execution running"]
   S --> X["Виконання кроку поза транзакцією (Idempotency-Key, AbortSignal)"]
@@ -1961,7 +2484,10 @@ flowchart TD
 
 | Запит | Індекс |
 |---|---|
-| захоплення наступної задачі | `IDX_jobs_claim` — `jobs ("runAt") WHERE status = 'queued'` (частковий) |
+| вибір тенанта для захоплення | `IDX_tenant_usage_claim` — `tenant_usage (running, "lastClaimedAt", "tenantId") WHERE ready AND running < "maxRunning"` (частковий, у порядку ключа вибору) |
+| промоція дозрілих тенантів | `IDX_tenant_usage_maturing` — `tenant_usage ("nextRunAt") WHERE NOT ready AND "nextRunAt" IS NOT NULL AND running < "maxRunning"` (частковий) |
+| найраніша готова задача тенанта (захоплення, облік) | `IDX_jobs_tenant_queue` — `jobs ("tenantId", "runAt") WHERE status = 'queued'` (частковий; замінив `IDX_jobs_claim`) |
+| очищення відер ліміту частоти | `IDX_rate_limit_buckets_reset` — `rate_limit_buckets ("resetAt")` |
 | пошук прострочених lease (reaper) | `IDX_jobs_lease` — `jobs ("lockedUntil") WHERE status = 'running'` (частковий) |
 | запуск за `Idempotency-Key` тенанта | `UQ_executions_idempotency_key` — унікальний `executions ("tenantId", "idempotencyKey") WHERE "idempotencyKey" IS NOT NULL` (частковий) |
 | задача виконання (повтор, очищення історії) | `IDX_jobs_execution` — `jobs ("executionId")` |
@@ -1970,25 +2496,40 @@ flowchart TD
 | пошук кроку за ключем ідемпотентності | `UQ_step_runs_idempotency_key` — унікальний `step_runs ("idempotencyKey")` |
 | чекпоінти виконання | `UQ_step_runs_execution_step` — унікальний `step_runs ("executionId", "stepIndex")` |
 | версія workflow для виконання | `UQ_workflow_versions_workflow_version` — унікальний `("workflowId", "version")` |
-| списки виконань за тенантом | `executions ("tenantId", "createdAt")` (зі стартового коду; перевірка плану — буде заповнено) |
+| списки виконань за тенантом | `executions ("tenantId", "createdAt")` (зі стартового коду); план перевірено під роллю API в контексті RLS |
 
 Часткові індекси містять лише задачі в черзі чи в роботі, а завершені (яких з часом переважна
 більшість) не потрапляють в індекс. На 100 тис. задач (99,8% `done`) кожен із них займає 16 КіБ.
 Старий індекс `(status, "runAt")` видалено.
 
 **Як перевірено.** Інтеграційний тест `query-plans.int-spec.ts` засіває 20 тис. задач і кроків
-і для того самого SQL, що виконує черга (`CLAIM_CANDIDATE_SQL`, `EXPIRED_LEASES_SQL`,
+і для того самого SQL, що виконує черга (оператори з тіла `claim_job` у каталозі, `EXPIRED_LEASES_SQL`,
 `FINISHED_JOBS_SQL`, `PURGE_FINISHED_SQL`, `PURGE_EXECUTIONS_SQL`, пошук за ключем запуску й
 задачі за виконанням), перевіряє в
-`EXPLAIN (FORMAT JSON)`, що використовується потрібний індекс і немає `Seq Scan`. Вручну на
-100 тис. задач (`EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF)`):
+`EXPLAIN (FORMAT JSON)`, що використовується потрібний індекс і немає `Seq Scan`.
+
+Вибір тенанта перевірено окремо на 2000 тенантах (1000 готових з 0–2 задачами в роботі, 400
+насичених з лімітами 1..5, 300 лише з майбутніми задачами, 20 дозрілих, ще не просунутих, решта
+порожні): `EXPLAIN (ANALYZE, BUFFERS)` — Index Scan за `IDX_tenant_usage_claim` без Sort, у тесті
+межі ≤ 5 мс і ≤ 64 сторінки. Вручну:
 
 ```text
--- захоплення
+-- вибір тенанта (2000 тенантів)
 Limit (actual rows=1 loops=1)
+  Buffers: shared hit=4
   ->  LockRows (actual rows=1 loops=1)
-        ->  Index Scan using "IDX_jobs_claim" on jobs (actual rows=1 loops=1)
-              Index Cond: ("runAt" <= now())
+        ->  Index Scan using "IDX_tenant_usage_claim" on tenant_usage u (actual rows=1 loops=1)
+              Filter: (ready AND ("tenantId" <> ALL ('{}'::uuid[])) AND (running < "maxRunning"))
+              Buffers: shared hit=3
+Execution Time: 0.034 ms
+-- усе захоплення (claim_job: промоція 20 тенантів, вибір, задача, тригер обліку)
+Function Scan on claim_job (actual rows=1 loops=1)
+Execution Time: 2.076 ms
+```
+
+Решта — вручну на 100 тис. задач (`EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF)`):
+
+```text
 -- reaper
 Limit (actual rows=100 loops=1)
   ->  LockRows (actual rows=100 loops=1)
@@ -2094,7 +2635,88 @@ docker compose -f docker-compose.yml -f docker-compose.chaos.yml up -d --build -
 | Запитів до отримувача / унікальних ефектів | 216 / 200 |
 | Ключів, що прийшли повторно (і не дали другого ефекту) | 16 |
 
-Навантажувальний сценарій для справедливого планування — буде заповнено.
+### Навантажувальний сценарій справедливого планування (3.3.5)
+
+```bash
+# стек з оверлеєм — як вище
+(cd apps/api && npm run load:fairness)
+```
+
+Скрипт `apps/api/scripts/load-fairness.ts` (стек з `sink`: відповідь через 300 мс, 2 воркери × 4
+цикли) у кожному з трьох прогонів створює нових тенантів:
+
+1. «B сам» — 30 виконань тенанта B (`http → sink`) через API, по одному кожні 200 мс.
+2. «A сам» — 20 000 виконань тенанта A ставляться в чергу одразу (SQL власником схеми); пропускна
+   здатність A за 20 с. Ліміти A (черга 30 000, одночасних 16) вищі за кількість слотів, тож
+   справедливість не тримається на лімітах.
+3. «B під backlog-ом A» — ті самі 30 виконань B, поки черга A глибока.
+
+Метрики — за годинником БД: очікування B — від створення виконання до початку першого кроку,
+повна тривалість — до завершення; p95 захоплення — з гістограми воркерів
+`flowforge_job_claim_duration_seconds`. Критерії (кожен прогін; провал будь-якого — ненульовий код
+виходу): успішно 30 з 30 виконань B за ≤ 120 с окремо в кожній фазі, а під час другої фази A теж завершує задачі; коли завершилось останнє виконання B, у черзі A
+понад 50% backlog-у; p95 очікування B ≤ 3 × p95 «B сам» + 1 с і ≤ 5 с; p95 повної тривалості
+≤ 2 × p95 «B сам» + 2 с; p95 захоплення ≤ 100 мс. Той самий сценарій виконується в CI (job `compose`).
+
+Результат на PostgreSQL 16, 19.11.2026. У контрольній фазі кожного прогону також успішно завершилися 30 із 30 виконань B.
+
+| Прогін | B сам: p95 очікування / тривалість | A сам, задач/с | B під A: успішно, фаза | p95 очікування | p95 тривалість | У черзі A наприкінці | p95 захоплення |
+|---|---|---|---|---|---|---|---|
+| 1 | 0,11 с / 0,43 с | 22,6 | 30/30, 6,31 с | 0,12 с | 0,43 с | 19 393 з 20 000 | ≤ 5 мс |
+| 2 | 0,13 с / 0,44 с | 24,6 | 30/30, 6,31 с | 0,20 с | 0,50 с | 19 355 з 20 000 | ≤ 5 мс |
+| 3 | 0,15 с / 0,50 с | 23,8 | 30/30, 6,31 с | 0,27 с | 0,58 с | 19 373 з 20 000 | ≤ 5 мс |
+
+Той самий сценарій на попередній версії (e2fadbf, захоплення FIFO; `--baseline`, один прогін, без
+критеріїв):
+
+| Версія | B сам: p95 очікування / тривалість | A сам, задач/с | B під A: фаза | p95 очікування | p95 тривалість | У черзі A наприкінці |
+|---|---|---|---|---|---|---|
+| e2fadbf (FIFO) | 0,22 с / 0,53 с | 23,1 | 800 с | 798,6 с | 798,9 с | 0 з 20 000 |
+| ця версія (3 прогони) | 0,11–0,15 с / 0,43–0,50 с | 22,6–24,6 | 6,31 с | 0,12–0,27 с | 0,43–0,58 с | 19 355–19 393 з 20 000 |
+
+На FIFO тенант B чекав, доки воркери виконають увесь backlog A (≈ 13 хв), а тепер його задачі
+стартують за десяті частки секунди — майже як без навантаження. Пропускна здатність A, коли він сам,
+не змінилась (23–24 задачі/с при 8 слотах і отримувачі з затримкою 300 мс).
+
+### Бенчмарк захоплення
+
+```bash
+(cd apps/api && npm run bench:claim)
+```
+
+`test/bench/claim.bench-spec.ts` — справжній `JobQueueService` у двох Nest-застосунках з окремими пулами БД і спільним циклом подій одного процесу Node.js, по 16
+паралельних циклів (32 разом). Кожен прогін обробляє 20 000 задач на 50 тенантів без виконання кроків.
+У режимі `job` цикл захоплює задачу й закриває її за токеном. У режимі `execution` він викликає
+`CheckpointService.finish`, як воркер після останнього кроку. Після вимірювання тест перевіряє стан
+усіх 20 000 задач, а в режимі `execution` — також стан і результат кожного виконання.
+Кожен режим має три прогони справедливої черги та три прогони FIFO на тій самій БД.
+Для FIFO відтворено послідовність операцій версії e2fadbf з відповідним обсягом запису.
+
+Критерії відносні, бо абсолютні числа залежать від машини: раннер CI приблизно вдвічі повільніший
+за ноутбук (у першому прогоні CI — 824–842 захоплень/с і p95 20–21,5 мс, тоді як локально 1771–1904/с
+і ~10 мс). За медіанами прогонів:
+- пропускна здатність справедливого захоплення — щонайменше 50% від FIFO;
+- p95 — не більше 3 × p95 FIFO;
+- у кожному прогоні — не менше 300 захоплень/с (ловить обвал на зразок черги на рядку одного тенанта).
+
+Обидва режими виконує CI (job `integration`). Локальні вимірювання на PostgreSQL 16 після оптимізації завершення у `73867ff`, по три прогони кожної черги:
+
+| Що завершує цикл | Справедливе, медіана задач/с | FIFO, медіана задач/с | Частка FIFO | p95 захоплення, справедливе / FIFO |
+|---|---:|---:|---:|---:|
+| Задачу (`job`) | 1539 | 2381 | 65% | 12,9 / 8,2 мс |
+| Задачу й виконання (`execution`) | 1197 | 1698 | 70% | 15,4 / 9,8 мс |
+
+Попередні локальні вимірювання під час розробки:
+
+| Версія | Захоплень/с (3 прогони) | p50 | p95 | p99 | «Кандидати зайняті» |
+|---|---|---|---|---|---|
+| справедливе, `SKIP LOCKED` за тенантом до оптимізації завершення | 1771 / 1891 / 1904 | 5,3–5,5 мс | 9,6–11 мс | 14–17 мс | 0,4–0,9% |
+| e2fadbf (FIFO), окремий запуск на тій ревізії | 2444 / 2605 / 2634 | 4,1–4,3 мс | 7,5–8,5 мс | 11–14 мс | — |
+| той самий запуск бенчмарку: справедливе / FIFO | 1607–1731 / 2551–2672 (61%) | 5,2–6,4 / 3,9–4 мс | 10,6–13,2 / 7,8–8,5 мс (×1,66) | 16–32 / 13–17 мс | 1,0–2,3% / — |
+| перша реалізація цього PR (очікування рядка кандидата) | 156–311 | 52–70 мс | 159–196 мс | 197–242 мс | 77–90% застарілих спроб |
+
+Справедливе захоплення додатково перевіряє готовність тенантів і веде облік тригером. Ціна цих операцій залежить від навантаження та обладнання. Перша реалізація, що чекала на рядок найкращого кандидата, виконувала гарантію строгіше, але
+паралельні цикли ставали в чергу на рядок одного тенанта — звідси перехід на `SKIP LOCKED` (3.3.5).
 
 ## Що не встигли або зробили б інакше
 
@@ -2115,6 +2737,11 @@ docker compose -f docker-compose.yml -f docker-compose.chaos.yml up -d --build -
   постійного з'єднання на воркер, перепідключення й `NOTIFY` на кожну зміну черги.
 - **Оновлення «на ходу»** — міграції виконуються до старту нових воркерів; одночасна робота старих
   воркерів із новою схемою не підтримується (див. «Міграції БД»).
+- **Cron при повній черзі тенанта** пропускає спрацювання (warn + метрика). Чи наздоганяти
+  пропущені спрацювання, вирішує політика пропущених запусків — частина переробки планувальника
+  (3.3.8).
+- **Заголовки лімітів через фронтенд** — серверний проксі Next.js ходить до API з однієї адреси й не
+  передає браузеру `Retry-After` і `X-RateLimit-*`; ліміти в OpenAPI — разом з OpenAPI-документацією.
 - Решта — буде заповнено.
 
 ### Аудит залежностей (`npm audit`)
