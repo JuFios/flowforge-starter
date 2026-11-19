@@ -1,9 +1,15 @@
+import { randomUUID } from 'node:crypto';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { resolve } from 'node:path';
+import { hashApiKey } from '../../src/auth/api-key.guard';
+import { testDatabaseUrl } from '../helpers/test-env';
 import { DataSource } from 'typeorm';
 import { migrate } from '../../src/database/migrate';
-import { Execution } from '../../src/entities';
+import { Execution, Job } from '../../src/entities';
 import { RunningApp, startApp } from '../helpers/app';
 import {
-  createTenant,
+  createExecution,
   createWorkflow,
   openTestDataSource,
   truncateAll,
@@ -28,8 +34,25 @@ describe('webhook upgrade, concurrent acceptance and revocation', () => {
   it('keeps one receipt, execution and initial job across two APIs and rotates a migrated tenant without downtime', async () => {
     await truncateAll(db);
     await db.undoLastMigration({ transaction: 'each' });
-    const { tenant, apiKey } = await createTenant(db);
+    const apiKey = randomUUID();
+    const [tenant]: Array<{ id: string; webhookSecret: string }> =
+      await db.query(
+        'INSERT INTO tenants(name,"apiKeyHash","webhookSecret") VALUES ($1,$2,$3) RETURNING id,"webhookSecret"',
+        ['legacy', hashApiKey(apiKey), randomUUID()],
+      );
     const workflow = await createWorkflow(db, tenant.id);
+    const old = await createExecution(db, workflow, {
+      input: { name: 'before update' },
+    });
+    await db
+      .getRepository(Job)
+      .save({ tenantId: tenant.id, executionId: old.id });
+    const report = await promisify(execFile)(
+      process.execPath,
+      [resolve(__dirname, '../../dist/database/webhook-preflight.js')],
+      { env: { MIGRATION_DATABASE_URL: testDatabaseUrl() } },
+    );
+    expect(report.stdout).toContain('"review":0');
     await migrate(db);
     const a = await startApp(undefined, { captureLogs: true });
     services.push(a);
@@ -100,7 +123,7 @@ describe('webhook upgrade, concurrent acceptance and revocation', () => {
       db.query(
         'SELECT (SELECT count(*)::int FROM webhook_deliveries) AS receipts,(SELECT count(*)::int FROM executions) AS executions,(SELECT count(*)::int FROM jobs) AS jobs',
       );
-    expect(await counts()).toEqual([{ receipts: 3, executions: 3, jobs: 3 }]);
+    expect(await counts()).toEqual([{ receipts: 3, executions: 4, jobs: 4 }]);
     expect((await send(a, 'order-42', fresh.secret, '{}')).status).toBe(409);
     const worker = await startWorker();
     services.push(worker);
@@ -113,12 +136,18 @@ describe('webhook upgrade, concurrent acceptance and revocation', () => {
             .findOneByOrFail({ id: results[0].executionId })
         ).status === 'succeeded',
     );
+    await waitFor(
+      'the execution queued before the upgrade',
+      async () =>
+        (await db.getRepository(Execution).findOneByOrFail({ id: old.id }))
+          .status === 'succeeded',
+    );
     expect((await keys(b, 'DELETE', '/' + original[0].id)).status).toBe(204);
     for (const [i, s] of [a, b].entries())
       expect((await send(s, 'revoked-' + i, tenant.webhookSecret)).status).toBe(
         401,
       );
-    expect(await counts()).toEqual([{ receipts: 3, executions: 3, jobs: 3 }]);
+    expect(await counts()).toEqual([{ receipts: 3, executions: 4, jobs: 4 }]);
     expect((await send(b, 'new', fresh.secret)).status).toBe(202);
     expect((await keys(a, 'DELETE', '/' + fresh.id)).status).toBe(409);
     const diagnostic = JSON.stringify([

@@ -55,7 +55,10 @@ export class ApiKeyGuard implements CanActivate {
     const found =
       tenantId &&
       (await this.db.run(tenantId, async (em) => {
-        const tenant = await em.findOne(Tenant, { where: { id: tenantId } });
+        const tenant = await em.findOne(Tenant, {
+          where: { id: tenantId },
+          select: { id: true },
+        });
         return tenant && { tenant, limits: await effectiveLimits(em) };
       }));
     if (!found)

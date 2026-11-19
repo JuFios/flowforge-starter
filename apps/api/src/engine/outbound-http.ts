@@ -106,6 +106,7 @@ function dispatcher(signal: AbortSignal): Agent {
         signal.throwIfAborted();
         // net/tls отримує лише адреси з цього набору, а host і SNI лишаються оригінальними.
         buildConnector({
+          signal,
           autoSelectFamily: true,
           lookup: (_name, opts, cb) => {
             const choices = answers.filter(
@@ -158,10 +159,15 @@ export async function outboundHttp(
   method: string,
   headers: Headers,
   body: string | undefined,
-  signal: AbortSignal,
+  signal?: AbortSignal,
 ) {
   const controller = new AbortController();
-  const operation = AbortSignal.any([signal, controller.signal]);
+  const deadlines = [
+    controller.signal,
+    AbortSignal.timeout(outboundSettings(process.env).timeoutMs),
+  ];
+  if (signal) deadlines.push(signal);
+  const operation = AbortSignal.any(deadlines);
   let agent = dispatcher(operation);
   const correlation = getCorrelationId();
   if (correlation) headers.set('x-request-id', correlation);

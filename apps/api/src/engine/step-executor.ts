@@ -1,7 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { exceedsJsonDepth, MAX_STEP_RESULT_DEPTH } from '../common/json-depth';
 import { StepDefinition } from '../entities';
-import { outboundSettings } from '../config/outbound';
 import { isolatedTransform } from './isolated-transform';
 import { outboundHttp } from './outbound-http';
 import { StepError } from './step-error';
@@ -86,9 +85,6 @@ export class StepExecutor {
         'http url is invalid after template substitution',
         false,
       );
-    const timeout = AbortSignal.timeout(
-      outboundSettings(process.env).timeoutMs,
-    );
     let res: Awaited<ReturnType<typeof outboundHttp>>;
     try {
       const headers = new Headers(Object.entries(step.headers ?? {}));
@@ -101,7 +97,7 @@ export class StepExecutor {
         step.method ?? 'GET',
         headers,
         step.body !== undefined ? renderTemplate(step.body, ctx) : undefined,
-        signal ? AbortSignal.any([signal, timeout]) : timeout,
+        signal,
       );
     } catch (err) {
       // Скасування воркером (lease, завершення) — не помилка кроку, передаємо як є.
