@@ -1,0 +1,7 @@
+{
+  "rootDir": "..",
+  "testEnvironment": "node",
+  "testMatch": ["<rootDir>/test/cluster/*.int-spec.ts"],
+  "transform": { "^.+\\.ts$": "ts-jest" },
+  "testTimeout": 60000
+}

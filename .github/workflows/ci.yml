@@ -56,6 +56,8 @@ jobs:
           cache: npm
           cache-dependency-path: apps/api/package-lock.json
       - run: npm ci
+      - name: Verify first install in two databases on the clean cluster
+        run: npx --no-install jest -c test/jest-cluster.json --runInBand
       - run: npm run test:integration
       # Пропускна здатність справедливого захоплення (README, «Бенчмарк захоплення»): відносно
       # FIFO попередньої версії на тому самому раннері — ≥ 50% пропускної здатності, p95 ≤ 3×,
