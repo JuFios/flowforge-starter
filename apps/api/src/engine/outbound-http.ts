@@ -142,9 +142,10 @@ async function readLimited(response: Response): Promise<string> {
     for (;;) {
       const part = await reader.read();
       if (part.done) break;
-      size += part.value.length;
+      const chunk: Uint8Array = part.value as Uint8Array;
+      size += chunk.length;
       if (size > max) throw new StepError('http response is too large', false);
-      parts.push(part.value);
+      parts.push(chunk);
     }
   } finally {
     reader.releaseLock();

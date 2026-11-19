@@ -19,7 +19,7 @@ export type StepDefinition =
       headers?: Record<string, string>;
       body?: string;
     }
-  | { id: string; type: 'transform'; expr: string }
+  | { id: string; type: 'transform'; expr: string; language?: 'jsonata-v1' }
   | { id: string; type: 'log'; message: string }
   | { id: string; type: 'delay'; ms: number };
 

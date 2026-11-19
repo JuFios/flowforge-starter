@@ -1,6 +1,8 @@
 import { signedHeaders } from '../helpers/webhook';
 import { DataSource } from 'typeorm';
-import { AppModule } from '../../src/app.module';
+import { JobRunnerService } from '../../src/engine/job-runner.service';
+import { StepExecutor, StepError } from '../../src/engine/step-executor';
+import { WorkerModule, AppModule } from '../../src/app.module';
 import { Execution, Job, StepRun, Tenant } from '../../src/entities';
 import { RunningApp, startApp } from '../helpers/app';
 import {
@@ -154,15 +156,15 @@ describe('strings Postgres cannot store', () => {
     });
 
     it('records a step error that contains U+0000', async () => {
-      // Текст помилки transform-виразу задає тенант.
-      const id = await run([
-        {
-          id: 'shape',
-          type: 'transform',
-          expr: '(() => { throw new Error("bad\\u0000value") })()',
-        },
-      ]);
-      worker = await startWorker(1);
+      // Ін’єкція помилки виконавця перевіряє саме запис тексту в PostgreSQL.
+      const id = await run([{ id: 'shape', type: 'transform', expr: '1+2' }]);
+      worker = await startApp(WorkerModule);
+      jest
+        .spyOn(worker.app.get(StepExecutor), 'execute')
+        .mockRejectedValueOnce(
+          new StepError('transform: bad\u0000value', false),
+        );
+      worker.app.get(JobRunnerService).start(1);
       await finished(id);
 
       const execution = await ds

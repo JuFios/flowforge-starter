@@ -1,3 +1,4 @@
+import { compileProfile, LEGACY_PATH } from '../engine/transform-profile';
 import { BadRequestException } from '@nestjs/common';
 import { exceedsJsonDepth, jsonTooDeepMessage } from '../common/json-depth';
 import { findUnstorable } from '../common/storable-text';
@@ -32,7 +33,7 @@ export const HTTP_METHODS = [
 /** Дозволені поля кожного типу кроку; будь-яке інше поле — помилка, а не мовчазне збереження. */
 const STEP_FIELDS: Record<StepType, readonly string[]> = {
   http: ['id', 'type', 'url', 'method', 'headers', 'body'],
-  transform: ['id', 'type', 'expr'],
+  transform: ['id', 'type', 'expr', 'language'],
   log: ['id', 'type', 'message'],
   delay: ['id', 'type', 'ms'],
 };
@@ -161,12 +162,19 @@ function validateStep(
   switch (type) {
     case 'http':
       return validateHttp(step, where);
-    case 'transform':
-      return {
-        id,
-        type,
-        expr: stringField(step, 'expr', where, MAX_EXPRESSION_LENGTH),
-      };
+    case 'transform': {
+      const expr = stringField(step, 'expr', where, MAX_EXPRESSION_LENGTH);
+      if (step.language === undefined && LEGACY_PATH.test(expr))
+        return { id, type, expr };
+      if (step.language !== undefined && step.language !== 'jsonata-v1')
+        fail(where + '.language: невідома мова виразу');
+      try {
+        compileProfile(expr, 0);
+      } catch {
+        fail(where + '.expr: вираз поза підтримуваним профілем JSONata');
+      }
+      return { id, type, expr, language: 'jsonata-v1' };
+    }
     case 'log':
       return {
         id,

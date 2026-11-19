@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { exceedsJsonDepth, MAX_STEP_RESULT_DEPTH } from '../common/json-depth';
 import { StepDefinition } from '../entities';
 import { outboundSettings } from '../config/outbound';
+import { isolatedTransform } from './isolated-transform';
 import { outboundHttp } from './outbound-http';
 import { StepError } from './step-error';
 import {
@@ -44,7 +45,13 @@ export class StepExecutor {
     switch (step.type) {
       case 'log':
         this.logger.log(
-          renderTemplate(step.message, ctx, MAX_LOG_MESSAGE_LENGTH * 4),
+          renderTemplate(
+            step.message,
+            ctx,
+            MAX_LOG_MESSAGE_LENGTH * 4,
+            'log message is too large',
+            MAX_LOG_MESSAGE_LENGTH,
+          ),
         );
         return { logged: true };
       case 'delay':
@@ -54,19 +61,9 @@ export class StepExecutor {
           false,
         );
       case 'transform':
-        return this.transform(step.expr, ctx);
+        return isolatedTransform(step.expr, step.language, ctx, signal);
       case 'http':
         return this.http(step, ctx, signal, idempotencyKey);
-    }
-  }
-
-  private transform(expr: string, ctx: StepContext): unknown {
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-implied-eval -- відомий дефект: transform виконує довільний код хоста; виправлення — PR 4 (пісочниця JSONata)
-      const fn = new Function('ctx', `return (${expr});`);
-      return fn(ctx);
-    } catch (err) {
-      throw new StepError(`transform: ${(err as Error).message}`, false);
     }
   }
 

@@ -1,3 +1,5 @@
+import { StepError } from './step-error';
+import { CONTEXT_BYTES } from './transform-profile';
 import { Injectable, Logger } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 import { toStorable, toStorableText } from '../common/storable-text';
@@ -25,7 +27,14 @@ export class CheckpointService {
   ) {}
 
   /** Чекпоінти виконання задачі за порядком кроків (у контексті тенанта задачі). */
-  load(em: EntityManager, job: Job): Promise<StepRun[]> {
+  async load(em: EntityManager, job: Job): Promise<StepRun[]> {
+    // Одне читання у snapshot поточної спроби. Перевіряємо історичні необмежені результати до передачі драйверу.
+    const [size]: { oversize: boolean }[] = await em.query(
+      'SELECT COALESCE(sum(octet_length(output::text)),0) > $3 AS oversize FROM step_runs WHERE "executionId"=$1 AND "tenantId"=$2',
+      [job.executionId, job.tenantId, 3 * CONTEXT_BYTES],
+    );
+    if (size.oversize)
+      throw new StepError('step context exceeds the byte limit', false);
     return em.find(StepRun, {
       where: { executionId: job.executionId, tenantId: job.tenantId },
       order: { stepIndex: 'ASC' },

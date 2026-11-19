@@ -12,6 +12,7 @@
     "start:dev": "nest start --watch",
     "lint": "eslint \"{src,test,scripts}/**/*.ts\" --max-warnings 0",
     "typecheck": "tsc --noEmit -p tsconfig.json",
+    "pretest": "nest build",
     "test": "jest -c test/jest-unit.json",
     "migration:generate": "typeorm migration:generate -d dist/database/data-source.js",
     "migration:create": "typeorm migration:create",
@@ -28,6 +29,7 @@
     "chaos:postgres": "tsc -p scripts/tsconfig.json && node dist/scripts/chaos-restart-postgres.js",
     "load:fairness": "tsc -p scripts/tsconfig.json && node dist/scripts/load-fairness.js",
     "chaos:sink:build": "tsc -p scripts/tsconfig.json",
+    "webhook:preflight": "node dist/database/webhook-preflight.js",
     "db:migrate": "node dist/database/migrate.js",
     "db:provision": "node dist/database/provision.js"
   },

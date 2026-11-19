@@ -11,6 +11,7 @@ import {
 } from '../observability/correlation';
 import { toSafeError } from '../observability/safe-error';
 import { TenantDb } from '../tenancy/tenant-db';
+import { CONTEXT_BYTES } from './transform-profile';
 import { CheckpointService } from './checkpoint.service';
 import {
   backoffMs,
@@ -454,13 +455,23 @@ export class JobRunnerService implements BeforeApplicationShutdown {
           'checkpoint does not match the workflow version',
           false,
         );
+      let contextBytes = Buffer.byteLength(JSON.stringify(ctx));
+      const remember = (id: string, value: unknown) => {
+        contextBytes +=
+          Buffer.byteLength(JSON.stringify(value ?? null)) +
+          Buffer.byteLength(JSON.stringify(id)) +
+          2;
+        ctx.steps[id] = value;
+      };
       const runs = new Map(history.map((run) => [run.stepIndex, run]));
       for (let i = 0; i < snapshot.steps.length; i++) {
+        if (contextBytes > CONTEXT_BYTES)
+          throw new StepError('step context exceeds the byte limit', false);
         const step = snapshot.steps[i];
         const previous = runs.get(i);
         if (previous?.status === 'succeeded') {
           // Крок уже завершено в попередній спробі: беремо збережений результат, не виконуємо знову.
-          ctx.steps[step.id] = previous.output;
+          remember(step.id, previous.output);
           continue;
         }
         keeper.assertActive();
@@ -493,7 +504,7 @@ export class JobRunnerService implements BeforeApplicationShutdown {
             current.startedAt.getTime(),
             saved.finishedAt.getTime(),
           );
-          ctx.steps[step.id] = saved.output;
+          remember(step.id, saved.output);
           current = undefined;
           delayAttemptStartedAt = undefined;
           continue;
@@ -514,7 +525,7 @@ export class JobRunnerService implements BeforeApplicationShutdown {
         this.metrics.observeStep(step.type, 'succeeded', startedAt);
         // Далі — збережене значення (як і після відновлення з чекпоінта), а не сирий результат.
         const saved = await this.checkpoints.checkpoint(job, current, output);
-        ctx.steps[step.id] = saved.output;
+        remember(step.id, saved.output);
         current = undefined;
       }
       const last = snapshot.steps[snapshot.steps.length - 1];

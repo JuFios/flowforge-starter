@@ -28,12 +28,15 @@ export function renderTemplate(
   ctx: StepContext,
   maxBytes = MAX_HTTP_BODY_BYTES,
   error = 'template output is too large',
+  maxChars = Infinity,
 ): string {
   const chunks: string[] = [];
   let bytes = 0;
+  let chars = 0;
   function append(part: string): void {
     bytes += Buffer.byteLength(part);
-    if (bytes > maxBytes) throw new StepError(error, false);
+    chars += part.length;
+    if (bytes > maxBytes || chars > maxChars) throw new StepError(error, false);
     chunks.push(part);
   }
   let offset = 0;
