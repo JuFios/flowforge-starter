@@ -1,4 +1,8 @@
 import { DataSource } from 'typeorm';
+import {
+  CronSchedule,
+  InvalidScheduleError,
+} from '../../src/scheduler/cron-schedule';
 import { SchedulerMetrics } from '../../src/scheduler/scheduler.metrics';
 import { SchedulerService } from '../../src/scheduler/scheduler.service';
 import { RunningApp, startApp } from '../helpers/app';
@@ -242,6 +246,50 @@ describe('missed scheduled runs', () => {
     await sleep(STEP_MS + 500);
     await scheduler.tick();
     expect((await scheduledTimes(ds, bad.id)).length).toBeGreaterThan(0);
+  });
+
+  it('keeps a firing when the moment after it cannot be computed', async () => {
+    const { id } = await stalled({ missedRunPolicy: 'run_all' }, 20_000);
+    // Генератор знаходить належний момент, а наступного за ним у межах горизонту немає.
+    // Справжній метод — до підміни (дескриптор, а не посилання на метод).
+    const original: unknown = Object.getOwnPropertyDescriptor(
+      CronSchedule.prototype,
+      'next',
+    )?.value;
+    const real = (schedule: CronSchedule, after: Date): Date =>
+      Reflect.apply(original as (after: Date) => Date, schedule, [after]);
+    let calls = 0;
+    const spy = jest
+      .spyOn(CronSchedule.prototype, 'next')
+      .mockImplementation(function (this: CronSchedule, after: Date) {
+        calls++;
+        // parse() і пошук належного моменту — справжні; далі генератор «вичерпано».
+        if (calls <= 2) return real(this, after);
+        throw new InvalidScheduleError('schedule has no upcoming occurrence');
+      });
+    const errorsBefore =
+      (await app.app.get(SchedulerMetrics).errors.get()).values.find(
+        (v) => v.labels.reason === 'database',
+      )?.value ?? 0;
+    try {
+      expect(await scheduler.tick()).toBe(1);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(await scheduledTimes(ds, id)).toHaveLength(1);
+    const [row]: Array<{ next: Date | null; error: string | null }> =
+      await ds.query(
+        'SELECT "nextFireAt" AS next, "scheduleError" AS error FROM workflows WHERE id = $1',
+        [id],
+      );
+    // Спрацювання збережено; розклад без майбутніх моментів далі не обробляється й позначений.
+    expect(row.next).toBeNull();
+    expect(row.error).toMatch(/no upcoming occurrence/);
+    expect(
+      (await app.app.get(SchedulerMetrics).errors.get()).values.find(
+        (v) => v.labels.reason === 'database',
+      )?.value ?? 0,
+    ).toBe(errorsBefore);
   });
 
   it('rejects an unknown missed-run policy with 400', async () => {

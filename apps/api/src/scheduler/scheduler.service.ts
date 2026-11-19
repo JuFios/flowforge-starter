@@ -341,7 +341,7 @@ export class SchedulerService
           },
           'missed scheduled runs skipped by the workflow policy',
         );
-        await this.save(em, row, threshold, schedule.next(threshold));
+        await this.save(em, row, threshold, schedule);
         return { attempt: 'skipped', created: false };
       }
       if (row.missedRunPolicy === 'run_once') {
@@ -395,7 +395,7 @@ export class SchedulerService
         }
       },
     );
-    await this.save(em, row, cursor, schedule.next(cursor));
+    await this.save(em, row, cursor, schedule);
     this.metrics.firings.inc({ outcome: created ? 'created' : 'existing' });
     if (created)
       this.metrics.lag.observe(
@@ -404,16 +404,31 @@ export class SchedulerService
     return { attempt: 'fired', created };
   }
 
+  /**
+   * Підказка наступного моменту після курсора або null, якщо в межах горизонту генератора моментів
+   * більше немає: уже оброблене спрацювання через це не відкочується, а тік до розкладу не повертається.
+   */
+  private following(schedule: CronSchedule, cursor: Date): Date | null {
+    try {
+      return schedule.next(cursor);
+    } catch (err) {
+      if (err instanceof InvalidScheduleError) return null;
+      throw err;
+    }
+  }
+
   /** Новий курсор і підказка наступного моменту; знімає позначки «чекає» і «невалідний». */
   private async save(
     em: EntityManager,
     row: LockedSchedule,
     cursor: Date,
-    nextFireAt: Date,
+    next: Date | CronSchedule,
   ): Promise<void> {
+    const nextFireAt =
+      next instanceof CronSchedule ? this.following(next, cursor) : next;
     const unchanged =
       cursor.getTime() === row.scheduleCursor.getTime() &&
-      row.nextFireAt?.getTime() === nextFireAt.getTime() &&
+      (row.nextFireAt?.getTime() ?? null) === (nextFireAt?.getTime() ?? null) &&
       row.scheduleBlockedSince === null &&
       row.scheduleError === null;
     if (unchanged) return;
