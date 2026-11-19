@@ -34,11 +34,7 @@ export const EVENT_STATUSES = [
 export type EventStatus = (typeof EVENT_STATUSES)[number];
 
 /** Сторінка подій: найновіші першими, курсор — з відповіді попередньої сторінки. */
-export class ListEventsQuery {
-  @IsOptional()
-  @IsIn(EVENT_STATUSES)
-  status?: EventStatus;
-
+export class AttemptPageQuery {
   @IsOptional()
   @Type(() => Number)
   @IsInt()
@@ -50,4 +46,10 @@ export class ListEventsQuery {
   @IsString()
   @Length(1, 200)
   cursor?: string;
+}
+
+export class ListEventsQuery extends AttemptPageQuery {
+  @IsOptional()
+  @IsIn(EVENT_STATUSES)
+  status?: EventStatus;
 }

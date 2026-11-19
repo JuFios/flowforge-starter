@@ -433,7 +433,7 @@ describe('notification settings', () => {
     const addAttempts = async (start: number, end: number) =>
       ds.transaction(async (em) => {
         await em.query(
-          `INSERT INTO outbox_attempts ("tenantId","eventId",attempt,"senderId") SELECT $1,$2,g,\'sender\' FROM generate_series($3::int,$4::int) g`,
+          `INSERT INTO outbox_attempts ("tenantId","eventId",attempt,"senderId") SELECT $1,$2,g,'sender' FROM generate_series($3::int,$4::int) g`,
           [a.tenant.id, id, start, end],
         );
         await em.query('UPDATE outbox_events SET attempts=$2 WHERE id=$1', [

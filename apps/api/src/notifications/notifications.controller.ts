@@ -10,12 +10,18 @@ import {
   Post,
   Put,
   Query,
+  StreamableFile,
 } from '@nestjs/common';
+import { Readable, addAbortSignal } from 'node:stream';
 import { ApiKeyGuard } from '../auth/api-key.guard';
 import { CurrentTenant } from '../auth/current-tenant.decorator';
 import { Tenant } from '../entities';
 import { RateLimit } from '../limits/rate-limit.guard';
-import { ListEventsQuery, NotificationSettingsDto } from './notifications.dto';
+import {
+  AttemptPageQuery,
+  ListEventsQuery,
+  NotificationSettingsDto,
+} from './notifications.dto';
 import { NotificationsService } from './notifications.service';
 
 /** Налаштування сповіщень тенанта і журнал його подій (README 3.3.9). */
@@ -63,11 +69,37 @@ export class NotificationsController {
   }
 
   @Get('events/:id')
-  event(
+  async event(
     @CurrentTenant() tenant: Tenant,
     @Param('id', ParseUUIDPipe) id: string,
+    @Query() query: AttemptPageQuery,
   ) {
-    return this.notifications.getEvent(tenant.id, id);
+    const paged = query.limit !== undefined || query.cursor !== undefined;
+    const limit = query.limit ?? (paged ? 50 : 100);
+    const read = (cursor?: string) =>
+      this.notifications.eventPage(tenant.id, id, limit, cursor);
+    const { attempts, nextAttemptsCursor, ...event } = await read(query.cursor);
+    if (paged) return { ...event, attempts, nextAttemptsCursor };
+    if (!nextAttemptsCursor) return { ...event, attempts };
+    // Старий клієнт отримує той самий JSON. З’єднання з БД вільне під час очікування клієнта.
+    async function* json() {
+      yield JSON.stringify(event).slice(0, -1) + ',"attempts":[';
+      yield JSON.stringify(attempts).slice(1, -1);
+      let cursor = nextAttemptsCursor;
+      while (cursor) {
+        const page = await read(cursor);
+        yield ',' + JSON.stringify(page.attempts).slice(1, -1);
+        cursor = page.nextAttemptsCursor;
+      }
+      yield ']}';
+    }
+    const stream = addAbortSignal(
+      AbortSignal.timeout(60_000),
+      Readable.from(json(), { objectMode: false }),
+    );
+    return new StreamableFile(stream, {
+      type: 'application/json; charset=utf-8',
+    });
   }
 
   @Post('events/:id/redeliver')

@@ -52,6 +52,31 @@ export interface EventView {
   deliveredAt: Date | null;
 }
 
+interface AttemptCursor {
+  after: number;
+  through: number;
+}
+interface AttemptRow {
+  attempt: number;
+}
+function attemptCursor(id: string, raw: string): AttemptCursor {
+  const decoded = Buffer.from(raw, 'base64url').toString('ascii');
+  const parts = /^([0-9a-f-]{36})\|([1-9]\d{0,9})\|([1-9]\d{0,9})$/.exec(
+    decoded,
+  );
+  if (
+    !parts ||
+    parts[1] !== id.toLowerCase() ||
+    Buffer.from(decoded).toString('base64url') !== raw
+  )
+    throw new BadRequestException(['cursor is invalid']);
+  const after = Number(parts[2]),
+    through = Number(parts[3]);
+  if (after >= through || through > 2147483647)
+    throw new BadRequestException(['cursor is invalid']);
+  return { after, through };
+}
+
 const EVENT_COLUMNS = `id, "executionId", sequence, type, status, attempts,
   CASE WHEN status = 'pending' THEN "nextAttemptAt" END AS "nextAttemptAt",
   "lastError", "lastStatus", "correlationId", "createdAt", "deliveredAt"`;
@@ -231,21 +256,38 @@ export class NotificationsService {
     };
   }
 
-  /** Подія з точними байтами payload і журналом спроб; чужа — 404, як неіснуюча. */
-  async getEvent(tenantId: string, id: string) {
+  /** Верхня межа фіксує набір номерів спроб на початку обходу. */
+  async eventPage(
+    tenantId: string,
+    id: string,
+    limit: number,
+    rawCursor?: string,
+  ) {
     return this.db.run(tenantId, async (em) => {
       const [event]: Array<EventView & { payload: string }> = await em.query(
         `SELECT ${EVENT_COLUMNS}, payload FROM outbox_events WHERE id = $1 AND "tenantId" = $2`,
         [id, tenantId],
       );
       if (!event) throw new NotFoundException('Подію не знайдено');
-      const attempts: unknown[] = await em.query(
-        `SELECT attempt, "senderId", revision, "keyIds", "startedAt", "finishedAt", outcome,
-                "httpStatus", "durationMs"
-           FROM outbox_attempts WHERE "eventId" = $1 AND "tenantId" = $2 ORDER BY attempt`,
-        [id, tenantId],
+      const { after, through } = rawCursor
+        ? attemptCursor(id, rawCursor)
+        : { after: 0, through: event.attempts };
+      if (through > event.attempts)
+        throw new BadRequestException(['cursor is invalid']);
+      const rows: AttemptRow[] = await em.query(
+        `SELECT attempt, "senderId", revision, "keyIds", "startedAt", "finishedAt", outcome, "httpStatus", "durationMs"
+           FROM outbox_attempts WHERE "eventId"=$1 AND "tenantId"=$2 AND attempt>$3 AND attempt<=$4
+           ORDER BY attempt LIMIT $5`,
+        [id, tenantId, after, through, limit + 1],
       );
-      return { ...event, attempts };
+      const attempts = rows.slice(0, limit);
+      const nextAttemptsCursor =
+        rows.length > limit
+          ? Buffer.from(
+              `${event.id}|${attempts[limit - 1].attempt}|${through}`,
+            ).toString('base64url')
+          : null;
+      return { ...event, attempts, nextAttemptsCursor };
     });
   }
 

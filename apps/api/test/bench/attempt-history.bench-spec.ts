@@ -28,6 +28,7 @@ describe('delivery history HTTP response size and API memory', () => {
           join(__dirname, '../helpers/history-benchmark-api.cjs'),
           [],
           {
+            env: { ...process.env },
             execArgv: ['--expose-gc'],
             stdio: ['ignore', 'ignore', 'inherit', 'ipc'],
           },
@@ -38,7 +39,7 @@ describe('delivery history HTTP response size and API memory', () => {
         try {
           const [{ port }] = (await message()) as [{ port: number }];
           const url = `http://127.0.0.1:${port}/tenants/me/notifications/events/${id}${query}`;
-          async function read() {
+          const read = async () => {
             const res = await fetch(url, {
               headers: { 'x-api-key': apiKey },
               signal: AbortSignal.timeout(60000),
@@ -52,7 +53,7 @@ describe('delivery history HTTP response size and API memory', () => {
               bytes += value.byteLength;
             }
             return bytes;
-          }
+          };
           await read();
           await ds.transaction(async (em) => {
             await em.query(
