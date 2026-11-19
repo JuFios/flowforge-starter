@@ -92,4 +92,56 @@ describe('outbound HTTP socket and resource limits', () => {
       await new Promise<void>((r) => server.close(() => r()));
     }
   });
+
+  it.each(['loopback', 'mapped', 'metadata'] as const)(
+    'opens no connection for a redirect to the internal %s address',
+    async (target) => {
+      // Пастка на loopback: будь-яке з'єднання з нею означає, що політика пропустила перехід.
+      let trapped = 0;
+      const trap = createServer((_req, res) => res.end('internal'));
+      trap.on('connection', () => trapped++);
+      trap.listen(0, '127.0.0.1');
+      await once(trap, 'listening');
+      const trapPort = (trap.address() as AddressInfo).port;
+      const location = {
+        loopback: `http://127.0.0.1:${trapPort}/`,
+        mapped: `http://[::ffff:127.0.0.1]:${trapPort}/`,
+        metadata: 'http://169.254.169.254/latest/meta-data/',
+      }[target];
+      const seen: string[] = [];
+      const server = createServer((req, res) => {
+        seen.push(req.url!);
+        res.writeHead(302, { location }).end();
+      });
+      server.listen(0, '127.0.0.1');
+      await once(server, 'listening');
+      const origin =
+        'http://127.0.0.1:' + (server.address() as AddressInfo).port;
+      process.env.HTTP_FIXTURE_ORIGIN = origin;
+      process.env.HTTP_FIXTURE_ADDRESS = '127.0.0.1';
+      try {
+        await expect(
+          outboundHttp(
+            new URL('/start', origin),
+            'GET',
+            new Headers(),
+            undefined,
+            AbortSignal.timeout(2000),
+          ),
+        ).rejects.toMatchObject({
+          message: 'http destination is not allowed',
+          retryable: false,
+        });
+        expect(seen).toEqual(['/start']);
+        expect(trapped).toBe(0);
+      } finally {
+        delete process.env.HTTP_FIXTURE_ORIGIN;
+        delete process.env.HTTP_FIXTURE_ADDRESS;
+        for (const s of [server, trap]) {
+          s.closeAllConnections();
+          await new Promise<void>((r) => s.close(() => r()));
+        }
+      }
+    },
+  );
 });
