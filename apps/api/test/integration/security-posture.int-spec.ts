@@ -1,7 +1,7 @@
 import { DataSource, MigrationExecutor } from 'typeorm';
 import { validateDatabaseEnv } from '../../src/config/env.validation';
 import { buildDataSourceOptions } from '../../src/database/database.options';
-import { migrate } from '../../src/database/migrate';
+import { MIGRATION_LOCK_KEY, migrate } from '../../src/database/migrate';
 import { findPostureViolations } from '../../src/tenancy/security-posture';
 import { SYSTEM_ROLE, WORKER_ROLE } from '../../src/tenancy/roles';
 import { openTestDataSource } from '../helpers/db';
@@ -102,6 +102,21 @@ describe('db:migrate refuses a catalog that FlowForge did not shape', () => {
       `SELECT count(*)::int AS count FROM migrations`,
     );
     expect(count).toBe(ds.migrations.length);
+  });
+
+  it('gives up with a clear error instead of waiting forever for a stuck migration lock', async () => {
+    const ds = await freshScratch();
+    const holder = await openScratch();
+    try {
+      await holder.query('SELECT pg_advisory_lock($1)', [MIGRATION_LOCK_KEY]);
+      await expect(migrate(ds, { lockWaitMs: 300 })).rejects.toThrow(
+        /another db:migrate has held the migration lock/,
+      );
+      expect(await tableExists(ds, 'migrations')).toBe(false);
+    } finally {
+      await holder.destroy();
+    }
+    await expect(migrate(ds)).resolves.toHaveLength(ds.migrations.length);
   });
 
   // ALTER DEFAULT PRIVILEGES того, хто мігрує: кожна нова функція чи таблиця одразу отримує грант
