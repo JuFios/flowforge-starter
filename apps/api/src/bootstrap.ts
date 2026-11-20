@@ -100,6 +100,18 @@ export function configureApp(app: INestApplication): INestApplication {
     'trust proxy',
     parseTrustProxy(config.get('TRUST_PROXY', { infer: true })) ?? false,
   );
+  // Відповіді API містять дані тенанта (визначення, виходи кроків, секрети при видачі): жоден
+  // спільний чи браузерний кеш не зберігає їх. Маршрути можуть поставити суворіший заголовок самі.
+  http.use(
+    (
+      _req: unknown,
+      res: { setHeader(n: string, v: string): void },
+      next: () => void,
+    ) => {
+      res.setHeader('Cache-Control', 'no-store');
+      next();
+    },
+  );
   const options = {
     inflate: false,
     limit: config.get('HTTP_BODY_LIMIT', { infer: true }),

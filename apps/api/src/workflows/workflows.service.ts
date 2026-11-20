@@ -178,14 +178,16 @@ export class WorkflowsService {
     id: string,
     input: UpdateWorkflowDto,
   ): Promise<Workflow> {
-    const steps =
-      input.steps !== undefined ? validateSteps(input.steps) : undefined;
     return this.db.run(tenantId, async (em) => {
       const wf = await em.findOne(Workflow, {
         where: { id, tenantId },
         lock: { mode: 'pessimistic_write' },
       });
       if (!wf) throw new NotFoundException('Workflow не знайдено');
+      const steps =
+        input.steps === undefined
+          ? undefined
+          : validateSteps(input.steps, wf.steps);
       const cron = input.cron !== undefined ? input.cron : wf.cron;
       const timezone = input.timezone ?? wf.timezone;
       // Новий розклад (вираз, зона) чи ввімкнення починають відлік з моменту зміни: пропущені
