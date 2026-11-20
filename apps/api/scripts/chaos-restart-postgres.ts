@@ -74,20 +74,28 @@ function countLogLines(id: string, since: string, text: string): number {
     .filter((l) => l.includes(text)).length;
 }
 
-/** Утримуємо один HTTP-чекпоінт до моменту, коли воркер справді чекає на його запис. */
+/** Скільки чекати, поки воркер вибраного кроку дійде до запису чекпоінта (HTTP до sink — 300 мс). */
+const CANDIDATE_WAIT_MS = 3_000;
+
+/**
+ * Утримуємо один HTTP-чекпоінт до моменту, коли воркер справді чекає на його запис, і саме тоді
+ * перезапускаємо Postgres. Якщо воркер вибраного кроку не дійшов до запису за CANDIDATE_WAIT_MS
+ * (повільна чи повторювана спроба HTTP), блокування відпускається й береться інший крок: довге
+ * утримання рядка без очікувача лише забрало б lease у воркера й нічого б не перевірило.
+ */
 async function restartAtCheckpoint(
   batch: string[],
   observed: Map<string, CheckpointObservation>,
 ): Promise<{ checkpoint: string; started: number }> {
   const db = await openDatabase();
-  const gate = db.createQueryRunner();
+  const deadline = Date.now() + 30_000;
+  let candidates = 0;
   try {
-    await gate.startTransaction();
-    await gate.query("SET LOCAL statement_timeout = '3s'");
-    const deadline = Date.now() + 15_000;
-    let checkpoint: string | undefined;
     while (Date.now() < deadline) {
-      if (!checkpoint) {
+      const gate = db.createQueryRunner();
+      try {
+        await gate.startTransaction();
+        await gate.query("SET LOCAL statement_timeout = '3s'");
         const rows = (await gate.query(
           `SELECT id FROM step_runs WHERE "executionId"=ANY($1)
            AND "stepId"='charge' AND status='running'
@@ -96,27 +104,40 @@ async function restartAtCheckpoint(
            LIMIT 1 FOR UPDATE SKIP LOCKED`,
           [batch],
         )) as { id: string }[];
-        checkpoint = rows[0]?.id;
-      }
-      if (checkpoint) {
-        const [row] = (await gate.query(
-          `SELECT EXISTS(SELECT FROM pg_stat_activity
-           WHERE pg_backend_pid()=ANY(pg_blocking_pids(pid))) AS waiting`,
-        )) as { waiting: boolean }[];
-        if (row.waiting) {
-          await captureCheckpoints(batch, observed);
-          log(`restarting postgres during write to checkpoint ${checkpoint}`);
-          const started = Date.now();
-          docker([...COMPOSE, 'restart', 'postgres']);
-          return { checkpoint, started };
+        const checkpoint = rows[0]?.id;
+        if (checkpoint) {
+          candidates++;
+          const until = Date.now() + CANDIDATE_WAIT_MS;
+          while (Date.now() < until) {
+            const [row] = (await gate.query(
+              `SELECT EXISTS(SELECT FROM pg_stat_activity
+               WHERE pg_backend_pid()=ANY(pg_blocking_pids(pid))) AS waiting`,
+            )) as { waiting: boolean }[];
+            if (row.waiting) {
+              await captureCheckpoints(batch, observed);
+              log(
+                `restarting postgres during write to checkpoint ${checkpoint}`,
+              );
+              const started = Date.now();
+              docker([...COMPOSE, 'restart', 'postgres']);
+              return { checkpoint, started };
+            }
+            await sleep(25);
+          }
         }
+        if (gate.isTransactionActive) await gate.rollbackTransaction();
+      } finally {
+        await gate.release();
       }
       await sleep(25);
     }
-    throw new Error('no worker blocked on the selected HTTP checkpoint');
+    throw new Error(
+      candidates === 0
+        ? 'no running HTTP checkpoint appeared in the batch: workers made no progress'
+        : `no worker blocked on any of ${candidates} selected HTTP checkpoints`,
+    );
   } finally {
     // Після рестарту сервер уже скасував транзакцію. На решті шляхів закриття виділеного пулу звільняє її блокування.
-    await gate.release();
     await db.destroy();
   }
 }
