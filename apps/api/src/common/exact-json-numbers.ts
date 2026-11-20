@@ -14,15 +14,18 @@ import { findInexactNumber, inexactNumberMessage } from './json-numbers';
 const INEXACT_NUMBER = Symbol('inexactJsonNumber');
 
 type Marked = IncomingMessage & {
-  [INEXACT_NUMBER]?: { path: string } | { charset: string };
+  [INEXACT_NUMBER]?:
+    { path: string } | { charset: string } | { invalidUtf8: true };
 };
 
 /**
- * JSON-тіла API — лише UTF-8 (RFC 8259, розд. 8.1), як і тіла webhook-ів. Перевірка мусить
- * бачити той самий текст, що й розбір: body-parser (iconv-lite) вгадує порядок байтів `utf-16`
- * без BOM, а TextDecoder — ні, тож для іншого кодування неточне число пройшло б непоміченим.
+ * JSON-тіла API — лише валідний UTF-8 (RFC 8259, розд. 8.1), як і тіла webhook-ів. Перевіряється
+ * і мітка, і самі байти. Мітка — бо body-parser (iconv-lite) вгадує порядок байтів `utf-16` без
+ * BOM, а TextDecoder — ні, тож перевірка бачила б не той текст, що розбір. Байти — бо body-parser
+ * мовчки замінює невалідні послідовності на U+FFFD, і обробник отримав би інші дані.
  */
 const UTF8 = 'utf-8';
+const STRICT_UTF8 = new TextDecoder('utf-8', { fatal: true });
 
 /**
  * `verify` для JSON-парсера Express: перевіряє сирі байти до розбору й лише позначає запит.
@@ -41,12 +44,21 @@ export function markInexactJsonNumbers(
     (req as Marked)[INEXACT_NUMBER] = { charset: encoding };
     return;
   }
-  // Без `fatal`: некоректні байти body-parser так само замінює на U+FFFD.
-  const path = findInexactNumber(new TextDecoder('utf-8').decode(body));
+  let text: string;
+  try {
+    text = STRICT_UTF8.decode(body);
+  } catch {
+    (req as Marked)[INEXACT_NUMBER] = { invalidUtf8: true };
+    return;
+  }
+  const path = findInexactNumber(text);
   if (path) (req as Marked)[INEXACT_NUMBER] = { path };
 }
 
-/** 400 для тіла з числом, яке змінилося б до збереження; 415 — для JSON не в UTF-8. */
+/**
+ * Після guard-ів: 400 для невалідних байтів UTF-8 і для числа, яке змінилося б до збереження;
+ * 415 — для JSON з іншою міткою кодування.
+ */
 @Injectable()
 export class ExactJsonNumbersInterceptor implements NestInterceptor {
   intercept(context: ExecutionContext, next: CallHandler): Observable<unknown> {
@@ -54,6 +66,9 @@ export class ExactJsonNumbersInterceptor implements NestInterceptor {
       const mark = context.switchToHttp().getRequest<Marked>()[INEXACT_NUMBER];
       if (mark && 'path' in mark)
         throw new BadRequestException(inexactNumberMessage(mark.path));
+      // Те саме повідомлення, що й для webhook-а з тими самими байтами.
+      if (mark && 'invalidUtf8' in mark)
+        throw new BadRequestException('Невалідний UTF-8 JSON');
       if (mark)
         throw new UnsupportedMediaTypeException(
           'JSON-тіло має бути в кодуванні UTF-8',

@@ -176,4 +176,82 @@ describe('JSON numbers that would change before storage', () => {
       expect(res.status).toBe(201);
     },
   );
+
+  // Невалідні байти UTF-8: body-parser мовчки замінив би їх на U+FFFD.
+  const invalidUtf8: Array<[string, Buffer]> = [
+    [
+      'a lone 0xFF byte in a string',
+      Buffer.concat([
+        Buffer.from('{"label":"'),
+        Buffer.from([0xff]),
+        Buffer.from('"}'),
+      ]),
+    ],
+    [
+      'a truncated multibyte sequence',
+      Buffer.concat([
+        Buffer.from('{"label":"'),
+        Buffer.from([0xe2, 0x82]),
+        Buffer.from('"}'),
+      ]),
+    ],
+    [
+      'a UTF-8-encoded lone surrogate',
+      Buffer.concat([
+        Buffer.from('{"label":"'),
+        Buffer.from([0xed, 0xa0, 0x80]),
+        Buffer.from('"}'),
+      ]),
+    ],
+  ];
+
+  it.each(invalidUtf8)(
+    'rejects a manual run with %s (400) and creates nothing',
+    async (_case, bytes) => {
+      const wf = await createWorkflow(ds, tenantId);
+      const res = await encoded('utf-8', bytes, wf.id);
+      expect(res.status).toBe(400);
+      expect(await ds.getRepository(Execution).count()).toBe(0);
+    },
+  );
+
+  it('rejects a workflow whose name has an invalid UTF-8 byte (400)', async () => {
+    const res = await fetch(`${apiApp.baseUrl}/workflows`, {
+      method: 'POST',
+      headers: { 'x-api-key': apiKey, 'content-type': 'application/json' },
+      body: new Uint8Array(
+        Buffer.concat([
+          Buffer.from('{"name":"w'),
+          Buffer.from([0xff]),
+          Buffer.from('","steps":[{"id":"s","type":"log","message":"x"}]}'),
+        ]),
+      ),
+    });
+    expect(res.status).toBe(400);
+    expect(await ds.getRepository(Workflow).count()).toBe(0);
+  });
+
+  it('authenticates before rejecting invalid UTF-8: no key gives 401', async () => {
+    const wf = await createWorkflow(ds, tenantId);
+    const res = await fetch(`${apiApp.baseUrl}/workflows/${wf.id}/run`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: new Uint8Array(invalidUtf8[0][1]),
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it('accepts a body with a UTF-8 BOM and multibyte text unchanged', async () => {
+    const wf = await createWorkflow(ds, tenantId);
+    const res = await encoded(
+      'utf-8',
+      Buffer.from('﻿{"label":"Київ 😀"}'),
+      wf.id,
+    );
+    expect(res.status).toBe(201);
+    const { id } = (await res.json()) as { id: string };
+    expect(
+      (await ds.getRepository(Execution).findOneByOrFail({ id })).input,
+    ).toEqual({ label: 'Київ 😀' });
+  });
 });
