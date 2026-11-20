@@ -16,6 +16,7 @@ import { toSafeError } from '../observability/safe-error';
 import { SCHEDULE_PAGE, SystemDb } from '../tenancy/system-db';
 import { TenantDb } from '../tenancy/tenant-db';
 import { CronSchedule, InvalidScheduleError } from './cron-schedule';
+import { decideMissed } from './missed-runs';
 import { SchedulerMetrics } from './scheduler.metrics';
 
 const WORKFLOW_PAGE = 16;
@@ -356,41 +357,43 @@ export class SchedulerService
       infer: true,
     });
     const threshold = new Date(row.now.getTime() - grace);
-    let at = next;
-    let cursor = next;
-    if (next < threshold) {
-      if (row.missedRunPolicy === 'skip') {
-        afterCommit.push(() => {
-          this.metrics.firings.inc({ outcome: 'missed_skipped' });
-          this.logger.warn(
-            {
-              workflowId,
-              firstSkipped: next.toISOString(),
-              skippedUntil: threshold.toISOString(),
-            },
-            'missed scheduled runs skipped by the workflow policy',
-          );
-        });
-        await this.save(em, row, threshold, schedule, afterCommit);
-        return { attempt: 'skipped', created: false };
-      }
-      if (row.missedRunPolicy === 'run_once') {
-        // Один запуск за весь пропуск — за останнім пропущеним моментом.
-        at = schedule.lastAtOrBefore(threshold, row.scheduleCursor) ?? next;
-        cursor = threshold;
-        afterCommit.push(() => {
-          this.metrics.firings.inc({ outcome: 'missed_run_once' });
-          this.logger.warn(
-            {
-              workflowId,
-              firstMissed: next.toISOString(),
-              runAt: at.toISOString(),
-            },
-            'missed scheduled runs collapsed into one run by the workflow policy',
-          );
-        });
-      }
-      // run_all: кожен пропущений момент — окреме виконання, у порядку розкладу.
+    const decision = decideMissed(
+      schedule,
+      row.scheduleCursor,
+      next,
+      threshold,
+      row.missedRunPolicy,
+    );
+    if (decision.kind === 'skip') {
+      const { lastMissed } = decision;
+      afterCommit.push(() => {
+        this.metrics.firings.inc({ outcome: 'missed_skipped' });
+        this.logger.warn(
+          {
+            workflowId,
+            firstSkipped: next.toISOString(),
+            lastSkipped: lastMissed.toISOString(),
+          },
+          'missed scheduled runs skipped by the workflow policy',
+        );
+      });
+      await this.save(em, row, lastMissed, schedule, afterCommit);
+      return { attempt: 'skipped', created: false };
+    }
+    // Вчасний момент і run_all — окреме виконання для `next`; run_once — одне за весь пропуск.
+    const { at, cursor } = decision;
+    if (decision.collapsed) {
+      afterCommit.push(() => {
+        this.metrics.firings.inc({ outcome: 'missed_run_once' });
+        this.logger.warn(
+          {
+            workflowId,
+            firstMissed: next.toISOString(),
+            runAt: at.toISOString(),
+          },
+          'missed scheduled runs collapsed into one run by the workflow policy',
+        );
+      });
     }
     const workflow = em.create(Workflow, {
       id: row.id,
