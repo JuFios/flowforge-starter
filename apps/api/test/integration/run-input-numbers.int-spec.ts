@@ -241,6 +241,53 @@ describe('JSON numbers that would change before storage', () => {
     expect(res.status).toBe(401);
   });
 
+  // Позиція невалідного байта не змінює порядку перевірок: усередині рядка body-parser розбирає
+  // текст із U+FFFD, а поза рядком розбір падає. В обох випадках без ключа — 401, з ключем — 400.
+  const positions: Array<[string, Buffer]> = [
+    ['inside a string', invalidUtf8[0][1]],
+    [
+      'in place of a value',
+      Buffer.concat([
+        Buffer.from('{"a":'),
+        Buffer.from([0xff]),
+        Buffer.from('}'),
+      ]),
+    ],
+    [
+      'between tokens',
+      Buffer.concat([
+        Buffer.from('{"a":1'),
+        Buffer.from([0xff]),
+        Buffer.from('}'),
+      ]),
+    ],
+  ];
+
+  it.each(positions)(
+    'answers invalid UTF-8 %s with 401 without a key and 400 with a key',
+    async (_case, bytes) => {
+      const wf = await createWorkflow(ds, tenantId);
+      for (const path of [`/workflows/${wf.id}/run`, '/workflows']) {
+        const anonymous = await fetch(`${apiApp.baseUrl}${path}`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: new Uint8Array(bytes),
+        });
+        expect([path, anonymous.status]).toEqual([path, 401]);
+        const keyed = await fetch(`${apiApp.baseUrl}${path}`, {
+          method: 'POST',
+          headers: { 'x-api-key': apiKey, 'content-type': 'application/json' },
+          body: new Uint8Array(bytes),
+        });
+        expect([path, keyed.status]).toEqual([path, 400]);
+        expect(await keyed.json()).toMatchObject({
+          message: 'Невалідний UTF-8 JSON',
+        });
+      }
+      expect(await ds.getRepository(Execution).count()).toBe(0);
+    },
+  );
+
   it('accepts a body with a UTF-8 BOM and multibyte text unchanged', async () => {
     const wf = await createWorkflow(ds, tenantId);
     const res = await encoded(
