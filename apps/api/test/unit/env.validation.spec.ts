@@ -118,6 +118,22 @@ describe('validateEnv', () => {
     }
   });
 
+  // Тік — найбільше запізнення вчасного спрацювання. Довший за хвилину тік виконував би
+  // щохвилинний розклад пачками (із тіком у добу — раз на добу), тож це не валідне налаштування.
+  it('bounds the scheduler tick to one minute so a minute schedule fires within its minute', () => {
+    expect(
+      validateEnv({ ...base, SCHEDULER_TICK_MS: '60000' }).SCHEDULER_TICK_MS,
+    ).toBe(60_000);
+    for (const tick of ['60001', '86400000'])
+      expect(() =>
+        validateEnv({
+          ...base,
+          SCHEDULER_TICK_MS: tick,
+          SCHEDULER_MISFIRE_GRACE_MS: '2147483647',
+        }),
+      ).toThrow(/SCHEDULER_TICK_MS/);
+  });
+
   it('rejects timer values Node would silently clamp to 1 ms', () => {
     // setInterval/setTimeout приймають щонайбільше 2^31-1 мс; більше значення стає 1 мс.
     expect(() =>
