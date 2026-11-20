@@ -104,4 +104,32 @@ describe('queue depth read timeout', () => {
       }
     },
   );
+
+  // Сервер скасовує читання через 100 мс незалежно від того, коли клієнт обробить відповідь.
+  // Затримка циклу подій клієнта (повільний раннер CI, GC) не змінює властивості, тож перевірка
+  // не повинна від неї залежати.
+  it('keeps the verdict when the client event loop is stalled after the query is sent', async () => {
+    const ds = await new DataSource(
+      buildDataSourceOptions(
+        validateDatabaseEnv({
+          DATABASE_URL: testDatabaseUrl(),
+          DB_STATEMENT_TIMEOUT_MS: '100',
+        }),
+      ),
+    ).initialize();
+    try {
+      await withSlowDepth(0.5, async () => {
+        const pending = timed(ds);
+        const stalledUntil = performance.now() + 350;
+        while (performance.now() < stalledUntil) {
+          // Синхронна робота клієнта: відповідь сервера чекає в сокеті.
+        }
+        const { error, ms } = await pending;
+        expect(error).toMatchObject({ driverError: { code: '57014' } });
+        expect(ms).toBeLessThan(400);
+      });
+    } finally {
+      await ds.destroy();
+    }
+  });
 });
