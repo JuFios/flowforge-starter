@@ -33,6 +33,12 @@ import { RateLimitLockTime1795910000000 } from './1795910000000-RateLimitLockTim
 import { RateLimitInsertTime1795920000000 } from './1795920000000-RateLimitInsertTime';
 
 import { WebhookDeliveries1796000000000 } from './1796000000000-WebhookDeliveries';
+import { ScheduleProgress1796100000000 } from './1796100000000-ScheduleProgress';
+import { NotificationOutbox1796200000000 } from './1796200000000-NotificationOutbox';
+
+import { SerializeOutbox1796300000000 } from './1796300000000-SerializeOutbox';
+
+import { CloseCancelledAttempts1796400000000 } from './1796400000000-CloseCancelledAttempts';
 
 export const MIGRATIONS = [
   InitialSchema1794920217603,
@@ -59,4 +65,8 @@ export const MIGRATIONS = [
   RateLimitLockTime1795910000000,
   RateLimitInsertTime1795920000000,
   WebhookDeliveries1796000000000,
+  ScheduleProgress1796100000000,
+  NotificationOutbox1796200000000,
+  SerializeOutbox1796300000000,
+  CloseCancelledAttempts1796400000000,
 ];

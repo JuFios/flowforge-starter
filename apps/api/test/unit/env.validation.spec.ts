@@ -61,6 +61,21 @@ describe('validateEnv', () => {
     });
   });
 
+  it.each([1, 99, 100, 5000])(
+    'accepts a %i ms step timeout with independent outbox settings',
+    (timeout) => {
+      for (const concurrency of [0, 1]) {
+        expect(
+          validateEnv({
+            ...base,
+            HTTP_STEP_TIMEOUT_MS: String(timeout),
+            OUTBOX_CONCURRENCY: concurrency,
+          }).HTTP_STEP_TIMEOUT_MS,
+        ).toBe(timeout);
+      }
+    },
+  );
+
   it('rejects a missing DATABASE_URL', () => {
     expect(() => validateEnv({ ADMIN_TOKEN: base.ADMIN_TOKEN })).toThrow(
       /DATABASE_URL/,
@@ -108,10 +123,35 @@ describe('validateEnv', () => {
     expect(() =>
       validateEnv({ ...base, SCHEDULER_TICK_MS: '2147483648' }),
     ).toThrow(/SCHEDULER_TICK_MS/);
+    // Межа пропуску не коротша за тік, тож найбільший тік — разом із найбільшою межею.
     expect(
-      validateEnv({ ...base, SCHEDULER_TICK_MS: '2147483647' })
-        .SCHEDULER_TICK_MS,
+      validateEnv({
+        ...base,
+        SCHEDULER_TICK_MS: '2147483647',
+        SCHEDULER_MISFIRE_GRACE_MS: '2147483647',
+      }).SCHEDULER_TICK_MS,
     ).toBe(2147483647);
+    expect(() =>
+      validateEnv({ ...base, SCHEDULER_MISFIRE_GRACE_MS: '2147483648' }),
+    ).toThrow(/SCHEDULER_MISFIRE_GRACE_MS/);
+  });
+
+  it('rejects a missed-run grace shorter than the scheduler tick', () => {
+    expect(() =>
+      validateEnv({
+        ...base,
+        SCHEDULER_TICK_MS: '30000',
+        SCHEDULER_MISFIRE_GRACE_MS: '29999',
+      }),
+    ).toThrow(/SCHEDULER_MISFIRE_GRACE_MS/);
+    expect(
+      validateEnv({
+        ...base,
+        SCHEDULER_TICK_MS: '30000',
+        SCHEDULER_MISFIRE_GRACE_MS: '30000',
+      }).SCHEDULER_MISFIRE_GRACE_MS,
+    ).toBe(30000);
+    expect(validateEnv(base).SCHEDULER_MISFIRE_GRACE_MS).toBe(60000);
   });
 
   it('accepts METRICS_PORT=0 (random free port) but not out-of-range values', () => {

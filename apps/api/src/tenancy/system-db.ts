@@ -6,7 +6,7 @@ import { Job } from '../entities';
 /** Найдовше читання глибини черги для метрик, мс (або менше — за statement_timeout сесії). */
 const QUEUE_DEPTH_TIMEOUT_MS = 2_000;
 
-/** Розмір сторінки планувальника (`scheduled_tenants`); функція сама обмежує його 1000. */
+/** Розмір сторінки планувальника (`due_schedule_tenants`); функція сама обмежує його 1000. */
 export const SCHEDULE_PAGE = 500;
 
 /**
@@ -38,12 +38,15 @@ export class SystemDb {
     return row?.id ?? null;
   }
 
-  /** Сторінка тенантів з увімкненими розкладами після `after` (за id), до `limit` рядків. */
-  scheduledTenants(
+  /**
+   * Сторінка тенантів, у яких є належний розклад (`nextFireAt` настав), після `after` (за id), до
+   * `limit` рядків. Лише ідентифікатори: самі розклади планувальник читає в контексті тенанта.
+   */
+  dueScheduleTenants(
     after: string | null,
     limit = SCHEDULE_PAGE,
   ): Promise<Array<{ tenantId: string }>> {
-    return this.ds.query('SELECT * FROM scheduled_tenants($1, $2)', [
+    return this.ds.query('SELECT * FROM due_schedule_tenants($1, $2)', [
       after,
       limit,
     ]);
@@ -132,6 +135,79 @@ export class SystemDb {
       [batch],
     );
     return row.deleted;
+  }
+
+  /**
+   * Справедливе захоплення спроби доставки сповіщення (`claim_outbox_event`, README 3.3.9):
+   * подія (лише ідентифікатори й fencing-токен) або null, і скільки підказок `dueAt` перераховано.
+   */
+  async claimOutboxEvent(
+    senderId: string,
+    leaseMs: number,
+    inFlight: number,
+  ): Promise<{
+    event: {
+      id: string;
+      tenantId: string;
+      leaseToken: string;
+      attempt: number;
+      correlationId: string | null;
+    } | null;
+    repaired: number;
+  }> {
+    const [row]: Array<{
+      id: string | null;
+      tenantId: string;
+      leaseToken: string;
+      attempt: number;
+      correlationId: string | null;
+      repaired: number;
+    }> = await this.ds.query('SELECT * FROM claim_outbox_event($1, $2, $3)', [
+      senderId,
+      leaseMs,
+      inFlight,
+    ]);
+    const { repaired, ...event } = row;
+    return {
+      event: event.id ? { ...event, id: event.id } : null,
+      repaired,
+    };
+  }
+
+  /** Одна пачка очищення доставлених подій; кількість видалених. */
+  async purgeDeliveredEvents(days: number, batch: number): Promise<number> {
+    const [row]: Array<{ deleted: number }> = await this.ds.query(
+      'SELECT purge_delivered_events($1, $2) AS deleted',
+      [days, batch],
+    );
+    return row.deleted;
+  }
+
+  /** Недоставлені події за тенантом (кількості й найстаріша), з межею часу як у глибини черги. */
+  outboxBacklog(): Promise<
+    Array<{
+      tenantId: string;
+      pending: number;
+      sending: number;
+      oldest: Date;
+    }>
+  > {
+    return this.ds.transaction(async (em) => {
+      await em.query(
+        `SELECT pg_catalog.set_config('statement_timeout',
+                  (CASE WHEN s.setting::int = 0 THEN $1 ELSE least(s.setting::int, $1) END)::text, true)
+           FROM pg_catalog.pg_settings s WHERE s.name = 'statement_timeout'`,
+        [QUEUE_DEPTH_TIMEOUT_MS],
+      );
+      return em.query<
+        Array<{
+          tenantId: string;
+          pending: number;
+          sending: number;
+          oldest: Date;
+        }>
+      >('SELECT * FROM outbox_backlog()');
+    });
   }
 
   /** Одна пачка очищення завершених задач; кількість видалених. */

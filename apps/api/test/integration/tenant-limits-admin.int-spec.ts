@@ -26,7 +26,7 @@ describe('tenant limits admin API', () => {
 
   afterAll(async () => {
     await apiApp.close();
-    await provisionTestDatabase((sql, params) => owner.query(sql, params));
+    await provisionTestDatabase(owner);
     await truncateAll(owner);
     await owner.destroy();
   });
@@ -262,7 +262,7 @@ describe('tenant limits admin API', () => {
       if (writer.isTransactionActive) await writer.rollbackTransaction();
       await writer.release();
       await creator.release();
-      await provisionTestDatabase((sql, params) => owner.query(sql, params));
+      await provisionTestDatabase(owner);
     }
   });
 

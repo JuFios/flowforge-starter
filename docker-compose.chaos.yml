@@ -2,6 +2,7 @@
 #   (cd apps/api && npm ci && npm run chaos:sink:build)
 #   docker compose -f docker-compose.yml -f docker-compose.chaos.yml up -d --build --wait
 #   (cd apps/api && npm run chaos)
+#   (cd apps/api && npm run chaos:notifications)
 services:
   # Зовнішній отримувач http-кроків, що поважає Idempotency-Key і рахує ефекти.
   sink:
@@ -11,7 +12,7 @@ services:
     image: node:20-alpine
     command: ["node", "/sink/chaos-sink.js"]
     volumes: ["./apps/api/dist/scripts:/sink:ro"]
-    ports: ["8080:8080"]
+    ports: ["127.0.0.1:8080:8080"]
     healthcheck:
       test:
         [
@@ -20,6 +21,16 @@ services:
         ]
       interval: 2s
       retries: 20
+
+  # API перевіряє endpoint сповіщень під час збереження (DNS і політика адрес): `sink` — дозволений
+  # тестовий приймач, як і для воркера.
+  api:
+    networks: [default, chaos-receiver]
+    environment:
+      HTTP_FIXTURE_ORIGIN: "http://sink:8080"
+      HTTP_FIXTURE_ADDRESS: "10.213.45.10"
+    depends_on:
+      sink: { condition: service_healthy }
 
   worker:
     networks: [default, chaos-receiver]

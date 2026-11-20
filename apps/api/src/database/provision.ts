@@ -1,4 +1,5 @@
 import 'reflect-metadata';
+import { lockClusterRoles } from './cluster-role-lock';
 import { createHash, createHmac, pbkdf2Sync, randomBytes } from 'node:crypto';
 import { DataSource } from 'typeorm';
 import { BUILT_IN_LIMIT_DEFAULTS, LIMIT_BOUNDS } from '../tenancy/limits';
@@ -85,6 +86,7 @@ export async function provisionLoginRoles(
   if (!superuser)
     throw new Error('db:provision must run as a PostgreSQL superuser');
 
+  await lockClusterRoles(query);
   const existingUsers = new Set<string>();
   for (const role of roles) {
     const unsafeGroup = (await query(UNSAFE_GROUP_SQL, [

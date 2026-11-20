@@ -138,7 +138,7 @@ describe('tenant request rate limit', () => {
       await sleep(1_100);
       expect((await get('/workflows')).status).toBe(200);
     } finally {
-      await provisionTestDatabase((sql, params) => owner.query(sql, params));
+      await provisionTestDatabase(owner);
     }
   });
 

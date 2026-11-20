@@ -2,6 +2,8 @@ import { randomBytes } from 'node:crypto';
 import { DataSource } from 'typeorm';
 import { LoginRole, provisionLoginRoles } from '../../src/database/provision';
 import { API_ROLE, WORKER_ROLE } from '../../src/tenancy/roles';
+import { waitForBlocked } from '../helpers/transaction-barrier';
+
 import { openTestDataSource } from '../helpers/db';
 import { clusterScopedName, testRoleUrl } from '../helpers/test-env';
 
@@ -27,10 +29,13 @@ const passwords = {
 describe('db:provision', () => {
   let owner: DataSource;
   const sent: string[] = [];
-  const query = (sql: string, params?: unknown[]) => {
-    sent.push(sql, JSON.stringify(params ?? []));
-    return owner.query(sql, params);
-  };
+  const provision = (desired: LoginRole[]) =>
+    owner.transaction((em) =>
+      provisionLoginRoles((sql, params) => {
+        sent.push(sql, JSON.stringify(params ?? []));
+        return em.query(sql, params);
+      }, desired),
+    );
   const roles = (apiPassword: string): LoginRole[] => [
     { user: API_USER, password: apiPassword, group: API_ROLE },
     { user: WORKER_USER, password: passwords.worker, group: WORKER_ROLE },
@@ -74,15 +79,61 @@ describe('db:provision', () => {
     await owner.destroy();
   });
 
+  it.each(['commit', 'rollback'])(
+    'provisions the same first logins after a concurrent %s',
+    async (outcome) => {
+      const desired = roles(passwords.first).map((role) => ({
+        ...role,
+        user: clusterScopedName(
+          'ff_race_' + (role.group === API_ROLE ? 'api' : 'worker'),
+        ),
+      }));
+      const holder = owner.createQueryRunner();
+      await holder.connect();
+      await holder.startTransaction();
+      try {
+        await provisionLoginRoles(
+          (sql, params) => holder.query(sql, params),
+          desired,
+        );
+        const other = owner.transaction((em) =>
+          provisionLoginRoles((sql, params) => em.query(sql, params), desired),
+        );
+        const result = Promise.allSettled([other]);
+        await waitForBlocked(owner, holder);
+        if (outcome === 'commit') await holder.commitTransaction();
+        else await holder.rollbackTransaction();
+        expect(await result).toEqual([
+          { status: 'fulfilled', value: undefined },
+        ]);
+        for (const role of desired)
+          expect(await canLogin(role.user, role.password)).toBe(true);
+      } finally {
+        if (holder.isTransactionActive) await holder.rollbackTransaction();
+        await holder.release();
+        for (const role of desired) {
+          const rows = await owner.query<unknown[]>(
+            'SELECT 1 FROM pg_roles WHERE rolname=$1',
+            [role.user],
+          );
+          if (rows.length) {
+            await owner.query(`DROP OWNED BY "${role.user}"`);
+            await owner.query(`DROP ROLE "${role.user}"`);
+          }
+        }
+      }
+    },
+  );
+
   it('creates both roles, which can log in with their passwords', async () => {
-    await provisionLoginRoles(query, roles(passwords.first));
+    await provision(roles(passwords.first));
     expect(await canLogin(API_USER, passwords.first)).toBe(true);
     expect(await canLogin(WORKER_USER, passwords.worker)).toBe(true);
   });
 
   it('never sends a password in plain text, only a SCRAM verifier', async () => {
     sent.length = 0;
-    await provisionLoginRoles(query, roles(passwords.first));
+    await provision(roles(passwords.first));
     const all = sent.join('\n');
     expect(all).not.toContain(passwords.first);
     expect(all).not.toContain(passwords.worker);
@@ -103,7 +154,7 @@ describe('db:provision', () => {
   ] as const)(
     'rejects unexpected %s before rotating credentials',
     async (kind) => {
-      await provisionLoginRoles(query, roles(passwords.first));
+      await provision(roles(passwords.first));
       const runner = owner.createQueryRunner();
       await runner.connect();
       await runner.startTransaction();
@@ -143,8 +194,8 @@ describe('db:provision', () => {
   );
 
   it('is idempotent and rotates the password', async () => {
-    await provisionLoginRoles(query, roles(passwords.first));
-    await provisionLoginRoles(query, roles(passwords.second));
+    await provision(roles(passwords.first));
+    await provision(roles(passwords.second));
     expect(await canLogin(API_USER, passwords.second)).toBe(true);
     expect(await canLogin(API_USER, passwords.first)).toBe(false);
   });
@@ -152,13 +203,13 @@ describe('db:provision', () => {
   it('gives each role only its own group, no superuser or BYPASSRLS, and closes CONNECT to PUBLIC', async () => {
     await owner.query(`GRANT ${WORKER_ROLE} TO ${API_USER}`);
     try {
-      await expect(
-        provisionLoginRoles(query, roles(passwords.second)),
-      ).rejects.toThrow(/refusing to manage/);
+      await expect(provision(roles(passwords.second))).rejects.toThrow(
+        /refusing to manage/,
+      );
     } finally {
       await owner.query(`REVOKE ${WORKER_ROLE} FROM ${API_USER}`);
     }
-    await provisionLoginRoles(query, roles(passwords.second));
+    await provision(roles(passwords.second));
     const rows: Array<Record<string, unknown>> = await owner.query(
       `SELECT r.rolname, r.rolsuper, r.rolbypassrls, r.rolcreaterole, r.rolcreatedb,
               pg_has_role(r.rolname, $3, 'MEMBER') AS api,
@@ -216,9 +267,7 @@ describe('db:provision', () => {
     'rejects %s without touching the database',
     async (_case, role) => {
       sent.length = 0;
-      await expect(provisionLoginRoles(query, [role])).rejects.toThrow(
-        /invalid/,
-      );
+      await expect(provision([role])).rejects.toThrow(/invalid/);
       expect(sent).toEqual([]);
     },
   );
@@ -229,9 +278,7 @@ describe('db:provision', () => {
     );
     try {
       sent.length = 0;
-      await expect(
-        provisionLoginRoles(query, roles(passwords.first)),
-      ).rejects.toThrow(
+      await expect(provision(roles(passwords.first))).rejects.toThrow(
         `refusing to manage ${API_USER}: unexpected group privileges`,
       );
       expect(
@@ -253,9 +300,7 @@ describe('db:provision', () => {
     );
     const target = user === 'flowforge' ? me : user;
     await expect(
-      provisionLoginRoles(query, [
-        { user: target, password: passwords.first, group: API_ROLE },
-      ]),
+      provision([{ user: target, password: passwords.first, group: API_ROLE }]),
     ).rejects.toThrow(/refusing to manage/);
   });
 
@@ -277,9 +322,7 @@ describe('db:provision', () => {
       try {
         await owner.query(grant);
         sent.length = 0;
-        await expect(
-          provisionLoginRoles(query, roles(passwords.first)),
-        ).rejects.toThrow(reason);
+        await expect(provision(roles(passwords.first))).rejects.toThrow(reason);
         expect(
           sent.filter((s) => /^(ALTER|CREATE|GRANT|REVOKE)/.test(s)),
         ).toEqual([]);
@@ -307,7 +350,7 @@ describe('db:provision', () => {
       const before = await password();
       sent.length = 0;
       await expect(
-        provisionLoginRoles(query, [
+        provision([
           { user: bystander, password: passwords.first, group: API_ROLE },
         ]),
       ).rejects.toThrow(
@@ -331,7 +374,7 @@ describe('db:provision', () => {
 
   it('refuses the same role for both processes', async () => {
     await expect(
-      provisionLoginRoles(query, [
+      provision([
         { user: API_USER, password: passwords.first, group: API_ROLE },
         { user: API_USER, password: passwords.first, group: WORKER_ROLE },
       ]),

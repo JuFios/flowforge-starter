@@ -1,6 +1,7 @@
 import {
   IsBoolean,
   IsDefined,
+  IsIn,
   IsOptional,
   IsString,
   Length,
@@ -8,9 +9,10 @@ import {
   ValidateIf,
 } from 'class-validator';
 import { IsStorableText } from '../../common/storable-text';
+import { MISSED_RUN_POLICIES, MissedRunPolicy } from '../../entities';
 
 export const MAX_WORKFLOW_NAME_LENGTH = 200;
-/** Довжина рядків cron і таймзони; сенс виразу й IANA-зони перевіряє планувальник. */
+/** Довжина рядків cron і таймзони; сенс виразу й IANA-зону перевіряє WorkflowsService. */
 export const MAX_CRON_LENGTH = 100;
 export const MAX_TIMEZONE_LENGTH = 64;
 
@@ -39,6 +41,10 @@ export class CreateWorkflowDto {
   @IsOptional()
   @IsBoolean()
   enabled?: boolean;
+
+  @IsOptional()
+  @IsIn(MISSED_RUN_POLICIES)
+  missedRunPolicy?: MissedRunPolicy;
 }
 
 /** Часткова зміна workflow: ті самі правила, усі поля необов'язкові. */
@@ -67,4 +73,8 @@ export class UpdateWorkflowDto {
   @ValidateIf((_dto, value: unknown) => value !== undefined)
   @IsBoolean()
   enabled?: boolean;
+
+  @ValidateIf((_dto, value: unknown) => value !== undefined)
+  @IsIn(MISSED_RUN_POLICIES)
+  missedRunPolicy?: MissedRunPolicy;
 }

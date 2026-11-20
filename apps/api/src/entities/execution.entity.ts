@@ -113,4 +113,11 @@ export class Execution {
 
   @Column({ type: 'timestamptz', nullable: true })
   finishedAt: Date | null;
+
+  /**
+   * Скільки разів виконання перейшло в кінцевий стан (`succeeded`/`failed`). Рахує тригер у тій
+   * самій транзакції; це `sequence` вихідної події циклу (README 3.3.9).
+   */
+  @Column({ type: 'int', default: 0, select: false })
+  terminalCycles: number;
 }

@@ -60,6 +60,28 @@ describe('POST /workflows/:id/run with an Idempotency-Key', () => {
     jobs: await ds.getRepository(Job).count(),
   });
 
+  it('replays an accepted request after workflow deletion', async () => {
+    const first = await run({ n: 1 }, 'accepted');
+    expect(first.status).toBe(201);
+    const deletion = await fetch(`${running.baseUrl}/workflows/${workflowId}`, {
+      method: 'DELETE',
+      headers: { 'x-api-key': tenant.apiKey },
+    });
+    expect(deletion.ok).toBe(true);
+    expect(await run({ n: 1 }, 'accepted')).toMatchObject({
+      status: 200,
+      body: { id: first.body.id },
+    });
+    expect((await run({ n: 2 }, 'accepted')).status).toBe(422);
+    expect((await run({ n: 1 }, 'fresh')).status).toBe(404);
+    expect((await run({ n: 1 })).status).toBe(404);
+    const foreign = await createTenant(ds, 'foreign');
+    expect(
+      (await run({ n: 1 }, 'accepted', { apiKey: foreign.apiKey })).status,
+    ).toBe(404);
+    expect(await count()).toEqual({ executions: 1, jobs: 1 });
+  });
+
   it('creates one execution for a repeated request with the same key', async () => {
     const first = await run({ order: 1 }, 'order-1');
     const again = await run({ order: 1 }, 'order-1');

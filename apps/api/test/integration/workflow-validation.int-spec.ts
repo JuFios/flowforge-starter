@@ -46,6 +46,88 @@ describe('workflow and run input is validated at the API boundary', () => {
     expect(await ds.query(`SELECT 1 FROM workflows`)).toHaveLength(0);
   });
 
+  it.each([
+    ['an empty cron expression', { cron: '' }],
+    ['a blank cron expression', { cron: '   ' }],
+    ['a cron expression that never matches a date', { cron: '0 0 31 2 *' }],
+    ['a cron expression out of range', { cron: '61 * * * *' }],
+    ['a cron expression with seven fields', { cron: '0 0 0 * * * *' }],
+    ['an unknown timezone', { cron: '0 9 * * *', timezone: 'Mars/Olympus' }],
+    [
+      'a fixed offset instead of a zone',
+      { cron: '0 9 * * *', timezone: '+03:00' },
+    ],
+    ['the process local timezone', { cron: '0 9 * * *', timezone: 'local' }],
+  ])(
+    'rejects a schedule with %s with 400 on POST and PATCH',
+    async (_case, schedule) => {
+      const created = await call('POST', '/workflows', {
+        name: 'w',
+        steps,
+        ...schedule,
+      });
+      expect(created.status).toBe(400);
+      expect(await ds.query(`SELECT 1 FROM workflows`)).toHaveLength(0);
+      const wf = await api<{ id: string }>(
+        app.baseUrl,
+        apiKey,
+        'POST',
+        '/workflows',
+        { name: 'w', steps, cron: '0 9 * * *', timezone: 'Europe/Kyiv' },
+      );
+      expect(wf.status).toBe(201);
+      const patched = await call('PATCH', `/workflows/${wf.body.id}`, schedule);
+      expect(patched.status).toBe(400);
+      expect(
+        await ds.query(`SELECT cron, timezone FROM workflows WHERE id = $1`, [
+          wf.body.id,
+        ]),
+      ).toEqual([{ cron: '0 9 * * *', timezone: 'Europe/Kyiv' }]);
+    },
+  );
+
+  it.each([['Mars/Olympus'], ['+03:00'], ['local']])(
+    'rejects the timezone %s with 400 also without a cron expression',
+    async (timezone) => {
+      const created = await call('POST', '/workflows', {
+        name: 'w',
+        steps,
+        timezone,
+      });
+      expect(created.status).toBe(400);
+      const wf = await api<{ id: string }>(
+        app.baseUrl,
+        apiKey,
+        'POST',
+        '/workflows',
+        { name: 'w', steps },
+      );
+      const patched = await call('PATCH', `/workflows/${wf.body.id}`, {
+        timezone,
+      });
+      expect(patched.status).toBe(400);
+      expect(
+        await ds.query(`SELECT timezone FROM workflows WHERE id = $1`, [
+          wf.body.id,
+        ]),
+      ).toEqual([{ timezone: 'UTC' }]);
+    },
+  );
+
+  it.each([
+    ['a five-field cron', { cron: '30 3 * * *', timezone: 'Europe/Kyiv' }],
+    ['a six-field cron with seconds', { cron: '*/10 * * * * *' }],
+    ['a zone alias', { cron: '0 9 * * 1-5', timezone: 'US/Eastern' }],
+    ['UTC', { cron: '@hourly', timezone: 'UTC' }],
+  ])('accepts a schedule with %s', async (_case, schedule) => {
+    const res = await call('POST', '/workflows', {
+      name: 'w',
+      steps,
+      ...schedule,
+    });
+    expect(res.status).toBe(201);
+  });
+
   it.each(['__proto__', 'constructor'])(
     'rejects the unknown top-level field %s on POST and PATCH',
     async (field) => {

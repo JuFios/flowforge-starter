@@ -1,4 +1,5 @@
 import {
+  Check,
   Column,
   CreateDateColumn,
   Entity,
@@ -24,10 +25,18 @@ export type StepDefinition =
   | { id: string; type: 'log'; message: string }
   | { id: string; type: 'delay'; ms: number };
 
+export const MISSED_RUN_POLICIES = ['skip', 'run_once', 'run_all'] as const;
+export type MissedRunPolicy = (typeof MISSED_RUN_POLICIES)[number];
+
 @Entity('workflows')
 @Unique('UQ_workflows_id_tenant', ['id', 'tenantId'])
 @Index(['tenantId'])
 @Index('IDX_workflows_scheduled_tenant', { synchronize: false })
+@Index('IDX_workflows_due', { synchronize: false })
+@Check(
+  'CHK_workflows_missed_run_policy',
+  `"missedRunPolicy" IN ('skip', 'run_once', 'run_all')`,
+)
 export class Workflow {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -60,6 +69,32 @@ export class Workflow {
 
   @Column({ default: 1 })
   version: number;
+
+  /**
+   * Політика моментів розкладу, пропущених довше за SCHEDULER_MISFIRE_GRACE_MS (простій, БД
+   * недоступна, повна черга): пропустити, виконати один раз чи виконати всі (README 3.3.8).
+   */
+  @Column({ type: 'varchar', default: 'run_once' })
+  missedRunPolicy: MissedRunPolicy;
+
+  /**
+   * Прогрес планувальника: усі моменти розкладу до цього моменту включно оброблено. Переживає
+   * рестарт; зміна cron, таймзони чи ввімкнення переносять його на момент зміни.
+   */
+  @Column({ type: 'timestamptz', default: () => 'now()' })
+  scheduleCursor: Date;
+
+  /** Не пізніше за наступний момент розкладу (підказка вибору належних розкладів). */
+  @Column({ type: 'timestamptz', nullable: true })
+  nextFireAt: Date | null;
+
+  /** З якого моменту спрацювання стоїть через повну чергу тенанта; NULL — не стоїть. */
+  @Column({ type: 'timestamptz', nullable: true })
+  scheduleBlockedSince: Date | null;
+
+  /** Чому розклад не обчислюється (успадкований невалідний вираз); NULL — обчислюється. */
+  @Column({ type: 'text', nullable: true })
+  scheduleError: string | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;

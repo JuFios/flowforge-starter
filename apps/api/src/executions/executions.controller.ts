@@ -44,11 +44,12 @@ export class ExecutionsController {
       idempotencyKey === undefined
         ? undefined
         : parseIdempotencyKey(idempotencyKey);
-    const workflow = await this.workflows.get(t.id, id);
-    if (key === undefined)
+    if (key === undefined) {
+      const workflow = await this.workflows.get(t.id, id);
       return this.executions.enqueue(workflow, input, 'api');
+    }
     const { execution, created } = await this.executions.enqueueOnce(
-      workflow,
+      { id, tenantId: t.id },
       input,
       key,
     );

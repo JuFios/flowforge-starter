@@ -11,6 +11,10 @@ import { Logger } from 'nestjs-pino';
 import { CreateTenantDto } from './tenants/tenants.controller';
 import { LIMIT_FIELDS } from './tenants/tenant-limits.dto';
 import { getMetadataStorage } from 'class-validator';
+import {
+  ExactJsonNumbersInterceptor,
+  markInexactJsonNumbers,
+} from './common/exact-json-numbers';
 import { exceedsJsonDepth, jsonTooDeepMessage } from './common/json-depth';
 import { EnvironmentVariables, parseTrustProxy } from './config/env.validation';
 import {
@@ -100,7 +104,9 @@ export function configureApp(app: INestApplication): INestApplication {
     limit: config.get('HTTP_BODY_LIMIT', { infer: true }),
   };
   http.use('/hooks', raw({ ...options, type: () => true }));
-  http.useBodyParser('json', options);
+  // Числа, які змінилися б після розбору (1e400, цілі поза точністю double), видно лише в сирому
+  // тексті: verify позначає запит, 400 — після guard-ів (ExactJsonNumbersInterceptor).
+  http.useBodyParser('json', { ...options, verify: markInexactJsonNumbers });
   http.useBodyParser('urlencoded', { ...options, extended: true });
   // Невідомі поля — 400, а не мовчазне відкидання: тенант бачить, що поле не діє.
   app.useGlobalPipes(
@@ -110,6 +116,7 @@ export function configureApp(app: INestApplication): INestApplication {
       transform: true,
     }),
   );
+  app.useGlobalInterceptors(new ExactJsonNumbersInterceptor());
   app.enableShutdownHooks();
   return app;
 }

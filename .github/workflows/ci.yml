@@ -56,6 +56,8 @@ jobs:
           cache: npm
           cache-dependency-path: apps/api/package-lock.json
       - run: npm ci
+      - name: Verify first install in two databases on the clean cluster
+        run: npx --no-install jest -c test/jest-cluster.json --runInBand
       - run: npm run test:integration
       # Пропускна здатність справедливого захоплення (README, «Бенчмарк захоплення»): відносно
       # FIFO попередньої версії на тому самому раннері — ≥ 50% пропускної здатності, p95 ≤ 3×,
@@ -173,6 +175,15 @@ jobs:
         run: |
           diff <(docker compose config --format json | jq -S '.networks.default') \
                <(docker compose -f docker-compose.yml -f docker-compose.chaos.yml config --format json | jq -S '.networks.default')
+      - name: Verify the receiver binding and shared outbound network policy
+        env:
+          HTTP_DENY_CIDRS: 203.0.113.0/24
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.chaos.yml config --format json |
+            jq -e '.services as $s |
+              $s.api.environment.HTTP_DENY_CIDRS == env.HTTP_DENY_CIDRS and
+              $s.worker.environment.HTTP_DENY_CIDRS == env.HTTP_DENY_CIDRS and
+              ($s.sink.ports | length == 1 and all(.host_ip == "127.0.0.1"))' > /dev/null
       - name: Add the chaos receiver and short worker leases
         run: docker compose -f docker-compose.yml -f docker-compose.chaos.yml up -d --wait --wait-timeout 180
       - name: Kill workers under load and verify exactly-once effects
@@ -181,6 +192,11 @@ jobs:
       - name: Restart Postgres under load and verify workers survive with exactly-once effects
         working-directory: apps/api
         run: npm run chaos:postgres
+      # Вихідні сповіщення (ТЗ 3.3.9): рестарт Postgres під час доставки й втрачені підтвердження —
+      # одна подія на завершення, повторна підписана доставка тих самих байтів із тим самим ID.
+      - name: Deliver signed notifications through a database restart and lost acknowledgements
+        working-directory: apps/api
+        run: npm run chaos:notifications
       # Справедливе планування (ТЗ 3.3.5): тенант B під backlog-ом 20 000 задач тенанта A — критерії
       # у README, «Навантажувальний сценарій справедливого планування»; провал будь-якого — помилка.
       - name: Measure fair scheduling under the backlog of another tenant

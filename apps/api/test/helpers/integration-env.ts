@@ -15,6 +15,11 @@ process.env.JOB_BACKOFF_BASE_MS = '50';
 process.env.JOB_BACKOFF_MAX_MS = '500';
 process.env.WORKER_POLL_INTERVAL_MS = '50';
 process.env.WORKER_SHUTDOWN_GRACE_MS = '3000';
+// Доставка сповіщень: короткі паузи й backoff, тож повтори й відновлення тривають секунди.
+process.env.OUTBOX_POLL_INTERVAL_MS = '50';
+process.env.OUTBOX_HTTP_TIMEOUT_MS = '2000';
+process.env.OUTBOX_BACKOFF_BASE_MS = '100';
+process.env.OUTBOX_BACKOFF_MAX_MS = '1000';
 // Ліміти за IP: усі тести ходять з 127.0.0.1, тож для них — високі; тести лімітів задають свої.
 process.env.ADMIN_RATE_LIMIT = '10000';
 process.env.AUTH_FAILURE_RATE_LIMIT = '10000';

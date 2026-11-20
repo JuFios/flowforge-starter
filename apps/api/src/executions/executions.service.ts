@@ -68,14 +68,54 @@ export class ExecutionsService {
     input: Record<string, unknown>,
     trigger: Execution['trigger'],
   ): Promise<Execution> {
-    return (await this.create(workflow, input, trigger, null)).execution;
+    const correlationId = getCorrelationId() ?? newCorrelationId();
+    return this.db.run(workflow.tenantId, async (em) => {
+      const usage = await this.lockUsage(em);
+      return (
+        await this.insertExecution(
+          em,
+          workflow,
+          input,
+          trigger,
+          null,
+          null,
+          correlationId,
+          usage,
+        )
+      ).execution;
+    });
   }
 
-  async enqueueScheduled(
+  /**
+   * Спрацювання розкладу в транзакції планувальника `em` (вона вже в контексті тенанта workflow і
+   * тримає блокування його рядка): облік тенанта → наявне виконання цього моменту → ліміт черги →
+   * виконання й задача. Повертає, чи створено нове. Повна черга — QueueFullException, і
+   * транзакція планувальника відкочується разом із курсором.
+   */
+  async enqueueScheduledIn(
+    em: EntityManager,
     workflow: Workflow,
     scheduledAt: Date,
+    correlationId: string,
   ): Promise<boolean> {
-    return (await this.create(workflow, {}, 'cron', null, scheduledAt)).created;
+    const usage = await this.lockUsage(em);
+    const existing = await em.findOneBy(Execution, {
+      tenantId: workflow.tenantId,
+      workflowId: workflow.id,
+      scheduledAt,
+    });
+    if (existing) return false;
+    const { created } = await this.insertExecution(
+      em,
+      workflow,
+      {},
+      'cron',
+      null,
+      scheduledAt,
+      correlationId,
+      usage,
+    );
+    return created;
   }
 
   /**
@@ -85,11 +125,30 @@ export class ExecutionsService {
    * упорядковує унікальний індекс: другий INSERT чекає на коміт першого й нічого не вставляє.
    */
   enqueueOnce(
-    workflow: Workflow,
+    target: Pick<Workflow, 'id' | 'tenantId'>,
     input: Record<string, unknown>,
     idempotencyKey: string,
   ): Promise<{ execution: Execution; created: boolean }> {
-    return this.create(workflow, input, 'api', idempotencyKey);
+    return this.db.run(target.tenantId, async (em) => {
+      const workflow = await em.findOne(Workflow, {
+        where: target,
+        lock: { mode: 'pessimistic_read' },
+      });
+      const usage = await this.lockUsage(em);
+      const existing = await this.findRun(em, target, input, idempotencyKey);
+      if (existing) return { execution: existing, created: false };
+      if (!workflow) throw new NotFoundException('Workflow не знайдено');
+      return this.insertExecution(
+        em,
+        workflow,
+        input,
+        'api',
+        idempotencyKey,
+        null,
+        getCorrelationId() ?? newCorrelationId(),
+        usage,
+      );
+    });
   }
 
   /**
@@ -109,49 +168,6 @@ export class ExecutionsService {
     if (usage.queued + usage.running < usage.maxQueueSize) return;
     this.limits.enqueueRejected.inc({ reason: 'queue_full', trigger });
     throw new QueueFullException(usage.maxQueueSize);
-  }
-
-  private create(
-    workflow: Workflow,
-    input: Record<string, unknown>,
-    trigger: Execution['trigger'],
-    idempotencyKey: string | null,
-    scheduledAt: Date | null = null,
-  ): Promise<{ execution: Execution; created: boolean }> {
-    const correlationId = getCorrelationId() ?? newCorrelationId();
-    return this.db.run(workflow.tenantId, async (em) => {
-      // Порядок: облік тенанта (блокування) → пошук за ключем → ліміт → нові рядки. Ключ
-      // перевіряється після блокування: повтор уже прийнятого запиту повертає його виконання,
-      // навіть коли черга тим часом заповнилась, і два однакові запити не займуть два місця.
-      const usage = await this.lockUsage(em);
-      if (scheduledAt) {
-        const existing = await em.findOneBy(Execution, {
-          tenantId: workflow.tenantId,
-          workflowId: workflow.id,
-          scheduledAt,
-        });
-        if (existing) return { execution: existing, created: false };
-      }
-      if (idempotencyKey !== null) {
-        const existing = await this.findRun(
-          em,
-          workflow,
-          input,
-          idempotencyKey,
-        );
-        if (existing) return { execution: existing, created: false };
-      }
-      return this.insertExecution(
-        em,
-        workflow,
-        input,
-        trigger,
-        idempotencyKey,
-        scheduledAt,
-        correlationId,
-        usage,
-      );
-    });
   }
 
   /**
@@ -309,7 +325,7 @@ export class ExecutionsService {
    */
   private async findRun(
     em: EntityManager,
-    workflow: Workflow,
+    workflow: Pick<Workflow, 'id' | 'tenantId'>,
     input: Record<string, unknown>,
     idempotencyKey: string,
   ): Promise<Execution | undefined> {

@@ -27,7 +27,7 @@ describe('data migrations', () => {
     // старих форматів (без тенантів) очищаються до того, як TenantIsolation перевірить цілісність.
     await truncateAll(ds);
     await ds.runMigrations({ transaction: 'each' });
-    await provisionTestDatabase((sql, params) => ds.query(sql, params));
+    await provisionTestDatabase(ds);
     await truncateAll(ds);
     await ds.destroy();
   });
@@ -650,4 +650,185 @@ describe('data migrations', () => {
       }
     },
   );
+
+  it('repairs orphaned delivery attempts on upgrade while preserving the current lease and recorded outcomes', async () => {
+    await truncateAll(ds);
+    await revertThrough('CloseCancelledAttempts');
+    await ds.query(`WITH tenant AS (
+      INSERT INTO tenants(name,"apiKeyHash","webhookSecret") VALUES ('upgrade','upgrade-attempts','old') RETURNING id
+    ), events AS (
+      INSERT INTO outbox_events("tenantId","executionId",sequence,type,payload,status,attempts,"leaseToken","leaseUntil")
+      SELECT tenant.id,gen_random_uuid(),1,'execution.failed','{}',state,3,
+        CASE WHEN state='sending' THEN gen_random_uuid() END,
+        CASE WHEN state='sending' THEN now()+interval '1 hour' END
+      FROM tenant CROSS JOIN unnest(ARRAY['cancelled','sending','pending']) AS state
+      RETURNING id,"tenantId"
+    ) INSERT INTO outbox_attempts("eventId","tenantId",attempt,"senderId",outcome,"finishedAt")
+      SELECT id,"tenantId",n,'previous',CASE WHEN n=1 THEN 'timeout' END, CASE WHEN n=1 THEN now() END
+      FROM events CROSS JOIN generate_series(1,3) n`);
+    await ds.runMigrations({ transaction: 'each' });
+    const attempts = await ds.query<
+      Array<{
+        status: string;
+        attempt: number;
+        outcome: string | null;
+        closed: boolean;
+      }>
+    >(
+      `SELECT e.status,a.attempt,a.outcome,a."finishedAt" IS NOT NULL AS closed
+      FROM outbox_attempts a JOIN outbox_events e ON e.id=a."eventId"`,
+    );
+    expect(attempts).toHaveLength(9);
+    for (const row of attempts) {
+      const active = row.attempt === 3 && row.status === 'sending';
+      expect(row.closed).toBe(!active);
+      expect(row.outcome).toBe(
+        active ? null : row.attempt === 1 ? 'timeout' : 'interrupted',
+      );
+    }
+  });
+
+  it('upgrades in-flight deliveries, hints, short schedules and unfinished executions from PR 5', async () => {
+    await truncateAll(ds);
+    await revertThrough('SerializeOutbox');
+    const [{ id: tenantId }] = await ds.query<Array<{ id: string }>>(
+      `INSERT INTO tenants(name,"apiKeyHash","webhookSecret") VALUES ('upgrade','upgrade-hash','old') RETURNING id`,
+    );
+    const [{ id: wf }] = await ds.query<Array<{ id: string }>>(
+      `INSERT INTO workflows("tenantId",name,steps,cron,"scheduleCursor","nextFireAt") VALUES ($1,'legacy','[]','* *',now(),now()+interval '1 year') RETURNING id`,
+      [tenantId],
+    );
+    const [{ id: version }] = await ds.query<Array<{ id: string }>>(
+      `INSERT INTO workflow_versions ("workflowId","tenantId",version,steps) VALUES ($1,$2,1,'[]') RETURNING id`,
+      [wf, tenantId],
+    );
+    const [{ id: execution }] = await ds.query<Array<{ id: string }>>(
+      `INSERT INTO executions("tenantId","workflowId","workflowVersionId") VALUES ($1,$2,$3) RETURNING id`,
+      [tenantId, wf, version],
+    );
+    await ds.query(
+      `INSERT INTO notification_settings ("tenantId",url,secret,"dueAt") VALUES ($1,'https://example.org',repeat('a',64),NULL)`,
+      [tenantId],
+    );
+    await ds.query(
+      `INSERT INTO outbox_events ("tenantId","executionId",sequence,type,payload,status,"leaseToken","leaseUntil")
+      VALUES ($1,gen_random_uuid(),1,'execution.failed','old bytes','sending',gen_random_uuid(),now()+interval '1 hour'),
+             ($1,gen_random_uuid(),1,'execution.failed','pending bytes','pending',NULL,NULL)`,
+      [tenantId],
+    );
+    const events = () =>
+      ds.query<unknown[]>(
+        'SELECT id,status,payload,"leaseToken","leaseUntil","nextAttemptAt" FROM outbox_events ORDER BY id',
+      );
+    const settings = () =>
+      ds.query<unknown[]>(
+        'SELECT url,enabled,revision,"secretKeyId",secret FROM notification_settings',
+      );
+    const before = await events(),
+      keys = await settings();
+    await ds.runMigrations({ transaction: 'each' });
+    expect(await events()).toEqual(before);
+    expect(await settings()).toEqual(keys);
+    expect(
+      await ds.query(
+        `SELECT "dueAt"="nextAttemptAt" AS correct FROM notification_settings JOIN outbox_events USING ("tenantId") WHERE status='pending'`,
+      ),
+    ).toEqual([{ correct: true }]);
+    expect(
+      await ds.query(
+        'SELECT cron,"nextFireAt","scheduleError" FROM workflows WHERE id=$1',
+        [wf],
+      ),
+    ).toEqual([
+      {
+        cron: '* *',
+        nextFireAt: null,
+        scheduleError: expect.any(String) as unknown,
+      },
+    ]);
+    await ds.query("UPDATE executions SET status='succeeded' WHERE id=$1", [
+      execution,
+    ]);
+    expect(
+      await ds.query(
+        'SELECT sequence,status FROM outbox_events WHERE "executionId"=$1',
+        [execution],
+      ),
+    ).toEqual([{ sequence: 1, status: 'pending' }]);
+    await truncateAll(ds);
+  });
+
+  it('ScheduleProgress and NotificationOutbox upgrade stored schedules and executions without a flood or a duplicate', async () => {
+    await truncateAll(ds);
+    await revertThrough('ScheduleProgress');
+    const [tenant]: Array<{ id: string }> = await ds.query(
+      `INSERT INTO tenants (name, "apiKeyHash", "webhookSecret") VALUES ('old', 'h-upgrade', 's') RETURNING id`,
+    );
+    const [wf]: Array<{ id: string }> = await ds.query(
+      `INSERT INTO workflows ("tenantId", name, steps, cron, timezone)
+       VALUES ($1, 'nightly', '[]', '* * * * * *', 'Europe/Kyiv') RETURNING id`,
+      [tenant.id],
+    );
+    const [version]: Array<{ id: string }> = await ds.query(
+      `INSERT INTO workflow_versions ("workflowId", "tenantId", version, steps)
+       VALUES ($1, $2, 1, '[]') RETURNING id`,
+      [wf.id, tenant.id],
+    );
+    // Спрацювання, створене попередньою версією, — момент секунду тому.
+    const [{ at }]: Array<{ at: Date }> = await ds.query(
+      `SELECT date_trunc('second', now()) - interval '1 second' AS at`,
+    );
+    const [fired]: Array<{ id: string }> = await ds.query(
+      `INSERT INTO executions ("tenantId", "workflowId", "workflowVersionId", trigger, status, "scheduledAt", "finishedAt")
+       VALUES ($1, $2, $3, 'cron', 'succeeded', $4, now()) RETURNING id`,
+      [tenant.id, wf.id, version.id, at],
+    );
+    const [failed]: Array<{ id: string }> = await ds.query(
+      `INSERT INTO executions ("tenantId", "workflowId", "workflowVersionId", trigger, status, error, "finishedAt")
+       VALUES ($1, $2, $3, 'api', 'failed', 'old failure', now()) RETURNING id`,
+      [tenant.id, wf.id, version.id],
+    );
+    await ds.runMigrations({ transaction: 'each' });
+
+    const [upgraded]: Array<{
+      cursor: Date;
+      next: Date | null;
+      policy: string;
+    }> = await ds.query(
+      `SELECT "scheduleCursor" AS cursor, "nextFireAt" AS next, "missedRunPolicy" AS policy
+         FROM workflows WHERE id = $1`,
+      [wf.id],
+    );
+    // Відлік — з моменту оновлення: момент, уже створений попередньою версією, не повторюється, а
+    // моменти до оновлення не наздоганяються.
+    expect(upgraded.policy).toBe('run_once');
+    expect(upgraded.cursor.getTime()).toBeGreaterThanOrEqual(at.getTime());
+    expect(upgraded.next).not.toBeNull();
+    const cycles: Array<{ id: string; terminalCycles: number }> =
+      await ds.query(
+        'SELECT id, "terminalCycles" FROM executions WHERE id = ANY($1) ORDER BY id',
+        [[fired.id, failed.id]],
+      );
+    expect(cycles.map((c) => c.terminalCycles)).toEqual([1, 1]);
+    // Старі завершення сповіщень не створюють.
+    expect(await ds.query('SELECT 1 FROM outbox_events')).toEqual([]);
+    // Після налаштування сповіщень повтор старого виконання — другий цикл, подія з sequence 2.
+    await ds.query(
+      `INSERT INTO notification_settings ("tenantId", url, secret) VALUES ($1, 'https://receiver.example/hook', $2)`,
+      [tenant.id, 'a'.repeat(64)],
+    );
+    await ds.query(
+      `UPDATE executions SET status = 'pending', error = NULL WHERE id = $1`,
+      [failed.id],
+    );
+    await ds.query(
+      `UPDATE executions SET status = 'succeeded', "finishedAt" = now() WHERE id = $1`,
+      [failed.id],
+    );
+    const events: Array<{ sequence: number; type: string }> = await ds.query(
+      'SELECT sequence, type FROM outbox_events',
+    );
+    expect(events).toEqual([{ sequence: 2, type: 'execution.succeeded' }]);
+    await truncateAll(ds);
+  });
 });

@@ -1,54 +1,140 @@
 import {
+  BeforeApplicationShutdown,
   Injectable,
   Logger,
   OnApplicationBootstrap,
   OnApplicationShutdown,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { IsNull, MoreThan, MoreThanOrEqual, Not } from 'typeorm';
-import { parseExpression } from 'cron-parser';
+import { EntityManager } from 'typeorm';
 import { EnvironmentVariables } from '../config/env.validation';
-import { Workflow } from '../entities';
+import { MissedRunPolicy, Workflow } from '../entities';
 import { ExecutionsService } from '../executions/executions.service';
 import { QueueFullException } from '../limits/limit-exceptions';
-import {
-  newCorrelationId,
-  runWithCorrelationId,
-} from '../observability/correlation';
+import { runWithCorrelationId } from '../observability/correlation';
 import { toSafeError } from '../observability/safe-error';
 import { SCHEDULE_PAGE, SystemDb } from '../tenancy/system-db';
 import { TenantDb } from '../tenancy/tenant-db';
+import { CronSchedule, InvalidScheduleError } from './cron-schedule';
+import { decideMissed } from './missed-runs';
+import { SchedulerMetrics } from './scheduler.metrics';
 
 const WORKFLOW_PAGE = 16;
 
 /**
- * Спроб постановки одного тенанта за раунд обходу. Рахуються спроби, а не workflow: інакше 16
- * секундних розкладів одного тенанта за 30-секундний тік давали б 480 постановок поспіль.
+ * Спроб спрацювання одного тенанта за раунд обходу. Рахуються моменти, а не workflow: інакше 16
+ * секундних розкладів одного тенанта після простою давали б тисячі постановок поспіль.
  */
 const TENANT_ROUND_BUDGET = 16;
 
-/** Де продовжити обхід тенанта в наступному раунді (лише ідентифікатори й момент). */
+/** Де продовжити обхід тенанта в наступному раунді (лише ідентифікатор workflow). */
 interface Cursor {
   tenantId: string;
   from?: { id: string; inclusive: boolean };
-  /** Останнє вже спробуване спрацювання workflow, на якому скінчився бюджет. */
-  resume?: { workflowId: string; after: Date };
 }
 
+/** Результат однієї спроби спрацювання workflow. */
+type Attempt =
+  /** Моменту ще не настав, рядок зайнятий іншим інстансом або розклад вимкнено. */
+  | 'idle'
+  /** Створено виконання (або воно вже було) — момент оброблено, курсор пересунуто. */
+  | 'fired'
+  /** Пропущені моменти відкинуто за політикою `skip`. */
+  | 'skipped'
+  /** Черга тенанта повна: курсор стоїть, наступний тік спробує знову. */
+  | 'blocked'
+  /** Розклад не обчислюється (успадкований невалідний вираз). */
+  | 'invalid';
+
+/** Рядок workflow, заблокований спрацюванням, разом із часом БД. */
+/** Версія заблокованого рядка для умовного запису після відкату постановки. */
+class BlockedSchedule extends Error {
+  constructor(readonly revision: string) {
+    super('schedule enqueue rolled back');
+  }
+}
+
+interface LockedSchedule {
+  revision: string;
+  id: string;
+  tenantId: string;
+  cron: string;
+  timezone: string;
+  version: number;
+  missedRunPolicy: MissedRunPolicy;
+  scheduleCursor: Date;
+  nextFireAt: Date | null;
+  scheduleBlockedSince: Date | null;
+  scheduleError: string | null;
+  now: Date;
+}
+
+/** Коди помилок з'єднання драйвера й мережі: БД недоступна для всіх розкладів, а не для одного. */
+const CONNECTION_CODES = new Set([
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'ETIMEDOUT',
+  'EPIPE',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+]);
+
+/**
+ * Помилка обробки одного workflow (будь-яка, крім недоступної БД): обробка інших розкладів триває,
+ * а цей повторить наступний тік. Недоступна БД (з'єднання, сервер завершується, бракує ресурсів)
+ * перериває тік: інакше кожен розклад чекав би свій таймаут підключення.
+ */
+function scopedToWorkflow(err: unknown): boolean {
+  const e = err as {
+    driverError?: { code?: unknown };
+    code?: unknown;
+    message?: unknown;
+  };
+  const code = e?.driverError?.code ?? e?.code;
+  if (typeof code === 'string') {
+    if (CONNECTION_CODES.has(code)) return false;
+    if (/^(08|53|57P)/.test(code)) return false;
+  }
+  const message = typeof e?.message === 'string' ? e.message : '';
+  return !/Connection terminated|timeout exceeded when trying to connect|connect ECONNREFUSED/.test(
+    message,
+  );
+}
+
+/** Кореляційний ID спрацювання: однаковий для кожної спроби того самого моменту. */
+export function cronCorrelationId(workflowId: string, at: Date): string {
+  return `cron:${workflowId}:${at.getTime()}`;
+}
+
+/**
+ * Розподілений планувальник (README 3.3.8). Джерело істини — курсор у рядку workflow: усі моменти
+ * розкладу до нього включно оброблено. Кожне спрацювання — окрема коротка транзакція: блокування
+ * рядка workflow (SKIP LOCKED: зайнятий рядок уже обробляє інший інстанс), виконання й задача,
+ * новий курсор. Курсор і виконання з'являються разом або ніяк, тож рестарт, кілька інстансів,
+ * помилка БД чи невідомий результат COMMIT не дають ні дубля, ні втрати.
+ */
 @Injectable()
 export class SchedulerService
-  implements OnApplicationBootstrap, OnApplicationShutdown
+  implements
+    OnApplicationBootstrap,
+    BeforeApplicationShutdown,
+    OnApplicationShutdown
 {
   private readonly logger = new Logger(SchedulerService.name);
   private timer?: NodeJS.Timeout;
   private activeTick?: Promise<number>;
-  private lastTick = new Date();
+  private tickNumber = 0;
+  /** Процес завершується: тік, що триває, зупиняється після поточного спрацювання. */
+  private stopping = false;
+  /** Помилки, уже залоговані в контексті спрацювання (щоб не логувати вдруге без нього). */
+  private readonly logged = new WeakSet<object>();
 
   constructor(
     private readonly system: SystemDb,
     private readonly db: TenantDb,
     private readonly executions: ExecutionsService,
     private readonly config: ConfigService<EnvironmentVariables, true>,
+    private readonly metrics: SchedulerMetrics,
   ) {}
 
   onApplicationBootstrap(): void {
@@ -65,105 +151,130 @@ export class SchedulerService
     );
   }
 
+  /** Зупиняє тіки; викликається й тестами, що самі вирішують, коли настає тік. */
   onApplicationShutdown(): void {
     if (this.timer) clearInterval(this.timer);
+    this.timer = undefined;
   }
 
-  /** Створює execution для кожного cron-спрацювання з моменту попереднього тіку. */
-  tick(now = new Date()): Promise<number> {
-    this.activeTick ??= this.runTick(now).finally(() => {
+  /** Завершення процесу: нових тіків немає, а поточний дописує свою транзакцію до закриття пулу. */
+  async beforeApplicationShutdown(): Promise<void> {
+    this.stopping = true;
+    this.onApplicationShutdown();
+    await this.activeTick?.catch(() => undefined);
+  }
+
+  /** Обробляє всі належні моменти розкладів; повертає кількість створених виконань. */
+  tick(): Promise<number> {
+    this.tickNumber++;
+    this.activeTick ??= this.runTick().finally(() => {
       this.activeTick = undefined;
     });
     return this.activeTick;
   }
 
   /**
-   * Обхід раундами: у раунді кожен тенант робить до TENANT_ROUND_BUDGET спроб постановки, потім
-   * хід переходить до наступного. Тенант із невичерпаними спрацюваннями стає в кінець черги; між
-   * раундами зберігається лише його курсор, а сторінка workflow перечитується (вимкнений чи змінений
-   * розклад враховується з наступного раунду тенанта).
+   * Обхід раундами (README 3.3.5, 3.3.8): у раунді кожен тенант із належними розкладами робить
+   * до TENANT_ROUND_BUDGET спроб, потім хід переходить до наступного. Між раундами зберігається
+   * лише курсор обходу тенанта; моменти розкладу щоразу обчислюються з курсора в БД, тож пам'ять не
+   * залежить від тривалості простою.
    */
-  private async runTick(now: Date): Promise<number> {
+  private async runTick(): Promise<number> {
+    const stop = this.metrics.tickDuration.startTimer();
     let fired = 0;
-    const remaining = new Map<string, Cursor>();
-    const turn = async (cursor: Cursor) => {
-      const result = await this.tenantTurn(cursor, now);
-      fired += result.fired;
-      if (result.next) remaining.set(cursor.tenantId, result.next);
-    };
-    let after: string | null = null;
-    for (;;) {
-      const tenants = await this.system.scheduledTenants(after, SCHEDULE_PAGE);
-      for (const { tenantId } of tenants) await turn({ tenantId });
-      if (tenants.length < SCHEDULE_PAGE) break;
-      after = tenants[tenants.length - 1].tenantId;
+    try {
+      let continuing = new Map<string, Cursor>();
+      const finished = new Set<string>();
+      let observedTick = this.tickNumber;
+      do {
+        // Навіть якщо попередній тік триває, сигнал таймера дозволяє наступну спробу
+        // завершених, заблокованих та тимчасово помилкових обходів.
+        if (observedTick !== this.tickNumber) {
+          finished.clear();
+          observedTick = this.tickNumber;
+        }
+        const next = new Map<string, Cursor>();
+        const turn = async (cursor: Cursor) => {
+          const result = await this.tenantTurn(cursor);
+          fired += result.fired;
+          if (result.next) next.set(cursor.tenantId, result.next);
+          else finished.add(cursor.tenantId);
+        };
+        // Між квантами перевіряємо нові належні розклади за годинником БД.
+        // Спершу обслуговуємо тих, хто не мав продовження з попереднього раунду.
+        let after: string | null = null;
+        for (;;) {
+          const tenants = await this.system.dueScheduleTenants(
+            after,
+            SCHEDULE_PAGE,
+          );
+          for (const { tenantId } of tenants) {
+            if (this.stopping) return fired;
+            if (!continuing.has(tenantId) && !finished.has(tenantId))
+              await turn({ tenantId });
+          }
+          if (tenants.length < SCHEDULE_PAGE) break;
+          after = tenants[tenants.length - 1].tenantId;
+        }
+        for (const cursor of continuing.values()) {
+          if (this.stopping) return fired;
+          await turn(cursor);
+        }
+        continuing = next;
+      } while (continuing.size);
+      return fired;
+    } finally {
+      stop();
     }
-    // Ітератор Map відвідує повторно доданий ключ у кінці черги.
-    for (const [tenantId, cursor] of remaining) {
-      remaining.delete(tenantId);
-      await turn(cursor);
-    }
-    this.lastTick = now;
-    return fired;
   }
 
-  /** Один хід тенанта: сторінка workflow від курсора і до TENANT_ROUND_BUDGET спроб постановки. */
+  /** Один хід тенанта: належні workflow від курсора і до TENANT_ROUND_BUDGET спроб. */
   private async tenantTurn(
     cursor: Cursor,
-    now: Date,
   ): Promise<{ fired: number; next?: Cursor }> {
-    const { tenantId, from, resume } = cursor;
-    const rows = await this.db.run(tenantId, (em) =>
-      em.find(Workflow, {
-        select: { id: true, tenantId: true, cron: true, version: true },
-        where: {
-          tenantId,
-          enabled: true,
-          cron: Not(IsNull()),
-          ...(from && {
-            id: from.inclusive ? MoreThanOrEqual(from.id) : MoreThan(from.id),
-          }),
-        },
-        order: { id: 'ASC' },
-        take: WORKFLOW_PAGE,
-      }),
+    const { tenantId, from } = cursor;
+    const params: unknown[] = [tenantId, WORKFLOW_PAGE];
+    let where = '';
+    if (from) {
+      params.push(from.id);
+      where = from.inclusive ? 'AND id >= $3' : 'AND id > $3';
+    }
+    const rows: Array<{ id: string }> = await this.db.run(tenantId, (em) =>
+      em.query(
+        `SELECT id FROM workflows
+          WHERE "tenantId" = $1 AND enabled AND cron IS NOT NULL AND "nextFireAt" <= now() ${where}
+          ORDER BY id LIMIT $2`,
+        params,
+      ),
     );
     let fired = 0;
     let budget = TENANT_ROUND_BUDGET;
-    for (const wf of rows) {
-      // Продовження workflow, на якому скінчився бюджет попереднього раунду, — після вже спробуваного.
-      let last = resume?.workflowId === wf.id ? resume.after : undefined;
-      try {
-        const it = parseExpression(wf.cron as string, {
-          currentDate: last ?? this.lastTick,
-        });
-        for (
-          let next = it.next().toDate();
-          next <= now;
-          next = it.next().toDate()
-        ) {
-          if (budget === 0)
-            return {
-              fired,
-              next: {
-                tenantId,
-                from: { id: wf.id, inclusive: true },
-                resume: last && { workflowId: wf.id, after: last },
-              },
-            };
-          budget--;
-          // Як і раніше: після невдалого спрацювання решту спрацювань цього workflow
-          // у цьому тіку не створюємо.
-          const created = await this.fire(wf, next);
-          if (created === undefined) break;
-          if (created) fired++;
-          last = next;
+    for (const { id } of rows) {
+      for (;;) {
+        if (this.stopping) return { fired };
+        if (budget === 0)
+          return {
+            fired,
+            next: { tenantId, from: { id, inclusive: true } },
+          };
+        let result: { attempt: Attempt; created: boolean };
+        try {
+          result = await this.fireNext(tenantId, id);
+        } catch (err) {
+          if (!scopedToWorkflow(err)) throw err;
+          this.metrics.errors.inc({ reason: 'database' });
+          if (!this.logged.has(err as object))
+            this.logger.warn(
+              { workflowId: id, error: toSafeError(err) },
+              'scheduled run not created, the next tick retries it',
+            );
+          break;
         }
-      } catch (err) {
-        this.logger.warn(
-          { workflowId: wf.id, error: toSafeError(err) },
-          'cron schedule could not be evaluated',
-        );
+        if (result.created) fired++;
+        // Повна черга: інші розклади тенанта впираються в ту саму чергу, до наступного тіку.
+        if (result.attempt === 'blocked') return { fired };
+        if (result.attempt !== 'fired' && result.attempt !== 'skipped') break;
+        budget--;
       }
     }
     if (rows.length < WORKFLOW_PAGE) return { fired };
@@ -177,33 +288,234 @@ export class SchedulerService
   }
 
   /**
-   * Одне спрацювання — окремий ланцюжок із власним кореляційним ID. Помилка логується
-   * всередині цього контексту, з workflowId і запланованим часом.
+   * Наступний належний момент одного workflow — одна транзакція в контексті тенанта. Повна черга
+   * відкочує її (курсор стоїть), і окрема коротка транзакція позначає, що розклад чекає на місце.
    */
-  private fire(wf: Workflow, scheduledAt: Date): Promise<boolean | undefined> {
-    return runWithCorrelationId(newCorrelationId(), 'cron', async () => {
-      try {
-        return await this.executions.enqueueScheduled(wf, scheduledAt);
-      } catch (err) {
-        // Черга тенанта заповнена: спрацювання пропускається (метрика відхилених постановок —
-        // flowforge_enqueue_rejected_total{trigger="cron"}), розклад іде далі.
-        if (err instanceof QueueFullException) {
-          this.logger.warn(
-            { workflowId: wf.id, scheduledAt: scheduledAt.toISOString() },
-            'scheduled run skipped: the tenant queue is full',
-          );
-          return undefined;
-        }
+  private async fireNext(
+    tenantId: string,
+    workflowId: string,
+  ): Promise<{ attempt: Attempt; created: boolean }> {
+    try {
+      const afterCommit: Array<() => void> = [];
+      const result = await this.db.run(tenantId, (em) =>
+        this.fireIn(em, tenantId, workflowId, afterCommit),
+      );
+      for (const observe of afterCommit) observe();
+      return result;
+    } catch (err) {
+      if (!(err instanceof BlockedSchedule)) throw err;
+      this.metrics.blocked.inc({ reason: 'queue_full' });
+      const [rows]: [Array<{ id: string }>, number] = await this.db.run(
+        tenantId,
+        (em) =>
+          em.query(
+            `UPDATE workflows SET "scheduleBlockedSince" = now()
+              WHERE id = $1 AND "tenantId" = $2 AND xmin::text = $3 AND "scheduleBlockedSince" IS NULL
+              RETURNING id`,
+            [workflowId, tenantId, err.revision],
+          ),
+      );
+      if (rows.length > 0)
+        this.logger.warn(
+          { workflowId },
+          'scheduled runs are held: the tenant queue is full',
+        );
+      return { attempt: 'blocked', created: false };
+    }
+  }
+
+  private async fireIn(
+    em: EntityManager,
+    tenantId: string,
+    workflowId: string,
+    afterCommit: Array<() => void>,
+  ): Promise<{ attempt: Attempt; created: boolean }> {
+    const [row]: LockedSchedule[] = await em.query(
+      `SELECT id, "tenantId", cron, timezone, version, xmin::text AS revision, "missedRunPolicy", "scheduleCursor",
+              "nextFireAt", "scheduleBlockedSince", "scheduleError", clock_timestamp() AS now
+         FROM workflows
+        WHERE id = $1 AND "tenantId" = $2 AND enabled AND cron IS NOT NULL
+        FOR NO KEY UPDATE SKIP LOCKED`,
+      [workflowId, tenantId],
+    );
+    if (!row) return { attempt: 'idle', created: false };
+    let schedule: CronSchedule;
+    let next: Date;
+    try {
+      schedule = CronSchedule.parse(row.cron, row.timezone, row.now.getTime());
+      next = schedule.next(row.scheduleCursor);
+    } catch (err) {
+      if (!(err instanceof InvalidScheduleError)) throw err;
+      await this.markInvalid(em, row, err.message, afterCommit);
+      return { attempt: 'invalid', created: false };
+    }
+    if (next > row.now) {
+      await this.save(em, row, row.scheduleCursor, next, afterCommit);
+      return { attempt: 'idle', created: false };
+    }
+    const grace = this.config.get('SCHEDULER_MISFIRE_GRACE_MS', {
+      infer: true,
+    });
+    const threshold = new Date(row.now.getTime() - grace);
+    const decision = decideMissed(
+      schedule,
+      row.scheduleCursor,
+      next,
+      threshold,
+      row.now,
+      row.missedRunPolicy,
+    );
+    const skipped =
+      decision.kind === 'skip'
+        ? { first: next, last: decision.lastMissed }
+        : decision.skipped;
+    if (skipped)
+      afterCommit.push(() => {
+        this.metrics.firings.inc({ outcome: 'missed_skipped' });
         this.logger.warn(
           {
-            workflowId: wf.id,
-            scheduledAt: scheduledAt.toISOString(),
-            error: toSafeError(err),
+            workflowId,
+            firstSkipped: skipped.first.toISOString(),
+            lastSkipped: skipped.last.toISOString(),
           },
-          'scheduled run not created',
+          'missed scheduled runs skipped by the workflow policy',
         );
-        return undefined;
-      }
+      });
+    if (decision.kind === 'skip') {
+      await this.save(em, row, decision.lastMissed, schedule, afterCommit);
+      return { attempt: 'skipped', created: false };
+    }
+    // Вчасний момент і run_all — окреме виконання для `next`; run_once — одне за весь пропуск;
+    // skip — перший вчасний момент разом із відкиданням пропущених (одна транзакція).
+    const { at, cursor } = decision;
+    if (decision.collapsed) {
+      afterCommit.push(() => {
+        this.metrics.firings.inc({ outcome: 'missed_run_once' });
+        this.logger.warn(
+          {
+            workflowId,
+            firstMissed: next.toISOString(),
+            runAt: at.toISOString(),
+          },
+          'missed scheduled runs collapsed into one run by the workflow policy',
+        );
+      });
+    }
+    const workflow = em.create(Workflow, {
+      id: row.id,
+      tenantId: row.tenantId,
+      version: row.version,
+    });
+    const correlationId = cronCorrelationId(workflowId, at);
+    const created = await runWithCorrelationId(
+      correlationId,
+      'cron',
+      async () => {
+        try {
+          return await this.executions.enqueueScheduledIn(
+            em,
+            workflow,
+            at,
+            correlationId,
+          );
+        } catch (err) {
+          if (err instanceof QueueFullException)
+            throw new BlockedSchedule(row.revision);
+          // У контексті спрацювання (кореляційний ID моменту), з workflowId і моментом. Помилка
+          // з'єднання перериває тік, і її логує сам тік.
+          if (scopedToWorkflow(err)) {
+            this.logged.add(err as object);
+            this.logger.warn(
+              {
+                workflowId,
+                scheduledAt: at.toISOString(),
+                error: toSafeError(err),
+              },
+              'scheduled run not created, the next tick retries it',
+            );
+          }
+          throw err;
+        }
+      },
+    );
+    await this.save(em, row, cursor, schedule, afterCommit);
+    afterCommit.push(() => {
+      this.metrics.firings.inc({ outcome: created ? 'created' : 'existing' });
+      if (created)
+        this.metrics.lag.observe(
+          Math.max(0, row.now.getTime() - at.getTime()) / 1000,
+        );
+    });
+    return { attempt: 'fired', created };
+  }
+
+  /**
+   * Підказка наступного моменту після курсора або null, якщо в межах горизонту генератора моментів
+   * більше немає: уже оброблене спрацювання через це не відкочується, а тік до розкладу не повертається.
+   */
+  private following(schedule: CronSchedule, cursor: Date): Date | null {
+    try {
+      return schedule.next(cursor);
+    } catch (err) {
+      if (err instanceof InvalidScheduleError) return null;
+      throw err;
+    }
+  }
+
+  /** Новий курсор і підказка наступного моменту; знімає позначки «чекає» і «невалідний». */
+  private async save(
+    em: EntityManager,
+    row: LockedSchedule,
+    cursor: Date,
+    next: Date | CronSchedule,
+    afterCommit: Array<() => void>,
+  ): Promise<void> {
+    const nextFireAt =
+      next instanceof CronSchedule ? this.following(next, cursor) : next;
+    const unchanged =
+      cursor.getTime() === row.scheduleCursor.getTime() &&
+      (row.nextFireAt?.getTime() ?? null) === (nextFireAt?.getTime() ?? null) &&
+      row.scheduleBlockedSince === null &&
+      row.scheduleError === null;
+    if (unchanged) return;
+    await em.query(
+      `UPDATE workflows SET "scheduleCursor" = $3, "nextFireAt" = $4,
+              "scheduleBlockedSince" = NULL, "scheduleError" = NULL
+        WHERE id = $1 AND "tenantId" = $2`,
+      [row.id, row.tenantId, cursor, nextFireAt],
+    );
+    const heldSince = row.scheduleBlockedSince?.toISOString();
+    if (heldSince)
+      afterCommit.push(() =>
+        this.logger.log(
+          { workflowId: row.id, heldSince },
+          'scheduled runs resumed: the tenant queue has room again',
+        ),
+      );
+  }
+
+  /**
+   * Розклад не обчислюється: курсор стоїть, підказка знята (тік не повертається до нього, доки
+   * тенант не змінить розклад), причина видна в workflow. Лог — лише при зміні причини.
+   */
+  private async markInvalid(
+    em: EntityManager,
+    row: LockedSchedule,
+    reason: string,
+    afterCommit: Array<() => void>,
+  ): Promise<void> {
+    await em.query(
+      `UPDATE workflows SET "nextFireAt" = NULL, "scheduleError" = $3
+        WHERE id = $1 AND "tenantId" = $2`,
+      [row.id, row.tenantId, reason],
+    );
+    afterCommit.push(() => {
+      this.metrics.errors.inc({ reason: 'invalid_schedule' });
+      if (row.scheduleError !== reason)
+        this.logger.warn(
+          { workflowId: row.id, reason },
+          'cron schedule could not be evaluated',
+        );
     });
   }
 }

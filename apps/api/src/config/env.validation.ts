@@ -394,16 +394,78 @@ export class EnvironmentVariables extends DatabaseEnvironment {
   JOB_CLEANUP_INTERVAL_MS = 3_600_000;
 
   /**
-   * ТИМЧАСОВА МЕЖА — до переробки планувальника (ТЗ 3.3.8).
-   * Лише захищає setInterval від переповнення: більше за MAX_TIMER_MS Node мовчки
-   * перетворює на 1 мс. Допустиме запізнення cron вона не обмежує; змістовну межу
-   * (або відмову від фіксованого тіку) визначає переробка планувальника.
+   * Інтервал тіку планувальника: найбільше запізнення вчасного спрацювання (README 3.3.8). Тік
+   * обробляє лише належні розклади (індекс за `nextFireAt`), тож короткий інтервал не множить
+   * роботу на кількість розкладів.
    */
   @Type(() => Number)
   @IsInt()
   @Min(100)
   @Max(MAX_TIMER_MS)
   SCHEDULER_TICK_MS = 30_000;
+
+  /**
+   * Момент розкладу, старший за стільки мс на час обробки, вважається пропущеним (простій, БД
+   * недоступна, повна черга) і обробляється за політикою workflow (`missedRunPolicy`). Не менше
+   * за SCHEDULER_TICK_MS: інакше звичайне запізнення тіку рахувалося б пропуском.
+   */
+  @Type(() => Number)
+  @IsInt()
+  @Min(1_000)
+  @Max(MAX_TIMER_MS)
+  SCHEDULER_MISFIRE_GRACE_MS = 60_000;
+
+  /** Циклів доставки сповіщень на воркер (README 3.3.9); 0 — воркер сповіщень не надсилає. */
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(64)
+  OUTBOX_CONCURRENCY = 4;
+
+  /** Скільки спроб доставки одного тенанта можуть іти одночасно в усьому кластері. */
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(64)
+  OUTBOX_TENANT_IN_FLIGHT = 2;
+
+  /** Пауза опитування, коли надсилати нічого, мс (з відхиленням ±50%). */
+  @Type(() => Number)
+  @IsInt()
+  @Min(10)
+  @Max(60_000)
+  OUTBOX_POLL_INTERVAL_MS = 1_000;
+
+  /** Таймаут однієї спроби доставки, мс; не більше за HTTP_STEP_TIMEOUT_MS. */
+  @Type(() => Number)
+  @IsInt()
+  @Min(100)
+  @Max(60_000)
+  OUTBOX_HTTP_TIMEOUT_MS = 10_000;
+
+  /** Нижня межа backoff між спробами доставки, мс. */
+  @Type(() => Number)
+  @IsInt()
+  @Min(10)
+  @Max(MAX_TIMER_MS)
+  OUTBOX_BACKOFF_BASE_MS = 5_000;
+
+  /**
+   * Стеля backoff, мс. Спроб без ліміту: недоставлена подія не видаляється й повторюється не рідше
+   * за цю стелю, доки отримувач не відповість 2xx (гарантія «щонайменше один раз»).
+   */
+  @Type(() => Number)
+  @IsInt()
+  @Min(10)
+  @Max(MAX_TIMER_MS)
+  OUTBOX_BACKOFF_MAX_MS = 3_600_000;
+
+  /** Скільки днів зберігати доставлені події (недоставлені не видаляються), 1..3650. */
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(3650)
+  OUTBOX_RETENTION_DAYS = 7;
 }
 
 /** Конфігурація процесу API: спільна плюс обов'язковий ADMIN_TOKEN. */
@@ -431,14 +493,32 @@ export function validateEnv(
 ): EnvironmentVariables {
   rejectOwnerCredentials(raw);
   outboundSettings(raw);
-  return validateAs(EnvironmentVariables, raw);
+  return checkRelations(validateAs(EnvironmentVariables, raw));
+}
+
+/** Узгодженість пов'язаних параметрів: межа пропуску, таймаут і backoff сповіщень. */
+function checkRelations<T extends EnvironmentVariables>(env: T): T {
+  const problems: string[] = [];
+  if (env.SCHEDULER_MISFIRE_GRACE_MS < env.SCHEDULER_TICK_MS)
+    problems.push(
+      'SCHEDULER_MISFIRE_GRACE_MS: не може бути меншим за SCHEDULER_TICK_MS',
+    );
+  if (env.OUTBOX_BACKOFF_MAX_MS < env.OUTBOX_BACKOFF_BASE_MS)
+    problems.push(
+      'OUTBOX_BACKOFF_MAX_MS: не може бути меншим за OUTBOX_BACKOFF_BASE_MS',
+    );
+  if (problems.length)
+    throw new Error(
+      `Невалідна конфігурація оточення:\n  ${problems.join('\n  ')}`,
+    );
+  return env;
 }
 
 /** Схема API: спільна плюс обов'язковий ADMIN_TOKEN. */
 export function validateApiEnv(raw: Record<string, unknown>): ApiEnvironment {
   rejectOwnerCredentials(raw);
   outboundSettings(raw);
-  const env = validateAs(EnvironmentVariables, raw);
+  const env = checkRelations(validateAs(EnvironmentVariables, raw));
   // Явна перевірка: @IsOptional спільної схеми вимикає для цієї властивості будь-які інші
   // декоратори, зокрема @IsDefined.
   if (env.ADMIN_TOKEN === undefined)
