@@ -14,7 +14,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?задайте POSTGRES_PASSWORD у .env у корені репозиторію (див. README, розділ «Запуск»)}
       POSTGRES_DB: flowforge
     # Лише для хоста розробника (локальний запуск і тести поза docker); назовні порт не відкритий.
-    ports: ['127.0.0.1:5432:5432']
+    ports: ['127.0.0.1:${POSTGRES_PORT:-5432}:5432']
     volumes: [pgdata:/var/lib/postgresql/data]
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -U flowforge -d flowforge']
@@ -45,10 +45,11 @@ services:
       postgres: { condition: service_healthy }
     restart: 'no'
 
-  api:
+  api: &runtime-api
     <<: *api-image
     environment:
       NODE_ENV: production
+      TRUST_PROXY: ${FRONTEND_IP:-172.30.61.10}
       HTTP_DENY_CIDRS: &http-deny-cidrs ${HTTP_DENY_CIDRS:-}
       ADMIN_TOKEN: ${ADMIN_TOKEN:?задайте ADMIN_TOKEN у .env у корені репозиторію (див. README, розділ «Запуск»)}
       # Роль API без BYPASSRLS (flowforge_api_role); пароль — лише символи [A-Za-z0-9].
@@ -56,12 +57,16 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
       migrate: { condition: service_completed_successfully }
-    ports: ['3000:3000']
+    ports: ['${API_PORT:-3000}:3000']
     healthcheck:
       test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:3000/ready > /dev/null || exit 1']
       interval: 5s
       timeout: 3s
       retries: 20
+
+  api-2:
+    <<: *runtime-api
+    ports: []
 
   worker:
     <<: *api-image
@@ -90,14 +95,27 @@ services:
   frontend:
     build: ./apps/frontend
     env_file: ./apps/frontend/.env.example
+    environment:
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-http://localhost:3001}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      FRONTEND_TRUST_PROXY: ${FRONTEND_TRUST_PROXY:-false}
+    networks:
+      default:
+        ipv4_address: ${FRONTEND_IP:-172.30.61.10}
     depends_on:
       api: { condition: service_healthy }
-    ports: ['3001:3000']
+    ports: ['${FRONTEND_PORT:-3001}:3000']
     healthcheck:
-      test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:3000/connect > /dev/null || exit 1']
+      test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:3000/login > /dev/null || exit 1']
       interval: 5s
       timeout: 3s
       retries: 20
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: ${FLOWFORGE_SUBNET:-172.30.61.0/24}
 
 volumes:
   pgdata:
