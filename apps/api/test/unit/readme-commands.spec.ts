@@ -14,11 +14,20 @@ import { join } from 'node:path';
  * Команди розділів README працюють у новому терміналі: секрети й ліміти беруться з кореневого
  * `.env` (його створює розділ «Запуск»), а не з оточення поточної оболонки.
  */
+const LIMIT_KEYS = [
+  'TENANT_MAX_RUNNING',
+  'TENANT_MAX_QUEUE_SIZE',
+  'TENANT_MAX_WORKFLOWS',
+  'TENANT_RATE_LIMIT',
+  'TENANT_RATE_WINDOW_MS',
+  'TENANT_WEBHOOK_RATE_LIMIT',
+  'TENANT_WEBHOOK_RATE_WINDOW_MS',
+];
 const KEYS = [
   'POSTGRES_PASSWORD',
   'API_DB_PASSWORD',
   'WORKER_DB_PASSWORD',
-  'TENANT_MAX_RUNNING',
+  ...LIMIT_KEYS,
 ];
 
 /** Bash-блоки розділу `## <title>` README або документа з `docs/`. */
@@ -36,6 +45,10 @@ function runFresh(block: string): string[] {
   const dir = mkdtempSync(join(tmpdir(), 'ff-readme-'));
   try {
     mkdirSync(join(dir, 'apps/api'), { recursive: true });
+    writeFileSync(join(dir, 'apps/api/.env.example'), '');
+    writeFileSync(join(dir, 'docker'), '#!/bin/bash\nexit 0\n', {
+      mode: 0o700,
+    });
     writeFileSync(
       join(dir, '.env'),
       KEYS.map((k) => `${k}=marker${k}`).join('\n') + '\n',
@@ -76,7 +89,19 @@ describe('README commands in a new terminal', () => {
     );
     expect(seen).toContain('run db:migrate POSTGRES_PASSWORD');
     expect(seen).toContain(
-      'run db:provision POSTGRES_PASSWORD API_DB_PASSWORD WORKER_DB_PASSWORD TENANT_MAX_RUNNING',
+      'run db:provision POSTGRES_PASSWORD API_DB_PASSWORD WORKER_DB_PASSWORD ' +
+        LIMIT_KEYS.join(' '),
+    );
+  });
+
+  it('passes every default tenant limit during local startup outside Compose', () => {
+    const [block] = blocks('Запуск', 'docs/operations.md').filter((source) =>
+      source.includes('LOCAL_API'),
+    );
+    expect(block).toBeDefined();
+    expect(runFresh(block)).toContain(
+      'run db:provision POSTGRES_PASSWORD API_DB_PASSWORD WORKER_DB_PASSWORD ' +
+        LIMIT_KEYS.join(' '),
     );
   });
 

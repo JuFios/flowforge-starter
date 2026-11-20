@@ -5,6 +5,7 @@ import {
   ExecutionStream,
   newer,
   POLL_INTERVAL_MS,
+  REALTIME_REQUEST_TIMEOUT_MS,
   WATCHDOG_MS,
   type SocketLike,
   type StreamDeps,
@@ -190,6 +191,71 @@ test('applies only newer snapshots of this execution, so a late response cannot 
     ['7', 'succeeded'],
   ]);
   h.stream.stop();
+});
+
+test('refreshes the live workflow name at the same revision without rolling back execution state', async () => {
+  const h = harness();
+  h.stream.seed(summary('7', 'succeeded'));
+  h.stream.start();
+  await h.flush();
+  const socket = h.sockets[0];
+  socket.send({
+    type: 'snapshot',
+    execution: { ...summary('7', 'failed'), workflowName: 'renamed' },
+  });
+  h.stream.seed(summary('7', 'running'));
+  socket.send({ type: 'snapshot', execution: summary('6', 'pending') });
+  expect(h.stream.snapshot()).toMatchObject({
+    workflowName: 'renamed',
+    status: 'succeeded',
+  });
+  socket.send({
+    type: 'snapshot',
+    execution: { ...summary('7'), workflowName: null },
+  });
+  expect(h.stream.snapshot()).toMatchObject({
+    workflowName: null,
+    status: 'succeeded',
+  });
+  h.stream.stop();
+});
+
+test('times out a stalled ticket and fallback poll, and discards their late responses', async () => {
+  let releaseTicket: (result: TicketResult) => void = () => undefined;
+  let releasePoll: (result: SummaryResult) => void = () => undefined;
+  const stuckTicket = new Promise<TicketResult>((resolve) => {
+    releaseTicket = resolve;
+  });
+  const stuckPoll = new Promise<SummaryResult>((resolve) => {
+    releasePoll = resolve;
+  });
+  let ticketCalls = 0;
+  let pollCalls = 0;
+  const h = harness({
+    tickets: async () =>
+      ++ticketCalls === 1 ? stuckTicket : { ok: false, reason: 'retry' },
+    summaries: async () =>
+      ++pollCalls === 1 ? stuckPoll : { ok: true, summary: summary('7') },
+  });
+
+  h.stream.start();
+  await h.advance(REALTIME_REQUEST_TIMEOUT_MS - 1);
+  expect(h.aborts[0].aborted).toBe(false);
+  await h.advance(1);
+  expect(h.aborts[0].aborted).toBe(true);
+  await h.advance(2_000);
+  expect(h.states.at(-1)).toBe('polling');
+  expect(h.summaryCalls).toBe(1);
+  releaseTicket({ ok: true, ticket: 'late' });
+  await h.advance(REALTIME_REQUEST_TIMEOUT_MS + POLL_INTERVAL_MS);
+  expect(h.summaryCalls).toBe(2);
+  expect(h.stream.snapshot()?.revision).toBe('7');
+  releasePoll({ ok: true, summary: summary('99') });
+  await h.flush();
+  expect(h.stream.snapshot()?.revision).toBe('7');
+  expect(h.sockets).toHaveLength(0);
+  h.stream.stop();
+  expect(h.timers.size).toBe(0);
 });
 
 test('reconnects with a fresh ticket after a drop and ignores events of the old socket', async () => {

@@ -66,33 +66,6 @@ export class ExecutionsService {
   }
 
   /**
-   * Створює execution і job в одній транзакції; обидва несуть кореляційний ID поточного контексту.
-   * Виконання прив'язується до версії workflow, поточної на момент створення (знімок кроків).
-   */
-  async enqueue(
-    workflow: Workflow,
-    input: Record<string, unknown>,
-    trigger: Execution['trigger'],
-  ): Promise<Execution> {
-    const correlationId = getCorrelationId() ?? newCorrelationId();
-    return this.db.run(workflow.tenantId, async (em) => {
-      const usage = await this.lockUsage(em);
-      return (
-        await this.insertExecution(
-          em,
-          workflow,
-          input,
-          trigger,
-          null,
-          null,
-          correlationId,
-          usage,
-        )
-      ).execution;
-    });
-  }
-
-  /**
    * Спрацювання розкладу в транзакції планувальника `em` (вона вже в контексті тенанта workflow і
    * тримає блокування його рядка): облік тенанта → наявне виконання цього моменту → ліміт черги →
    * виконання й задача. Повертає, чи створено нове. Повна черга — QueueFullException, і
@@ -125,31 +98,34 @@ export class ExecutionsService {
   }
 
   /**
-   * Запуск через API з ключем ідемпотентності (`Idempotency-Key`): рівно одне виконання на ключ у
-   * тенанті. Повтор того самого запиту (той самий workflow і вхід) повертає наявне виконання
-   * (`created: false`); той самий ключ з іншим запитом — 422. Конкурентні запити з одним ключем
-   * упорядковує унікальний індекс: другий INSERT чекає на коміт першого й нічого не вставляє.
+   * Читання версії та постановка виконання й задачі — одна транзакція. Блокування workflow
+   * упорядковує запуск із редагуванням і видаленням, а блокування обліку — з іншими постановками.
+   * Повтор того самого запиту з ключем повертає наявне виконання навіть після видалення workflow.
    */
-  enqueueOnce(
+  enqueue(
     target: Pick<Workflow, 'id' | 'tenantId'>,
     input: Record<string, unknown>,
-    idempotencyKey: string,
+    idempotencyKey?: string,
   ): Promise<{ execution: Execution; created: boolean }> {
     return this.db.run(target.tenantId, async (em) => {
       const workflow = await em.findOne(Workflow, {
-        where: target,
+        where: { id: target.id, tenantId: target.tenantId },
         lock: { mode: 'pessimistic_read' },
       });
+      if (!workflow && idempotencyKey === undefined)
+        throw new NotFoundException('Workflow не знайдено');
       const usage = await this.lockUsage(em);
-      const existing = await this.findRun(em, target, input, idempotencyKey);
-      if (existing) return { execution: existing, created: false };
+      if (idempotencyKey !== undefined) {
+        const existing = await this.findRun(em, target, input, idempotencyKey);
+        if (existing) return { execution: existing, created: false };
+      }
       if (!workflow) throw new NotFoundException('Workflow не знайдено');
       return this.insertExecution(
         em,
         workflow,
         input,
         'api',
-        idempotencyKey,
+        idempotencyKey ?? null,
         null,
         getCorrelationId() ?? newCorrelationId(),
         usage,

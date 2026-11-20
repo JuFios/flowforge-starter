@@ -1,6 +1,9 @@
 import { DataSource } from 'typeorm';
 import { Execution, Job } from '../../src/entities';
 import { RunningApp, startApp } from '../helpers/app';
+import { api } from '../helpers/queue';
+import { waitForBlocked } from '../helpers/transaction-barrier';
+import { waitFor } from '../helpers/wait-for';
 import {
   createTenant,
   createWorkflow,
@@ -131,6 +134,81 @@ describe('POST /workflows/:id/run with an Idempotency-Key', () => {
     await run({ order: 6 });
     expect(await count()).toEqual({ executions: 2, jobs: 2 });
   });
+
+  it.each(['PATCH', 'DELETE'] as const)(
+    'serializes unkeyed runs with a concurrent %s of the workflow',
+    async (method) => {
+      const holder = ds.createQueryRunner();
+      await holder.connect();
+      await holder.startTransaction();
+      const pending: Promise<unknown>[] = [];
+      try {
+        const [{ pid }] = (await holder.query(
+          'SELECT pg_backend_pid() AS pid',
+        )) as Array<{ pid: number }>;
+        await holder.query(
+          'SELECT "tenantId" FROM tenant_usage WHERE "tenantId"=$1 FOR UPDATE',
+          [tenant.tenant.id],
+        );
+        const launching = run({});
+        pending.push(Promise.allSettled([launching]));
+        await waitForBlocked(ds, holder);
+        const [{ pid: launcher }] = await ds.query<Array<{ pid: number }>>(
+          'SELECT pid FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))',
+          [pid],
+        );
+        let changed = false;
+        const changing = api(
+          running.baseUrl,
+          tenant.apiKey,
+          method,
+          '/workflows/' + workflowId,
+          method === 'PATCH'
+            ? { steps: [{ id: 'say', type: 'log', message: 'new definition' }] }
+            : undefined,
+        ).finally(() => {
+          changed = true;
+        });
+        pending.push(Promise.allSettled([changing]));
+        await waitFor('workflow edit to reach the lock', async () => {
+          const [{ blocked }] = await ds.query<Array<{ blocked: boolean }>>(
+            'SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))) AS blocked',
+            [launcher],
+          );
+          return changed || blocked;
+        });
+        expect(changed).toBe(false);
+        expect(await count()).toEqual({ executions: 0, jobs: 0 });
+
+        await holder.commitTransaction();
+        const launched = await launching;
+        expect(launched.status).toBe(201);
+        expect((await changing).status).toBe(method === 'PATCH' ? 200 : 204);
+        const [{ version }] = await ds.query<Array<{ version: number }>>(
+          'SELECT v.version FROM executions e JOIN workflow_versions v ON v.id=e."workflowVersionId" WHERE e.id=$1',
+          [launched.body.id],
+        );
+        expect(version).toBe(1);
+        if (method === 'PATCH') {
+          const next = await run({});
+          expect(next.status).toBe(201);
+          const [{ version: nextVersion }] = await ds.query<
+            Array<{ version: number }>
+          >(
+            'SELECT v.version FROM executions e JOIN workflow_versions v ON v.id=e."workflowVersionId" WHERE e.id=$1',
+            [next.body.id],
+          );
+          expect(nextVersion).toBe(2);
+        } else {
+          expect((await run({})).status).toBe(404);
+        }
+      } finally {
+        if (holder.isTransactionActive) await holder.rollbackTransaction();
+        await holder.release();
+        await Promise.all(pending);
+      }
+    },
+  );
 
   it.each([
     ['empty', ''],

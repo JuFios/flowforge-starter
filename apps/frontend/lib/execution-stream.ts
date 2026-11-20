@@ -7,8 +7,8 @@ import type { ExecutionSummary } from './types';
  * перепідключення, страхувального перечитування сервера чи HTTP-опитування) повертає істину.
  *
  * Правила:
- * - знімок застосовується, лише якщо він того самого виконання і з більшою ревізією — пізня
- *   HTTP-відповідь чи повідомлення старого сокета не відкочують новіший стан;
+ * - більша ревізія замінює знімок виконання. У тій самій ревізії лише чинний сокет або послідовне
+ *   опитування можуть оновити назву workflow, яка зберігається окремо;
  * - кожна спроба підключення отримує новий одноразовий тикет; події попередніх спроб
  *   відкидаються за номером покоління;
  * - перепідключення з експоненційним backoff і jitter (0,5…30 с), після трьох невдач паралельно
@@ -53,6 +53,7 @@ export interface StreamEvents {
 export const BACKOFF_MIN_MS = 500;
 export const BACKOFF_MAX_MS = 30_000;
 export const WATCHDOG_MS = 45_000;
+export const REALTIME_REQUEST_TIMEOUT_MS = 30_000;
 export const POLL_INTERVAL_MS = 5_000;
 export const POLL_AFTER_FAILURES = 3;
 /** Найбільше повідомлення, яке клієнт розбирає (знімок без виходів кроків значно менший). */
@@ -133,11 +134,22 @@ export class ExecutionStream {
     this.events.onState(state);
   }
 
-  private apply(summary: ExecutionSummary): void {
+  private apply(summary: ExecutionSummary, refreshName = false): void {
     if (summary.id !== this.executionId) return;
-    if (!newer(summary.revision, this.current?.revision)) return;
-    this.current = summary;
-    this.events.onSnapshot(summary);
+    const previous = this.current;
+    if (newer(summary.revision, previous?.revision)) {
+      this.current = summary;
+    } else if (
+      refreshName &&
+      previous &&
+      summary.revision === previous.revision &&
+      summary.workflowName !== previous.workflowName
+    ) {
+      this.current = { ...previous, workflowName: summary.workflowName };
+    } else {
+      return;
+    }
+    this.events.onSnapshot(this.current);
   }
 
   private teardownSocket(): void {
@@ -153,6 +165,7 @@ export class ExecutionStream {
   private gone(): void {
     this.generation++;
     this.teardownSocket();
+    this.ticketAbort?.abort();
     this.stopPolling();
     this.deps.clearTimeout(this.reconnectTimer);
     this.setState('gone');
@@ -172,13 +185,12 @@ export class ExecutionStream {
     this.ticketAbort?.abort();
     const abort = new AbortController();
     this.ticketAbort = abort;
-    let ticket: TicketResult;
-    try {
-      ticket = await this.deps.issueTicket(abort.signal);
-    } catch {
-      ticket = { ok: false, reason: 'retry' };
-    }
+    const ticket = await this.request(abort, (signal) =>
+      this.deps.issueTicket(signal),
+    );
     if (gen !== this.generation || this.stopped) return;
+    this.ticketAbort = undefined;
+    if (!ticket) return this.scheduleReconnect();
     if (!ticket.ok) {
       if (ticket.reason === 'gone') return this.gone();
       if (ticket.reason === 'session') {
@@ -212,7 +224,7 @@ export class ExecutionStream {
         this.failures = 0;
         this.stopPolling();
         this.setState('live');
-        this.apply(snapshot);
+        this.apply(snapshot, true);
       } else if (message.type === 'gone') this.gone();
     };
     socket.onerror = () => undefined;
@@ -262,16 +274,14 @@ export class ExecutionStream {
       this.pollAbort?.abort();
       const abort = new AbortController();
       this.pollAbort = abort;
-      let result: SummaryResult;
-      try {
-        result = await this.deps.fetchSummary(abort.signal);
-      } catch {
-        result = { ok: false, reason: 'retry' };
-      }
-      if (abort.signal.aborted || this.stopped || !this.pollTimer) return;
-      if (result.ok) this.apply(result.summary);
-      else if (result.reason === 'gone') return this.gone();
-      else if (result.reason === 'session') {
+      const result = await this.request(abort, (signal) =>
+        this.deps.fetchSummary(signal),
+      );
+      if (this.pollAbort !== abort) return;
+      this.pollAbort = undefined;
+      if (result?.ok) this.apply(result.summary, true);
+      else if (result?.reason === 'gone') return this.gone();
+      else if (result?.reason === 'session') {
         this.stop();
         return this.events.onSessionExpired();
       }
@@ -281,6 +291,33 @@ export class ExecutionStream {
       );
     };
     this.pollTimer = this.deps.setTimeout(() => void tick(), 0);
+  }
+
+  /** Дедлайн браузера діє і при розриві до фронтенду. Пізня відповідь не застосовується. */
+  private async request<T>(
+    abort: AbortController,
+    send: (signal: AbortSignal) => Promise<T>,
+  ): Promise<T | undefined> {
+    const timer = this.deps.setTimeout(
+      () => abort.abort(),
+      REALTIME_REQUEST_TIMEOUT_MS,
+    );
+    let onAbort: () => void = () => undefined;
+    const interrupted = new Promise<undefined>((resolve) => {
+      onAbort = () => {
+        this.deps.clearTimeout(timer);
+        resolve(undefined);
+      };
+    });
+    abort.signal.addEventListener('abort', onAbort, { once: true });
+    try {
+      return await Promise.race([interrupted, send(abort.signal)]);
+    } catch {
+      return undefined;
+    } finally {
+      abort.signal.removeEventListener('abort', onAbort);
+      this.deps.clearTimeout(timer);
+    }
   }
 
   private stopPolling(): void {

@@ -30,6 +30,7 @@ type Verify = (
 interface Subscription {
   grant: Grant;
   revision?: string;
+  workflowName?: string | null;
   dirty: boolean;
   reading: boolean;
   alive: boolean;
@@ -304,12 +305,14 @@ export class ExecutionGateway
     const message = JSON.stringify({ type: 'snapshot', execution });
     for (const [ws, sub] of group) {
       if (
-        sub.revision === execution.revision ||
+        (sub.revision === execution.revision &&
+          sub.workflowName === execution.workflowName) ||
         ws.readyState !== WebSocket.OPEN
       )
         continue;
       this.send(ws, message);
       sub.revision = execution.revision;
+      sub.workflowName = execution.workflowName;
     }
   }
   async beforeApplicationShutdown() {

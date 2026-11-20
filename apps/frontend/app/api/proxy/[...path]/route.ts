@@ -22,10 +22,14 @@ export const dynamic = 'force-dynamic';
 
 const NO_STORE = 'private, no-store';
 
-function error(status: number, body: Record<string, unknown>): NextResponse {
+function error(
+  status: number,
+  body: Record<string, unknown>,
+  headers = new Headers({ 'cache-control': NO_STORE }),
+): NextResponse {
   return NextResponse.json(body, {
     status,
-    headers: { 'cache-control': NO_STORE },
+    headers,
   });
 }
 
@@ -99,10 +103,15 @@ async function proxy(
   if (upstream.status === 401) {
     // Сесію відкликано або вона сплила: cookie прибираємо, браузер переходить до входу.
     await upstream.body?.cancel();
-    const res = error(401, {
-      error: 'session_expired',
-      message: 'сесія завершилася, увійдіть знову',
-    });
+    out.delete('content-type');
+    const res = error(
+      401,
+      {
+        error: 'session_expired',
+        message: 'сесія завершилася, увійдіть знову',
+      },
+      out,
+    );
     res.cookies.set(sessionCookieName(), '', {
       ...sessionCookieOptions(),
       maxAge: 0,

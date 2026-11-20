@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 import { createWorkflowSchema } from '../lib/workflow-schema';
-import { newTenant } from './fixtures';
+import { newTenant, session } from './fixtures';
 
 test('the form and API agree on bounded steps and schedule fields', async ({
   request,
@@ -65,4 +65,34 @@ test('the form and API agree on bounded steps and schedule fields', async ({
       valid ? 201 : 400,
     );
   }
+});
+test('preserves correlation and rate headers when a revoked session gets a 401', async ({
+  request,
+  context,
+}) => {
+  const tenant = await newTenant(request);
+  await session(context, tenant.apiKey);
+  const token = (await context.cookies()).find((cookie) =>
+    ['ff_session', '__Host-ff_session'].includes(cookie.name),
+  );
+  expect(token).toBeDefined();
+  const apiOrigin = process.env.API_ORIGIN ?? 'http://localhost:3000';
+  const revoked = await request.delete(apiOrigin + '/sessions/current', {
+    headers: { authorization: 'Bearer ' + token!.value },
+  });
+  expect(revoked.status()).toBe(204);
+
+  const rejected = await context.request.get('/api/proxy/workflows');
+  expect(rejected.status()).toBe(401);
+  expect(await rejected.json()).toMatchObject({ error: 'session_expired' });
+  expect(rejected.headers()).toMatchObject({
+    'cache-control': 'private, no-store',
+    'x-request-id': expect.any(String),
+    'x-ratelimit-limit': expect.stringMatching(/^\d+$/),
+    'x-ratelimit-remaining': expect.stringMatching(/^\d+$/),
+    'x-ratelimit-reset': expect.stringMatching(/^\d+$/),
+  });
+  expect(
+    (await context.cookies()).some((cookie) => cookie.name === token!.name),
+  ).toBe(false);
 });

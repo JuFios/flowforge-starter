@@ -17,7 +17,6 @@ import { TenantAuthGuard } from '../auth/api-key.guard';
 import { RateLimit } from '../limits/rate-limit.guard';
 import { CurrentTenant } from '../auth/current-tenant.decorator';
 import { Tenant } from '../entities';
-import { WorkflowsService } from '../workflows/workflows.service';
 import { ExecutionReader } from './execution-reader.service';
 import { ExecutionsService } from './executions.service';
 import { parseIdempotencyKey } from './idempotency-key';
@@ -30,7 +29,6 @@ export class ExecutionsController {
   constructor(
     private readonly reader: ExecutionReader,
     private readonly executions: ExecutionsService,
-    private readonly workflows: WorkflowsService,
   ) {}
 
   /**
@@ -49,11 +47,7 @@ export class ExecutionsController {
       idempotencyKey === undefined
         ? undefined
         : parseIdempotencyKey(idempotencyKey);
-    if (key === undefined) {
-      const workflow = await this.workflows.get(t.id, id);
-      return this.executions.enqueue(workflow, input, 'api');
-    }
-    const { execution, created } = await this.executions.enqueueOnce(
+    const { execution, created } = await this.executions.enqueue(
       { id, tenantId: t.id },
       input,
       key,

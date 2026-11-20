@@ -8,6 +8,7 @@ const STEP_COLUMNS = `s."stepIndex",s."stepId",s.status,s.attempts,left(s.error,
 export interface ExecutionOverview {
   id: string;
   revision: string;
+  workflowName: string | null;
   status: Execution['status'];
   steps: Array<
     Pick<

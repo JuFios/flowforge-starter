@@ -35,8 +35,8 @@ describe('executions listing is scoped to the tenant (real Postgres)', () => {
     const wfB = await createWorkflow(ds, b.tenant.id, 'wf-b');
     aExecutionIds = [];
     for (let i = 0; i < 3; i++)
-      aExecutionIds.push((await service.enqueue(wfA, { i }, 'api')).id);
-    for (let i = 0; i < 2; i++) await service.enqueue(wfB, { i }, 'api');
+      aExecutionIds.push((await service.enqueue(wfA, { i })).execution.id);
+    for (let i = 0; i < 2; i++) await service.enqueue(wfB, { i });
   });
 
   afterAll(async () => {

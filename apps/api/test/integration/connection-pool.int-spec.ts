@@ -8,11 +8,14 @@ import type * as QueueHelpers from '../helpers/queue';
 const CONCURRENCY = 64;
 /** Розмір пулу, який задає конфігурація: по з'єднанню на цикл і запас на heartbeat/reaper. */
 const POOL_SIZE = CONCURRENCY + 4;
+// Запас для виміряних затримок PostgreSQL і драйвера під час 64 циклів на спільному раннері.
+// Отримувач усе одно відповідає через три lease, тож крок потребує кількох heartbeat.
+const LEASE_MS = 3_000;
 
 /**
  * Пул з'єднань воркера при найбільшій кількості циклів (64). Heartbeat, чекпоінти й опитування
  * черги ділять пул, а очікування з'єднання обмежене DB_CONNECT_TIMEOUT_MS. Кожен крок утричі
- * довший за lease (1,5 с у тестах), тож lease мусить продовжуватися весь час.
+ * довший за lease, тож lease мусить продовжуватися весь час.
  */
 describe('connection pool under the largest worker concurrency', () => {
   let ds: DataSource;
@@ -24,12 +27,16 @@ describe('connection pool under the largest worker concurrency', () => {
   const saved = {
     WORKER_CONCURRENCY: process.env.WORKER_CONCURRENCY,
     DB_POOL_SIZE: process.env.DB_POOL_SIZE,
+    JOB_LEASE_MS: process.env.JOB_LEASE_MS,
+    HTTP_STEP_TIMEOUT_MS: process.env.HTTP_STEP_TIMEOUT_MS,
   };
 
   beforeAll(async () => {
     // Оточення читається під час імпорту модуля застосунку, тож імпорт — після налаштування.
     process.env.WORKER_CONCURRENCY = String(CONCURRENCY);
     process.env.DB_POOL_SIZE = String(POOL_SIZE);
+    process.env.JOB_LEASE_MS = String(LEASE_MS);
+    process.env.HTTP_STEP_TIMEOUT_MS = String(5 * LEASE_MS);
     q = await import('../helpers/queue');
     const { startApp } = await import('../helpers/app');
     const { AppModule } = await import('../../src/app.module');
@@ -43,7 +50,7 @@ describe('connection pool under the largest worker concurrency', () => {
     await truncateAll(ds);
     ({ apiKey } = await createTenant(ds));
     receiver.respond = async (_req, res) => {
-      await q.sleep(4_500);
+      await q.sleep(3 * LEASE_MS);
       res.writeHead(200, { 'content-type': 'application/json' }).end('{}');
     };
   });
