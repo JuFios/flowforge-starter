@@ -32,6 +32,7 @@ export type MissedRunPolicy = (typeof MISSED_RUN_POLICIES)[number];
 @Unique('UQ_workflows_id_tenant', ['id', 'tenantId'])
 @Index(['tenantId'])
 @Index('IDX_workflows_scheduled_tenant', { synchronize: false })
+@Index('IDX_workflows_tenant_created', { synchronize: false })
 @Index('IDX_workflows_due', { synchronize: false })
 @Check(
   'CHK_workflows_missed_run_policy',

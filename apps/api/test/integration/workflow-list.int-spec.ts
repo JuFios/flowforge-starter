@@ -40,11 +40,11 @@ describe('paged workflow list', () => {
     createdAt: string,
     steps: unknown[] = [{ id: 'say', type: 'log', message: 'hi' }],
   ): Promise<string> {
-    const [{ id }] = (await owner.query(
+    const [{ id }] = await owner.query<Array<{ id: string }>>(
       `INSERT INTO workflows ("tenantId", name, steps, "createdAt")
        VALUES ($1, 'wf', $2::jsonb, $3::timestamptz) RETURNING id`,
       [tenantId, JSON.stringify(steps), createdAt],
-    )) as Array<{ id: string }>;
+    );
     return id;
   }
 

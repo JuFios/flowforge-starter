@@ -47,7 +47,7 @@ describe('paged execution list', () => {
     createdAt: string,
     fields: { status?: string; output?: unknown; input?: unknown } = {},
   ): Promise<string> {
-    const [{ id }] = (await owner.query(
+    const [{ id }] = await owner.query<Array<{ id: string }>>(
       `INSERT INTO executions ("tenantId", "workflowId", "workflowVersionId", status, input,
                                output, "createdAt", "finishedAt")
        SELECT $1, $2, v.id, $3::varchar, $4::jsonb, $5::jsonb, $6::timestamptz,
@@ -62,7 +62,7 @@ describe('paged execution list', () => {
         fields.output === undefined ? null : JSON.stringify(fields.output),
         createdAt,
       ],
-    )) as Array<{ id: string }>;
+    );
     return id;
   }
 

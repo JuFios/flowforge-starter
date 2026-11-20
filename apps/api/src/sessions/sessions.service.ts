@@ -4,6 +4,7 @@ import {
   HttpException,
   UnauthorizedException,
 } from '@nestjs/common';
+import { QueryFailedError } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import { randomBytes, createHash } from 'node:crypto';
 import { EnvironmentVariables } from '../config/env.validation';
@@ -59,44 +60,54 @@ export class SessionsService {
 
   ticket(tenantId: string, executionId: string, sessionId?: string) {
     const ticket = 'fft_' + randomBytes(32).toString('hex');
-    return this.db.run(tenantId, async (em) => {
-      await em.query(
-        `SELECT pg_advisory_xact_lock(hashtextextended('ff.tickets:' || $1,0))`,
-        [tenantId],
-      );
-      if (sessionId) {
-        const rows = await em.query<unknown[]>(
-          `SELECT id FROM browser_sessions WHERE id=$1 AND "tenantId"=$2 AND "expiresAt">clock_timestamp()`,
-          [sessionId, tenantId],
+    return this.db
+      .run(tenantId, async (em) => {
+        await em.query(
+          `SELECT pg_advisory_xact_lock(hashtextextended('ff.tickets:' || $1,0))`,
+          [tenantId],
         );
-        if (!rows.length) throw new UnauthorizedException();
-      }
-      const owned = await em.query<unknown[]>(
-        'SELECT id FROM executions WHERE id=$1 AND "tenantId"=$2',
-        [executionId, tenantId],
-      );
-      if (!owned.length) throw new NotFoundException('Виконання не знайдено');
-      await em.query(
-        'DELETE FROM realtime_tickets WHERE "tenantId"=$1 AND "expiresAt"<=clock_timestamp()',
-        [tenantId],
-      );
-      const [{ full }] = await em.query<Array<{ full: boolean }>>(
-        'SELECT EXISTS(SELECT 1 FROM realtime_tickets WHERE "tenantId"=$1 OFFSET 99) AS full',
-        [tenantId],
-      );
-      if (full) throw new HttpException('Ліміт одночасних тикетів', 429);
-      const [result] = await em.query<Array<{ expiresAt: Date }>>(
-        `INSERT INTO realtime_tickets ("tenantId","executionId","sessionId","tokenHash","expiresAt")
+        if (sessionId) {
+          const rows = await em.query<unknown[]>(
+            `SELECT id FROM browser_sessions WHERE id=$1 AND "tenantId"=$2 AND "expiresAt">clock_timestamp()`,
+            [sessionId, tenantId],
+          );
+          if (!rows.length) throw new UnauthorizedException();
+        }
+        const owned = await em.query<unknown[]>(
+          'SELECT id FROM executions WHERE id=$1 AND "tenantId"=$2',
+          [executionId, tenantId],
+        );
+        if (!owned.length) throw new NotFoundException('Виконання не знайдено');
+        await em.query(
+          'DELETE FROM realtime_tickets WHERE "tenantId"=$1 AND "expiresAt"<=clock_timestamp()',
+          [tenantId],
+        );
+        const [{ full }] = await em.query<Array<{ full: boolean }>>(
+          'SELECT EXISTS(SELECT 1 FROM realtime_tickets WHERE "tenantId"=$1 OFFSET 99) AS full',
+          [tenantId],
+        );
+        if (full) throw new HttpException('Ліміт одночасних тикетів', 429);
+        const [result] = await em.query<Array<{ expiresAt: Date }>>(
+          `INSERT INTO realtime_tickets ("tenantId","executionId","sessionId","tokenHash","expiresAt")
         VALUES ($1,$2,$3,$4,clock_timestamp()+$5 * interval '1 millisecond') RETURNING "expiresAt"`,
-        [
-          tenantId,
-          executionId,
-          sessionId ?? null,
-          tokenHash(ticket),
-          this.config.get('REALTIME_TICKET_TTL_MS', { infer: true }),
-        ],
-      );
-      return { ticket, expiresAt: result.expiresAt };
-    });
+          [
+            tenantId,
+            executionId,
+            sessionId ?? null,
+            tokenHash(ticket),
+            this.config.get('REALTIME_TICKET_TTL_MS', { infer: true }),
+          ],
+        );
+        return { ticket, expiresAt: result.expiresAt };
+      })
+      .catch((error: unknown) => {
+        // Видалення виконання або відкликання сесії може обігнати INSERT тикета.
+        if (
+          error instanceof QueryFailedError &&
+          (error.driverError as { code?: string }).code === '23503'
+        )
+          throw new NotFoundException('Підписка недоступна');
+        throw error;
+      });
   }
 }

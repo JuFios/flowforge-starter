@@ -67,6 +67,9 @@ export class Execution {
   })
   tenant?: Tenant;
 
+  @Column({ type: 'bigint', default: 0, select: false })
+  revision: string;
+
   @Column('uuid')
   workflowId: string;
 

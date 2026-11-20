@@ -35,6 +35,10 @@ export const POSTURE: {
   functions: Readonly<Record<string, FunctionPosture>>;
 } = {
   tables: {
+    workflow_usage: {
+      tenantColumn: 'tenantId',
+      grants: { [SYSTEM_ROLE]: ['SELECT', 'INSERT', 'UPDATE'] },
+    },
     browser_sessions: {
       tenantColumn: 'tenantId',
       grants: {
@@ -143,6 +147,9 @@ export const POSTURE: {
       owner: SYSTEM_ROLE,
       execute: [API_ROLE],
     },
+    'bump_execution_revision()': { owner: MIGRATION_OWNER, execute: [] },
+    'notify_execution()': { owner: MIGRATION_OWNER, execute: [] },
+    'touch_step_execution()': { owner: MIGRATION_OWNER, execute: [] },
     'notify_session_revoked()': { owner: MIGRATION_OWNER, execute: [] },
     'auth_tenant(text)': { owner: SYSTEM_ROLE, execute: [API_ROLE] },
     'webhook_tenant(uuid)': { owner: SYSTEM_ROLE, execute: [API_ROLE] },

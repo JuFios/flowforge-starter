@@ -6,6 +6,8 @@ import {
   HttpCode,
   Param,
   ParseUUIDPipe,
+  ParseIntPipe,
+  BadRequestException,
   Post,
   Query,
   Res,
@@ -16,6 +18,7 @@ import { RateLimit } from '../limits/rate-limit.guard';
 import { CurrentTenant } from '../auth/current-tenant.decorator';
 import { Tenant } from '../entities';
 import { WorkflowsService } from '../workflows/workflows.service';
+import { ExecutionReader } from './execution-reader.service';
 import { ExecutionsService } from './executions.service';
 import { parseIdempotencyKey } from './idempotency-key';
 import { ListExecutionsQuery } from './list-executions.query';
@@ -25,6 +28,7 @@ import { RunInputPipe } from './run-input.pipe';
 @RateLimit('tenant', { before: [TenantAuthGuard] })
 export class ExecutionsController {
   constructor(
+    private readonly reader: ExecutionReader,
     private readonly executions: ExecutionsService,
     private readonly workflows: WorkflowsService,
   ) {}
@@ -76,6 +80,24 @@ export class ExecutionsController {
 
   @Get('executions/:id')
   get(@CurrentTenant() t: Tenant, @Param('id', ParseUUIDPipe) id: string) {
-    return this.executions.get(t.id, id);
+    return this.reader.detail(t.id, id);
+  }
+  @Get('executions/:id/summary')
+  summary(@CurrentTenant() t: Tenant, @Param('id', ParseUUIDPipe) id: string) {
+    return this.reader.summary(t.id, id);
+  }
+  @Get('executions/:id/steps/:index')
+  step(
+    @CurrentTenant() t: Tenant,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('index', ParseIntPipe) index: number,
+  ) {
+    if (index < 0 || index >= 50)
+      throw new BadRequestException('stepIndex має бути від 0 до 49');
+    return this.reader.step(t.id, id, index);
+  }
+  @Get('executions/:id/output')
+  output(@CurrentTenant() t: Tenant, @Param('id', ParseUUIDPipe) id: string) {
+    return this.reader.output(t.id, id);
   }
 }

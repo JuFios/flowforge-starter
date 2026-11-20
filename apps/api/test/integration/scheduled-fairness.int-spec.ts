@@ -131,6 +131,7 @@ describe('scheduled tenant fairness', () => {
       (await createTenant(ds, 'first')).tenant.id,
       (await createTenant(ds, 'second')).tenant.id,
     ].sort();
+    await ds.query('UPDATE tenants SET "maxWorkflows"=1200 WHERE id=$1', [a]);
     await schedules(a, 1200, 2_000, '00000000-0000-4000-8000-');
     await schedules(b, 1, 2_000, '00000000-0000-4000-9000-');
     const seen: string[] = [];

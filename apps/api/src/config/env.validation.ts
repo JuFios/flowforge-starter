@@ -208,6 +208,16 @@ export class EnvironmentVariables extends DatabaseEnvironment {
   @Min(1000)
   @Max(60_000)
   REALTIME_TICKET_TTL_MS = 30_000;
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(10000)
+  REALTIME_MAX_CONNECTIONS = 256;
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(1000)
+  REALTIME_MAX_CONNECTIONS_PER_TENANT = 32;
 
   /**
    * Службовий порт API лише для GET /metrics. Не публікується назовні (docker-compose),

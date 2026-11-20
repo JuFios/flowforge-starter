@@ -35,10 +35,8 @@ function tenantLimitsSql(withWorkflows: boolean): string {
 }
 
 /**
- * Квота збережених workflow тенанта (беклог PR 6, P1). Перевірка — у тригері БД, тож її не обходить
- * жоден шлях вставки. Advisory-блокування транзакції за тенантом серіалізує вставки одного
- * тенанта: наступна чекає COMMIT попередньої, а її підрахунок (новий знімок READ COMMITTED після
- * блокування) уже бачить той рядок. Гарячий рядок `tenant_usage` (облік claim) не блокується.
+ * Облік workflow серіалізовано одним рядком на тенанта. Лічильник створюється при першій
+ * вставці, відмова за квотою відкочує і вставку, і приріст. Облік черги не блокується.
  */
 export class WorkflowQuota1796500000000 implements MigrationInterface {
   name = 'WorkflowQuota1796500000000';
@@ -65,22 +63,37 @@ export class WorkflowQuota1796500000000 implements MigrationInterface {
       `GRANT EXECUTE ON FUNCTION public.tenant_limits() TO ${API_ROLE}`,
     );
 
+    await runner.query(`CREATE TABLE public.workflow_usage (
+      "tenantId" uuid PRIMARY KEY REFERENCES public.tenants(id) ON DELETE CASCADE,
+      used bigint NOT NULL CHECK (used >= 0))`);
+    await runner.query(
+      `INSERT INTO public.workflow_usage SELECT "tenantId",count(*) FROM public.workflows GROUP BY "tenantId"`,
+    );
+    await runner.query(
+      'ALTER TABLE public.workflow_usage ENABLE ROW LEVEL SECURITY',
+    );
+    await runner.query(
+      'ALTER TABLE public.workflow_usage FORCE ROW LEVEL SECURITY',
+    );
+    await runner.query(
+      `CREATE POLICY tenant_isolation ON public.workflow_usage USING ("tenantId"=public.app_current_tenant()) WITH CHECK ("tenantId"=public.app_current_tenant())`,
+    );
+    await runner.query(
+      `GRANT SELECT,INSERT,UPDATE ON public.workflow_usage TO ${SYSTEM_ROLE}`,
+    );
     await runner.query(`CREATE FUNCTION public.workflow_quota() RETURNS trigger
       LANGUAGE plpgsql ${DEFINER} AS $$
-      DECLARE
-        quota integer;
-        used integer;
+      DECLARE quota integer; total bigint;
       BEGIN
-        PERFORM pg_catalog.pg_advisory_xact_lock(
-          pg_catalog.hashtextextended('flowforge.workflow_quota:' || NEW."tenantId"::text, 0));
-        SELECT COALESCE(t."maxWorkflows", d."maxWorkflows") INTO quota
-          FROM public.tenants t CROSS JOIN public.limit_defaults d
-         WHERE t.id = NEW."tenantId";
-        IF quota IS NULL THEN RETURN NEW; END IF;
-        SELECT count(*) INTO used FROM (
-          SELECT 1 FROM public.workflows w WHERE w."tenantId" = NEW."tenantId" LIMIT quota
-        ) s;
-        IF used >= quota THEN
+        IF TG_OP='DELETE' THEN
+          UPDATE public.workflow_usage SET used=used-1 WHERE "tenantId"=OLD."tenantId";
+          RETURN OLD;
+        END IF;
+        INSERT INTO public.workflow_usage AS u ("tenantId",used) VALUES (NEW."tenantId",1)
+          ON CONFLICT ("tenantId") DO UPDATE SET used=u.used+1 RETURNING used INTO total;
+        SELECT COALESCE(t."maxWorkflows", d."maxWorkflows") INTO STRICT quota
+          FROM public.tenants t CROSS JOIN public.limit_defaults d WHERE t.id=NEW."tenantId";
+        IF total>quota THEN
           RAISE EXCEPTION USING ERRCODE = '${WORKFLOW_QUOTA_SQLSTATE}',
             MESSAGE = 'workflow quota reached', DETAIL = quota::text;
         END IF;
@@ -92,7 +105,7 @@ export class WorkflowQuota1796500000000 implements MigrationInterface {
     await runner.query(
       'REVOKE ALL ON FUNCTION public.workflow_quota() FROM PUBLIC',
     );
-    await runner.query(`CREATE TRIGGER workflow_quota BEFORE INSERT ON public.workflows
+    await runner.query(`CREATE TRIGGER workflow_quota AFTER INSERT OR DELETE ON public.workflows
       FOR EACH ROW EXECUTE FUNCTION public.workflow_quota()`);
 
     // Сторінка списку: ORDER BY "createdAt" DESC, id DESC з предикатом курсора — один діапазон індексу.
@@ -104,6 +117,7 @@ export class WorkflowQuota1796500000000 implements MigrationInterface {
     await runner.query('DROP INDEX public."IDX_workflows_tenant_created"');
     await runner.query('DROP TRIGGER workflow_quota ON public.workflows');
     await runner.query('DROP FUNCTION public.workflow_quota()');
+    await runner.query('DROP TABLE public.workflow_usage');
     await runner.query('DROP FUNCTION public.tenant_limits()');
     await runner.query(tenantLimitsSql(false));
     await runner.query(
