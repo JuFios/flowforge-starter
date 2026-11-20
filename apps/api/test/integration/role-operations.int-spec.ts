@@ -125,7 +125,9 @@ describe('every operation works with the runtime roles', () => {
       'succeeded',
       'succeeded',
     ]);
-    expect((await call<unknown[]>('GET', '/executions')).body).toHaveLength(1);
+    expect(
+      (await call<{ items: unknown[] }>('GET', '/executions')).body.items,
+    ).toHaveLength(1);
 
     // Неповторювана помилка → failed → /retry продовжує (API: execution FOR UPDATE, jobs).
     receiver.respond = (_req, res) => void res.writeHead(400).end();

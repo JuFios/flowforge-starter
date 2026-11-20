@@ -18,6 +18,7 @@ import { Tenant } from '../entities';
 import { WorkflowsService } from '../workflows/workflows.service';
 import { ExecutionsService } from './executions.service';
 import { parseIdempotencyKey } from './idempotency-key';
+import { ListExecutionsQuery } from './list-executions.query';
 import { RunInputPipe } from './run-input.pipe';
 
 @Controller()
@@ -58,8 +59,8 @@ export class ExecutionsController {
   }
 
   @Get('executions')
-  list(@CurrentTenant() t: Tenant, @Query('limit') limit?: string) {
-    return this.executions.list(t.id, limit ? Number(limit) : undefined);
+  list(@CurrentTenant() t: Tenant, @Query() query: ListExecutionsQuery) {
+    return this.executions.list(t.id, query);
   }
 
   /** Повтор виконання, що завершилось failed: продовження з першого незавершеного кроку. */

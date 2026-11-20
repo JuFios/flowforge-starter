@@ -46,8 +46,10 @@ describe('executions listing is scoped to the tenant (real Postgres)', () => {
 
   it('service.list returns only executions of the requested tenant', async () => {
     const result = await running.app.get(ExecutionsService).list(a.tenant.id);
-    expect(result.map((e) => e.id).sort()).toEqual([...aExecutionIds].sort());
-    expect(result.every((e) => e.tenantId === a.tenant.id)).toBe(true);
+    expect(result.items.map((e) => e.id).sort()).toEqual(
+      [...aExecutionIds].sort(),
+    );
+    expect(result.items.every((e) => e.workflowName === 'wf-a')).toBe(true);
   });
 
   it('GET /executions returns only executions of the caller tenant', async () => {
@@ -55,7 +57,9 @@ describe('executions listing is scoped to the tenant (real Postgres)', () => {
       headers: { 'x-api-key': a.apiKey },
     });
     expect(res.status).toBe(200);
-    const body = (await res.json()) as Array<{ id: string; tenantId: string }>;
-    expect(body.map((e) => e.id).sort()).toEqual([...aExecutionIds].sort());
+    const body = (await res.json()) as { items: Array<{ id: string }> };
+    expect(body.items.map((e) => e.id).sort()).toEqual(
+      [...aExecutionIds].sort(),
+    );
   });
 });

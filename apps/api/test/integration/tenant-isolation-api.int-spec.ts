@@ -91,9 +91,12 @@ describe('tenant isolation over HTTP', () => {
   });
 
   it('GET /executions of tenant B does not list executions of A', async () => {
-    const res = await asB<Array<{ id: string }>>('GET', '/executions');
+    const res = await asB<{ items: Array<{ id: string }> }>(
+      'GET',
+      '/executions',
+    );
     expect(res.status).toBe(200);
-    expect(res.body.map((e) => e.id)).not.toContain(failedA.id);
+    expect(res.body.items.map((e) => e.id)).not.toContain(failedA.id);
   });
 
   it('POST /executions/:id/retry of another tenant is 404 and changes nothing', async () => {

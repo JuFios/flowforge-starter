@@ -109,7 +109,7 @@ describe('tenant predicates in the services (row-level security bypassed)', () =
     await expect(executions.get(b, failedA.id)).rejects.toThrow(
       NotFoundException,
     );
-    expect((await executions.list(b)).map((e) => e.id)).not.toContain(
+    expect((await executions.list(b)).items.map((e) => e.id)).not.toContain(
       failedA.id,
     );
     await expect(executions.retry(b, failedA.id)).rejects.toThrow(

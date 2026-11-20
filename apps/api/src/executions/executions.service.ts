@@ -1,4 +1,10 @@
 import {
+  cursorAtSql,
+  decodeKeysetCursor,
+  toPage,
+} from '../common/keyset-cursor';
+import { ListExecutionsQuery } from './list-executions.query';
+import {
   ConflictException,
   UnauthorizedException,
   Injectable,
@@ -424,14 +430,53 @@ export class ExecutionsService {
     return execution;
   }
 
-  list(tenantId: string, limit = 50): Promise<Execution[]> {
-    return this.db.run(tenantId, (em) =>
-      em.find(Execution, {
-        where: { tenantId },
-        order: { createdAt: 'DESC' },
-        take: Math.min(limit, 200),
-      }),
+  async list(tenantId: string, query: ListExecutionsQuery = {}) {
+    const workflowId = query.workflowId?.toLowerCase();
+    const scope = `${query.status ?? ''}:${workflowId ?? ''}`;
+    const after = query.cursor
+      ? decodeKeysetCursor(query.cursor, scope)
+      : undefined;
+    const limit = query.limit ?? 50;
+    const params: unknown[] = [tenantId, limit + 1];
+    const where = ['e."tenantId" = $1'];
+    if (query.status) where.push(`e.status = $${params.push(query.status)}`);
+    if (workflowId)
+      where.push(`e."workflowId" = $${params.push(workflowId)}::uuid`);
+    if (after) {
+      const at = params.push(after.createdAt);
+      const id = params.push(after.id);
+      where.push(`(e."createdAt", e.id) < ($${at}::timestamptz, $${id}::uuid)`);
+    }
+    type Row = Pick<
+      Execution,
+      | 'id'
+      | 'workflowId'
+      | 'status'
+      | 'trigger'
+      | 'error'
+      | 'createdAt'
+      | 'finishedAt'
+      | 'scheduledAt'
+      | 'correlationId'
+    > & {
+      workflowName: string | null;
+      workflowVersion: number | null;
+      cursorAt: string;
+    };
+    const rows = await this.db.run(tenantId, (em) =>
+      em.query<Row[]>(
+        `SELECT e.id, e."workflowId", w.name AS "workflowName", v.version AS "workflowVersion",
+              e.status, e.trigger, left(e.error,500) AS error, e."createdAt", e."finishedAt",
+              e."scheduledAt", e."correlationId", ${cursorAtSql('e."createdAt"')} AS "cursorAt"
+         FROM executions e
+         LEFT JOIN workflows w ON w.id=e."workflowId" AND w."tenantId"=e."tenantId"
+         LEFT JOIN workflow_versions v ON v.id=e."workflowVersionId" AND v."tenantId"=e."tenantId"
+        WHERE ${where.join(' AND ')}
+        ORDER BY e."createdAt" DESC, e.id DESC LIMIT $2`,
+        params,
+      ),
     );
+    return toPage(rows, limit, scope);
   }
 
   /** Виконання тенанта разом із кроками; чуже виконання — 404, як неіснуюче. */

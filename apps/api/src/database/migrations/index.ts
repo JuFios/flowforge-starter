@@ -41,6 +41,8 @@ import { SerializeOutbox1796300000000 } from './1796300000000-SerializeOutbox';
 import { WorkflowQuota1796500000000 } from './1796500000000-WorkflowQuota';
 import { CloseCancelledAttempts1796400000000 } from './1796400000000-CloseCancelledAttempts';
 
+import { ExecutionPages1796600000000 } from './1796600000000-ExecutionPages';
+
 export const MIGRATIONS = [
   InitialSchema1794920217603,
   AddCorrelationId1794920232623,
@@ -71,4 +73,5 @@ export const MIGRATIONS = [
   SerializeOutbox1796300000000,
   CloseCancelledAttempts1796400000000,
   WorkflowQuota1796500000000,
+  ExecutionPages1796600000000,
 ];
