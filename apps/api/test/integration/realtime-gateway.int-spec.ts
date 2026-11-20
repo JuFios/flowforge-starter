@@ -1,6 +1,8 @@
 import WebSocket = require('ws');
 import { DataSource } from 'typeorm';
 import type { RunningApp } from '../helpers/app';
+import type { ExecutionReader } from '../../src/executions/execution-reader.service';
+import { waitFor } from '../helpers/wait-for';
 import {
   createExecution,
   createTenant,
@@ -18,6 +20,7 @@ describe('realtime gateway handshake and lifecycle', () => {
   const PER_TENANT = 2;
   let ds: DataSource;
   let app: RunningApp;
+  let readerToken: typeof ExecutionReader;
   const sockets: WebSocket[] = [];
 
   beforeAll(async () => {
@@ -29,6 +32,9 @@ describe('realtime gateway handshake and lifecycle', () => {
       await jest.isolateModulesAsync(async () => {
         const { startApp } = await import('../helpers/app');
         app = await startApp();
+        readerToken = (
+          await import('../../src/executions/execution-reader.service')
+        ).ExecutionReader;
       });
     } finally {
       if (saved === undefined)
@@ -151,5 +157,39 @@ describe('realtime gateway handshake and lifecycle', () => {
     const code = closed(socket);
     socket.send('{"type":"subscribe"}');
     expect(await code).toBe(1003);
+  });
+
+  it('reads one snapshot for several sockets of a session on the same execution', async () => {
+    const { execution, token } = await setup();
+    const revisions = new Map<WebSocket, string>();
+    const opened: WebSocket[] = [];
+    for (let i = 0; i < 2; i++) {
+      const { socket, opened: ok } = await connect(
+        await ticket(token, execution.id),
+      );
+      expect(ok).toBe(true);
+      socket.on('message', (raw: Buffer) => {
+        const event = JSON.parse(raw.toString()) as {
+          execution?: { revision: string };
+        };
+        if (event.execution) revisions.set(socket, event.execution.revision);
+      });
+      opened.push(socket);
+    }
+    await waitFor('initial snapshots', () => revisions.size === opened.length);
+    // Реєстр модулів ізольований: токен рідера — з того самого імпорту, що й застосунок.
+    const reader = app.app.get(readerToken);
+    const reads = jest.spyOn(reader, 'summary');
+    const [[{ revision }]] = await ds.query<
+      [Array<{ revision: string }>, number]
+    >(
+      `UPDATE executions SET status = 'running' WHERE id = $1 RETURNING revision::text`,
+      [execution.id],
+    );
+    await waitFor('both sockets at the new revision', () =>
+      opened.every((socket) => revisions.get(socket) === revision),
+    );
+    expect(reads).toHaveBeenCalledTimes(1);
+    reads.mockRestore();
   });
 });

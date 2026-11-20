@@ -35,6 +35,9 @@ interface Subscription {
   alive: boolean;
 }
 const BUFFER_LIMIT = 256 * 1024;
+/** Сокети з однаковим ключем отримують знімок з одного читання. */
+const groupKey = ({ grant }: Subscription) =>
+  `${grant.tenantId}:${grant.executionId}:${grant.sessionId ?? ''}`;
 
 @Injectable()
 export class ExecutionGateway
@@ -43,6 +46,8 @@ export class ExecutionGateway
   private readonly logger = new Logger(ExecutionGateway.name);
   private readonly pending = new WeakMap<IncomingMessage, Grant>();
   private readonly subscriptions = new Map<WebSocket, Subscription>();
+  /** Групи, чий знімок зараз читається (ключ groupKey). */
+  private readonly readingGroups = new Set<string>();
   private checking = 0;
   private activeReads = 0;
   private closed = false;
@@ -236,43 +241,76 @@ export class ExecutionGateway
     for (const sub of this.subscriptions.values()) sub.dirty = true;
     this.drain();
   }
+  /**
+   * Знімок читається один раз на групу сокетів із тим самим тенантом, виконанням і сесією
+   * (перевірка сесії — частина того самого SQL), тож кілька вкладок одного користувача на одному
+   * виконанні не множать запити до БД. Поки група читається, нові сповіщення лише позначають її
+   * брудною, і після читання вона перечитується ще раз.
+   */
   private drain() {
     if (this.closed) return;
     for (const [ws, sub] of this.subscriptions) {
       if (this.activeReads >= 4) break;
       if (!sub.dirty || sub.reading || ws.readyState !== WebSocket.OPEN)
         continue;
-      sub.dirty = false;
-      sub.reading = true;
+      const key = groupKey(sub);
+      if (this.readingGroups.has(key)) continue;
+      const group: Array<[WebSocket, Subscription]> = [];
+      for (const [other, candidate] of this.subscriptions)
+        if (
+          groupKey(candidate) === key &&
+          candidate.dirty &&
+          other.readyState === WebSocket.OPEN
+        )
+          group.push([other, candidate]);
+      for (const [, member] of group) {
+        member.dirty = false;
+        member.reading = true;
+      }
+      this.readingGroups.add(key);
       this.activeReads++;
-      void this.refresh(ws, sub)
-        .catch((err) => {
-          if (err instanceof NotFoundException) ws.close(4404, 'unavailable');
-          else ws.close(1013, 'retry later');
-        })
-        .finally(() => {
-          sub.reading = false;
-          if (this.subscriptions.delete(ws)) this.subscriptions.set(ws, sub);
-          this.activeReads--;
-          this.drain();
-        });
+      void this.refresh(sub.grant, group).finally(() => {
+        this.readingGroups.delete(key);
+        for (const [member, state] of group) {
+          state.reading = false;
+          // Група стає в кінець черги: інші виконання не чекають на одне гаряче.
+          if (this.subscriptions.delete(member))
+            this.subscriptions.set(member, state);
+        }
+        this.activeReads--;
+        this.drain();
+      });
     }
   }
-  private async refresh(ws: WebSocket, sub: Subscription) {
-    const { tenantId, executionId, sessionId, sessionExpiresAt } = sub.grant;
+  private async refresh(grant: Grant, group: Array<[WebSocket, Subscription]>) {
+    const { tenantId, executionId, sessionId, sessionExpiresAt } = grant;
     if (sessionExpiresAt && sessionExpiresAt.getTime() <= Date.now()) {
-      ws.close(4401, 'session expired');
+      for (const [ws] of group) ws.close(4401, 'session expired');
       return;
     }
-    const execution = await this.reader.summary(
-      tenantId,
-      executionId,
-      sessionId ?? undefined,
-    );
-    if (sub.revision === execution.revision || ws.readyState !== WebSocket.OPEN)
+    let execution: Awaited<ReturnType<ExecutionReader['summary']>>;
+    try {
+      execution = await this.reader.summary(
+        tenantId,
+        executionId,
+        sessionId ?? undefined,
+      );
+    } catch (err) {
+      for (const [ws] of group)
+        if (err instanceof NotFoundException) ws.close(4404, 'unavailable');
+        else ws.close(1013, 'retry later');
       return;
-    this.send(ws, JSON.stringify({ type: 'snapshot', execution }));
-    sub.revision = execution.revision;
+    }
+    const message = JSON.stringify({ type: 'snapshot', execution });
+    for (const [ws, sub] of group) {
+      if (
+        sub.revision === execution.revision ||
+        ws.readyState !== WebSocket.OPEN
+      )
+        continue;
+      this.send(ws, message);
+      sub.revision = execution.revision;
+    }
   }
   async beforeApplicationShutdown() {
     this.closed = true;
