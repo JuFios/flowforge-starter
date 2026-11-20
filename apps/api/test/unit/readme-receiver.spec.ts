@@ -23,10 +23,14 @@ interface Receiver {
 
 /** Приклад отримувача з README (блок після позначки `receiver-example`), виконаний як є. */
 function receiverFromReadme(): Receiver {
-  const docs = readFileSync(join(__dirname, '../../../../README.md'), 'utf8');
+  const docs = readFileSync(
+    join(__dirname, '../../../../docs/operations.md'),
+    'utf8',
+  );
   const after = docs.split('receiver-example')[1] ?? '';
   const code = /```js\n([\s\S]*?)```/.exec(after)?.[1];
-  if (!code) throw new Error('the receiver example is missing from README');
+  if (!code)
+    throw new Error('the receiver example is missing from docs/operations.md');
   const module = { exports: {} as unknown };
   // eslint-disable-next-line @typescript-eslint/no-implied-eval -- виконуємо саме опублікований приклад
   new Function('require', 'module', code)(require, module);

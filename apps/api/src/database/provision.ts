@@ -11,7 +11,10 @@ import {
 } from '../tenancy/login-role-check';
 import { loadDotEnvIfPresent } from './cli-env';
 import { buildDataSourceOptions } from './database.options';
-import { validateDatabaseEnv } from '../config/env.validation';
+import {
+  checkPlaceholderSecrets,
+  validateDatabaseEnv,
+} from '../config/env.validation';
 
 /** Ітерацій PBKDF2 у SCRAM verifier — як `scram_iterations` Postgres за замовчуванням. */
 export const SCRAM_ITERATIONS = 4096;
@@ -159,6 +162,7 @@ export interface LimitDefaults {
   rateWindowMs: number;
   webhookRateLimit: number;
   webhookRateWindowMs: number;
+  maxWorkflows: number;
 }
 
 /** Змінна env кожного значення за замовчуванням і її межі. */
@@ -175,6 +179,7 @@ const LIMIT_ENV: Record<
     'TENANT_WEBHOOK_RATE_WINDOW_MS',
     LIMIT_BOUNDS.rateWindowMs,
   ],
+  maxWorkflows: ['TENANT_MAX_WORKFLOWS', LIMIT_BOUNDS.maxWorkflows],
 };
 
 /** Значення за замовчуванням з env (`TENANT_*`), а без змінної — вбудовані; поза межами — помилка. */
@@ -203,7 +208,7 @@ export async function provisionLimitDefaults(
   await query(
     `UPDATE limit_defaults
         SET "maxRunning" = $1, "maxQueueSize" = $2, "rateLimit" = $3, "rateWindowMs" = $4,
-            "webhookRateLimit" = $5, "webhookRateWindowMs" = $6
+            "webhookRateLimit" = $5, "webhookRateWindowMs" = $6, "maxWorkflows" = $7
       WHERE id`,
     [
       limits.maxRunning,
@@ -212,6 +217,7 @@ export async function provisionLimitDefaults(
       limits.rateWindowMs,
       limits.webhookRateLimit,
       limits.webhookRateWindowMs,
+      limits.maxWorkflows,
     ],
   );
 }
@@ -246,6 +252,10 @@ async function main(): Promise<void> {
       'MIGRATION_DATABASE_URL is required for db:provision: the URL of the schema owner',
     );
   const roles = loginRolesFromEnv(process.env);
+  checkPlaceholderSecrets(process.env, {
+    API_DB_PASSWORD: process.env.API_DB_PASSWORD,
+    WORKER_DB_PASSWORD: process.env.WORKER_DB_PASSWORD,
+  });
   const limits = limitDefaultsFromEnv(process.env);
   const ds = await new DataSource(
     buildDataSourceOptions(

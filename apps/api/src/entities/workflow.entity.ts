@@ -32,6 +32,7 @@ export type MissedRunPolicy = (typeof MISSED_RUN_POLICIES)[number];
 @Unique('UQ_workflows_id_tenant', ['id', 'tenantId'])
 @Index(['tenantId'])
 @Index('IDX_workflows_scheduled_tenant', { synchronize: false })
+@Index('IDX_workflows_tenant_created', { synchronize: false })
 @Index('IDX_workflows_due', { synchronize: false })
 @Check(
   'CHK_workflows_missed_run_policy',
@@ -69,6 +70,10 @@ export class Workflow {
 
   @Column({ default: 1 })
   version: number;
+
+  /** Ревізія редагованих полів. Стан планувальника її не змінює. */
+  @Column({ type: 'bigint', default: '1' })
+  editRevision: string;
 
   /**
    * Політика моментів розкладу, пропущених довше за SCHEDULER_MISFIRE_GRACE_MS (простій, БД

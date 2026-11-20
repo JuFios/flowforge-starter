@@ -1,4 +1,10 @@
 import {
+  cursorAtSql,
+  decodeKeysetCursor,
+  Page,
+  toPage,
+} from '../common/keyset-cursor';
+import {
   BadRequestException,
   ConflictException,
   Injectable,
@@ -83,33 +89,6 @@ const EVENT_COLUMNS = `id, "executionId", sequence, type, status, attempts,
 
 /** Секрет підпису: 32 випадкові байти, hex (показується лише раз). */
 const newSecret = () => randomBytes(32).toString('hex');
-
-/**
- * Курсор сторінки подій: момент створення з точністю Postgres (мікросекунди: Date їх відкинув би, і
- * події з тієї самої мілісекунди випадали б зі сторінок) і id останньої події, base64url.
- */
-function encodeCursor(event: { cursorAt: string; id: string }): string {
-  return Buffer.from(`${event.cursorAt}|${event.id}`, 'utf8').toString(
-    'base64url',
-  );
-}
-
-function decodeCursor(raw: string): { createdAt: string; id: string } {
-  const text = Buffer.from(raw, 'base64url').toString('utf8');
-  const match =
-    /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z)\|([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/.exec(
-      text,
-    );
-  const time = match ? Date.parse(match[1]) : NaN;
-  if (
-    !match ||
-    !Number.isFinite(time) ||
-    match[1].startsWith('0000-') ||
-    new Date(time).toISOString().slice(0, 23) !== match[1].slice(0, 23)
-  )
-    throw new BadRequestException(['cursor is invalid']);
-  return { createdAt: match[1], id: match[2] };
-}
 
 /**
  * Налаштування сповіщень і журнал подій тенанта (README 3.3.9). Усе — у транзакції тенанта (RLS) з
@@ -218,9 +197,9 @@ export class NotificationsService {
   async listEvents(
     tenantId: string,
     query: ListEventsQuery,
-  ): Promise<{ items: EventView[]; nextCursor: string | null }> {
+  ): Promise<Page<EventView>> {
     const limit = query.limit ?? 50;
-    const after = query.cursor ? decodeCursor(query.cursor) : null;
+    const after = query.cursor ? decodeKeysetCursor(query.cursor) : null;
     const params: unknown[] = [tenantId, limit + 1];
     const where = ['"tenantId" = $1'];
     if (query.status) {
@@ -237,23 +216,13 @@ export class NotificationsService {
       tenantId,
       (em) =>
         em.query(
-          `SELECT ${EVENT_COLUMNS},
-                  to_char("createdAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "cursorAt"
+          `SELECT ${EVENT_COLUMNS}, ${cursorAtSql('"createdAt"')} AS "cursorAt"
              FROM outbox_events WHERE ${where.join(' AND ')}
             ORDER BY "createdAt" DESC, id DESC LIMIT $2`,
           params,
         ),
     );
-    const page = rows.slice(0, limit);
-    return {
-      items: page.map((row) => {
-        const { cursorAt, ...event } = row;
-        void cursorAt;
-        return event;
-      }),
-      nextCursor:
-        rows.length > limit ? encodeCursor(page[page.length - 1]) : null,
-    };
+    return toPage(rows, limit);
   }
 
   /** Верхня межа фіксує набір номерів спроб на початку обходу. */

@@ -56,7 +56,10 @@ describe('queue depth read timeout', () => {
     }
   }
 
-  it.each<[string, () => DataSource, number, number]>([
+  // Сон обрано так, щоб скасувати читання могла лише межа, яку перевіряє випадок: 1,5 с менше
+  // за власну межу 2 с, а 4 с більше за неї. Якщо межа не діє, сон завершується без помилки.
+  // Тому доказ — код 57014 і завершення раніше за сон, а не час, що включає планування клієнта.
+  it.each<[string, () => DataSource, number]>([
     [
       'a shorter DB_STATEMENT_TIMEOUT_MS',
       () =>
@@ -68,8 +71,7 @@ describe('queue depth read timeout', () => {
             }),
           ),
         ),
-      0.5,
-      400,
+      1.5,
     ],
     [
       'the default DB_STATEMENT_TIMEOUT_MS',
@@ -79,29 +81,55 @@ describe('queue depth read timeout', () => {
             validateDatabaseEnv({ DATABASE_URL: testDatabaseUrl() }),
           ),
         ),
-      2.5,
-      2_400,
+      4,
     ],
     [
       'a session without a statement timeout',
       () => new DataSource({ type: 'postgres', url: testDatabaseUrl() }),
-      2.5,
-      2_400,
+      4,
     ],
   ])(
     'cancels the read on the server within %s',
-    async (_case, source, sleepSeconds, limitMs) => {
+    async (_case, source, sleepSeconds) => {
       const ds = await source().initialize();
       try {
         await withSlowDepth(sleepSeconds, async () => {
           const { error, ms } = await timed(ds);
           // 57014 query_canceled: «canceling statement due to statement timeout».
           expect(error).toMatchObject({ driverError: { code: '57014' } });
-          expect(ms).toBeLessThan(limitMs);
+          expect(ms).toBeLessThan(sleepSeconds * 1000);
         });
       } finally {
         await ds.destroy();
       }
     },
   );
+
+  // Сервер скасовує читання через 100 мс незалежно від того, коли клієнт обробить відповідь.
+  // Затримка циклу подій клієнта (повільний раннер CI, GC) не змінює властивості, тож перевірка
+  // не повинна від неї залежати.
+  it('keeps the verdict when the client event loop is stalled after the query is sent', async () => {
+    const ds = await new DataSource(
+      buildDataSourceOptions(
+        validateDatabaseEnv({
+          DATABASE_URL: testDatabaseUrl(),
+          DB_STATEMENT_TIMEOUT_MS: '100',
+        }),
+      ),
+    ).initialize();
+    try {
+      await withSlowDepth(1.5, async () => {
+        const pending = timed(ds);
+        const stalledUntil = performance.now() + 350;
+        while (performance.now() < stalledUntil) {
+          // Синхронна робота клієнта: відповідь сервера чекає в сокеті.
+        }
+        const { error, ms } = await pending;
+        expect(error).toMatchObject({ driverError: { code: '57014' } });
+        expect(ms).toBeLessThan(1_500);
+      });
+    } finally {
+      await ds.destroy();
+    }
+  });
 });

@@ -18,6 +18,25 @@ export const SCHEDULE_PAGE = 500;
 export class SystemDb {
   constructor(@InjectDataSource() private readonly ds: DataSource) {}
 
+  async authSession(hash: Buffer) {
+    const [row] = await this.ds.query<
+      Array<{ id: string; tenantId: string; expiresAt: Date }>
+    >('SELECT * FROM auth_session($1)', [hash]);
+    return row;
+  }
+
+  async redeemTicket(hash: Buffer) {
+    const [row] = await this.ds.query<
+      Array<{
+        tenantId: string;
+        executionId: string;
+        sessionId: string | null;
+        sessionExpiresAt: Date | null;
+      }>
+    >('SELECT * FROM redeem_realtime_ticket($1)', [hash]);
+    return row;
+  }
+
   /** Тенант за sha256-хешем API-ключа або null. */
   async authTenant(apiKeyHash: string): Promise<string | null> {
     const [row]: Array<{ id: string | null }> = await this.ds.query(
@@ -129,6 +148,14 @@ export class SystemDb {
   }
 
   /** Одна пачка очищення відер частоти запитів, чиє вікно скінчилось; кількість видалених. */
+  async purgeBrowserCredentials(batch: number): Promise<number> {
+    const [row] = await this.ds.query<Array<{ deleted: number }>>(
+      'SELECT purge_browser_credentials($1) AS deleted',
+      [batch],
+    );
+    return row.deleted;
+  }
+
   async purgeRateLimits(batch: number): Promise<number> {
     const [row]: Array<{ deleted: number }> = await this.ds.query(
       'SELECT purge_rate_limits($1) AS deleted',

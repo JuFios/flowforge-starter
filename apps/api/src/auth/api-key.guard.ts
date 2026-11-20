@@ -15,6 +15,7 @@ import { TenantDb } from '../tenancy/tenant-db';
 export interface TenantRequest {
   headers: Record<string, string | string[] | undefined>;
   tenant: Tenant;
+  sessionId?: string;
   /** Ефективні ліміти тенанта (для ліміту частоти, що стоїть після автентифікації). */
   limits: EffectiveLimits;
 }
@@ -33,6 +34,7 @@ export const MAX_API_KEY_LENGTH = 256;
  */
 @Injectable()
 export class ApiKeyGuard implements CanActivate {
+  protected readonly credentials: 'api-key' | 'either' | 'session' = 'api-key';
   constructor(
     private readonly system: SystemDb,
     private readonly db: TenantDb,
@@ -41,17 +43,35 @@ export class ApiKeyGuard implements CanActivate {
 
   async canActivate(ctx: ExecutionContext): Promise<boolean> {
     const req = ctx.switchToHttp().getRequest<TenantRequest>();
-    const key = req.headers['x-api-key'];
-    if (typeof key !== 'string' || key.length === 0)
+    const sessionOnly = this.credentials === 'session';
+    const key = sessionOnly ? undefined : req.headers['x-api-key'];
+    const authorization = req.headers.authorization;
+    const bearer =
+      this.credentials !== 'api-key' &&
+      key === undefined &&
+      typeof authorization === 'string' &&
+      /^Bearer ffs_[0-9a-f]{64}$/.test(authorization)
+        ? authorization.slice(7)
+        : undefined;
+    if (!bearer && (typeof key !== 'string' || key.length === 0))
       return this.authFailures.reject(
         ctx,
-        new UnauthorizedException('Відсутній x-api-key'),
+        new UnauthorizedException(
+          sessionOnly ? 'Потрібна браузерна сесія' : 'Відсутній x-api-key',
+        ),
       );
     // Завелике значення не може бути виданим ключем: не рахуємо хеш і не шукаємо його.
+    const session = bearer
+      ? await this.system.authSession(
+          createHash('sha256').update(bearer).digest(),
+        )
+      : undefined;
     const tenantId =
-      key.length > MAX_API_KEY_LENGTH
-        ? null
-        : await this.system.authTenant(hashApiKey(key));
+      session?.tenantId ??
+      (typeof key === 'string' && key.length <= MAX_API_KEY_LENGTH
+        ? await this.system.authTenant(hashApiKey(key))
+        : null);
+    req.sessionId = session?.id;
     const found =
       tenantId &&
       (await this.db.run(tenantId, async (em) => {
@@ -64,10 +84,24 @@ export class ApiKeyGuard implements CanActivate {
     if (!found)
       return this.authFailures.reject(
         ctx,
-        new UnauthorizedException('Невірний API-ключ'),
+        new UnauthorizedException(
+          sessionOnly ? 'Невірна браузерна сесія' : 'Невірний API-ключ',
+        ),
       );
     req.tenant = found.tenant;
     req.limits = found.limits;
     return true;
   }
+}
+
+/** Доступ браузера лише до маршрутів workflow і виконань. */
+@Injectable()
+export class TenantAuthGuard extends ApiKeyGuard {
+  protected readonly credentials = 'either';
+}
+
+/** Відкликання потребує ідентифікованої сесії до перевірки квоти. */
+@Injectable()
+export class BrowserSessionGuard extends ApiKeyGuard {
+  protected readonly credentials = 'session';
 }

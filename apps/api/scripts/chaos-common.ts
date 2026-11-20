@@ -1,5 +1,5 @@
 /**
- * Спільне для chaos-сценаріїв (README, «Chaos- і навантажувальні сценарії»): навантаження
+ * Спільне для chaos-сценаріїв (docs/operations.md, «Chaos- і навантажувальні сценарії»): навантаження
  * `log → http (sink) → delay → log`, очікування завершення і перевірка гарантій за БД і
  * лічильниками отримувача.
  *
@@ -230,16 +230,16 @@ async function callCounts(): Promise<Record<string, number>> {
         context?: string;
         correlationId?: string;
         msg?: unknown;
+        stepId?: string;
       };
       if (
         record.context !== 'StepExecutor' ||
         !record.correlationId ||
-        typeof record.msg !== 'string'
+        record.msg !== 'log step recorded its message' ||
+        (record.stepId !== 'start' && record.stepId !== 'finish')
       )
         continue;
-      const prefix = record.msg.split(' ')[0];
-      if (prefix !== 'chaos' && prefix !== 'done') continue;
-      const key = `${record.correlationId}:${prefix === 'chaos' ? 'start' : 'finish'}`;
+      const key = `${record.correlationId}:${record.stepId}`;
       counts[key] = (counts[key] ?? 0) + 1;
     }
   }

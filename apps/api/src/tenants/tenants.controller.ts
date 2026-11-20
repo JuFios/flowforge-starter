@@ -68,7 +68,8 @@ async function limitsView(
     `SELECT jsonb_build_object(
        'maxConcurrentExecutions', t."maxConcurrentExecutions",
        'maxQueueSize', t."maxQueueSize", 'rateLimit', t."rateLimit",
-       'webhookRateLimit', t."webhookRateLimit") AS overrides,
+       'webhookRateLimit', t."webhookRateLimit",
+       'maxWorkflows', t."maxWorkflows") AS overrides,
        to_jsonb(l) AS effective
        FROM tenants t CROSS JOIN public.tenant_limits() l WHERE t.id = $1`,
     [id],
@@ -126,7 +127,7 @@ export class TenantsController {
   /**
    * Змінює перевизначення лімітів. Зниження нижче поточного використання не перериває роботу:
    * задачі в роботі завершуються, черга лишається, а новим захопленням і постановкам діє новий
-   * ліміт (README, «Контракт лімітів»).
+   * ліміт (docs/architecture.md, «Контракт лімітів»).
    */
   @Patch(':id/limits')
   updateLimits(

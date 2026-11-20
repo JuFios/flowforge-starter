@@ -12,6 +12,7 @@ import { CreateTenantDto } from './tenants/tenants.controller';
 import { LIMIT_FIELDS } from './tenants/tenant-limits.dto';
 import { getMetadataStorage } from 'class-validator';
 import {
+  deferInvalidUtf8ParseError,
   ExactJsonNumbersInterceptor,
   markInexactJsonNumbers,
 } from './common/exact-json-numbers';
@@ -91,13 +92,25 @@ export function configureApp(app: INestApplication): INestApplication {
   app.useLogger(app.get(Logger));
   // Більше тіло — 413 ще до розбору (межі значення — у env.validation.ts). Стиснені тіла
   // (Content-Encoding) — 415: API їх не потребує, а розпакування — код body-parser, досяжний до
-  // автентифікації (README, «Аудит залежностей»).
+  // автентифікації (docs/operations.md, «Аудит залежностей»).
   const http = app as NestExpressApplication;
   const config = app.get(ConfigService<EnvironmentVariables, true>);
   // IP клієнта для лімітів за IP (req.ip): X-Forwarded-For — лише від довірених проксі.
   http.set(
     'trust proxy',
     parseTrustProxy(config.get('TRUST_PROXY', { infer: true })) ?? false,
+  );
+  // Відповіді API містять дані тенанта (визначення, виходи кроків, секрети при видачі): жоден
+  // спільний чи браузерний кеш не зберігає їх. Маршрути можуть поставити суворіший заголовок самі.
+  http.use(
+    (
+      _req: unknown,
+      res: { setHeader(n: string, v: string): void },
+      next: () => void,
+    ) => {
+      res.setHeader('Cache-Control', 'no-store');
+      next();
+    },
   );
   const options = {
     inflate: false,
@@ -107,6 +120,7 @@ export function configureApp(app: INestApplication): INestApplication {
   // Числа, які змінилися б після розбору (1e400, цілі поза точністю double), видно лише в сирому
   // тексті: verify позначає запит, 400 — після guard-ів (ExactJsonNumbersInterceptor).
   http.useBodyParser('json', { ...options, verify: markInexactJsonNumbers });
+  http.use(deferInvalidUtf8ParseError);
   http.useBodyParser('urlencoded', { ...options, extended: true });
   // Невідомі поля — 400, а не мовчазне відкидання: тенант бачить, що поле не діє.
   app.useGlobalPipes(

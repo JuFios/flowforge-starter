@@ -109,6 +109,51 @@ describe('tenant request rate limit', () => {
     expect((await get('/executions', apiA)).status).toBe(429);
   });
 
+  it('revokes a browser session after the business quota has been used', async () => {
+    await limit('rateLimit', 1);
+    const login = await fetch(apiA.baseUrl + '/sessions', {
+      method: 'POST',
+      headers: { 'x-api-key': tenant.apiKey },
+    });
+    expect(login.status).toBe(201);
+    const { token } = (await login.json()) as { token: string };
+    const headers = { authorization: 'Bearer ' + token };
+    expect((await fetch(apiB.baseUrl + '/workflows', { headers })).status).toBe(
+      429,
+    );
+    const revoke = await fetch(apiB.baseUrl + '/sessions/current', {
+      method: 'DELETE',
+      headers,
+    });
+    expect(revoke.status).toBe(204);
+    expect(revoke.headers.get('x-ratelimit-remaining')).toBe('59');
+    expect((await fetch(apiA.baseUrl + '/workflows', { headers })).status).toBe(
+      401,
+    );
+  });
+
+  it('keeps the revocation quota for requests authenticated with a browser session', async () => {
+    const login = await fetch(apiA.baseUrl + '/sessions', {
+      method: 'POST',
+      headers: { 'x-api-key': tenant.apiKey },
+    });
+    expect(login.status).toBe(201);
+    const { token } = (await login.json()) as { token: string };
+
+    const rejected = await fetch(apiA.baseUrl + '/sessions/current', {
+      method: 'DELETE',
+      headers: { 'x-api-key': tenant.apiKey },
+    });
+    expect(rejected.status).toBe(401);
+
+    const revoked = await fetch(apiB.baseUrl + '/sessions/current', {
+      method: 'DELETE',
+      headers: { authorization: 'Bearer ' + token },
+    });
+    expect(revoked.status).toBe(204);
+    expect(revoked.headers.get('x-ratelimit-remaining')).toBe('59');
+  });
+
   it('admits exactly the limit out of 30 concurrent requests to two instances', async () => {
     await limit('rateLimit', 10);
     const statuses = await Promise.all(
@@ -246,5 +291,19 @@ describe('tenant request rate limit', () => {
       `SELECT count(*)::int AS left FROM rate_limit_buckets`,
     );
     expect(left).toBe(1);
+  });
+
+  it('drains expired browser sessions independently of rate buckets', async () => {
+    await owner.query(
+      `INSERT INTO browser_sessions ("tenantId", "tokenHash", "expiresAt")
+         SELECT $1, decode(lpad(g::text, 64, '0'), 'hex'), now() - interval '1 minute'
+         FROM generate_series(1, 1500) g`,
+      [tenant.id],
+    );
+    expect(await apiA.app.get(RateLimitPurger).purge()).toBe(0);
+    const rows: Array<{ left: number }> = await owner.query(
+      'SELECT count(*)::int AS left FROM browser_sessions',
+    );
+    expect(rows[0].left).toBe(0);
   });
 });

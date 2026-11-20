@@ -79,6 +79,7 @@ jobs:
       - run: npm ci
       - run: npm run format:check
       - run: npm run lint
+      - run: npm run typecheck
       - run: npm run build
 
   compose:
@@ -88,10 +89,12 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      # Як у README «Запуск»: усі секрети — випадкові, у .env поруч із docker-compose.yml.
+      # Як у README «Запуск» для production: NODE_ENV=production і випадкові секрети в .env.
       - name: Generate the secrets
         run: |
           touch .env && chmod 600 .env && : > .env
+          # Production-режим: заглушки з .env.example тут зупинили б migrate, API й воркери.
+          echo "NODE_ENV=production" >> .env
           for name in ADMIN_TOKEN POSTGRES_PASSWORD API_DB_PASSWORD WORKER_DB_PASSWORD; do
             value="$(openssl rand -hex 24)"
             echo "::add-mask::$value"
@@ -108,7 +111,7 @@ jobs:
           migrate_exit="$(docker compose ps -a migrate --format '{{.ExitCode}}')"
           [ "$migrate_exit" = "0" ] || { echo "migrate exited with '$migrate_exit'"; exit 1; }
           curl -fsS --max-time 5 localhost:3000/ready; echo
-          curl -fsS --max-time 5 -o /dev/null localhost:3001/connect
+          curl -fsS --max-time 5 -o /dev/null localhost:3001/login
           workers="$(docker compose ps -a -q worker)"
           count="$(printf '%s\n' "$workers" | grep -c . || true)"
           [ "$count" -eq 2 ] || { echo "expected 2 worker containers, found $count"; exit 1; }
@@ -186,6 +189,15 @@ jobs:
               ($s.sink.ports | length == 1 and all(.host_ip == "127.0.0.1"))' > /dev/null
       - name: Add the chaos receiver and short worker leases
         run: docker compose -f docker-compose.yml -f docker-compose.chaos.yml up -d --wait --wait-timeout 180
+      - name: Verify the tenant journey in Chromium through API failover
+        working-directory: apps/frontend
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+          set -a
+          source ../../.env
+          set +a
+          COMPOSE_PROJECT_NAME="$(docker compose ls --format json | jq -er '.[0].Name')" npx playwright test
       - name: Kill workers under load and verify exactly-once effects
         working-directory: apps/api
         run: npm run chaos

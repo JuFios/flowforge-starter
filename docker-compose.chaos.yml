@@ -24,13 +24,16 @@ services:
 
   # API перевіряє endpoint сповіщень під час збереження (DNS і політика адрес): `sink` — дозволений
   # тестовий приймач, як і для воркера.
-  api:
+  api: &receiver-api
     networks: [default, chaos-receiver]
     environment:
       HTTP_FIXTURE_ORIGIN: "http://sink:8080"
       HTTP_FIXTURE_ADDRESS: "10.213.45.10"
     depends_on:
       sink: { condition: service_healthy }
+
+  api-2:
+    <<: *receiver-api
 
   worker:
     networks: [default, chaos-receiver]

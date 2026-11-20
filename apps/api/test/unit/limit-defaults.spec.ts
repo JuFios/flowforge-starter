@@ -15,6 +15,7 @@ describe('tenant limit defaults from the environment', () => {
       limitDefaultsFromEnv({
         TENANT_MAX_RUNNING: '1000',
         TENANT_MAX_QUEUE_SIZE: '1',
+        TENANT_MAX_WORKFLOWS: '17',
         TENANT_RATE_LIMIT: '1000000',
         TENANT_RATE_WINDOW_MS: '1000',
         TENANT_WEBHOOK_RATE_LIMIT: '5',
@@ -23,6 +24,7 @@ describe('tenant limit defaults from the environment', () => {
     ).toEqual({
       maxRunning: 1000,
       maxQueueSize: 1,
+      maxWorkflows: 17,
       rateLimit: 1_000_000,
       rateWindowMs: 1000,
       webhookRateLimit: 5,

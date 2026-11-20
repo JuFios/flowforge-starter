@@ -1,4 +1,4 @@
-import { Type } from 'class-transformer';
+import { QueryInt } from '../common/keyset-cursor';
 import {
   IsBoolean,
   IsIn,
@@ -12,7 +12,7 @@ import {
 import { IsStorableText } from '../common/storable-text';
 import { MAX_URL_LENGTH } from '../workflows/definition';
 
-/** Налаштування сповіщень тенанта (README 3.3.9, «Налаштування»). */
+/** Налаштування сповіщень тенанта (docs/operations.md 3.3.9, «Налаштування»). */
 export class NotificationSettingsDto {
   /** Endpoint отримувача: `https:`, без облікових даних, лише публічні адреси. */
   @IsString()
@@ -36,7 +36,7 @@ export type EventStatus = (typeof EVENT_STATUSES)[number];
 /** Сторінка подій: найновіші першими, курсор — з відповіді попередньої сторінки. */
 export class AttemptPageQuery {
   @IsOptional()
-  @Type(() => Number)
+  @QueryInt()
   @IsInt()
   @Min(1)
   @Max(100)

@@ -211,13 +211,13 @@ describe('query plans of the queue use their indexes', () => {
         const [row]: Array<{ 'QUERY PLAN': Array<{ Plan: PlanNode }> }> =
           await em.query(
             `EXPLAIN (FORMAT JSON) SELECT * FROM executions
-              WHERE "tenantId" = $1 ORDER BY "createdAt" DESC LIMIT 50`,
+              WHERE "tenantId" = $1 ORDER BY "createdAt" DESC, id DESC LIMIT 50`,
             [id],
           );
         return row['QUERY PLAN'][0].Plan;
       });
-      // Індекс executions ("tenantId", "createdAt") зі стартового коду (ім'я згенероване TypeORM).
-      expect(indexesIn(root)).toContain('IDX_5b883cccfe558d00b8a9319d93');
+      // Індекс узгоджений з порядком курсора, включно з однаковим часом.
+      expect(indexesIn(root)).toContain('IDX_execution_page_tenant');
       expect(hasSeqScan(root)).toBe(false);
     } finally {
       await api.destroy();

@@ -10,6 +10,7 @@
  *                    підтвердження (з'єднання обривається після прийому тіла)
  *   GET  /notifications — усі прийняті доставки: заголовки й сирі байти тіла (base64)
  */
+import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 
 const PORT = Number(process.env.SINK_PORT ?? 8080);
@@ -36,6 +37,16 @@ const header = (value: string | string[] | undefined) =>
 
 createServer((req, res) => {
   const path = (req.url ?? '').split('?')[0];
+  if (req.method === 'GET' && path === '/header-digest') {
+    const value = header(req.headers['x-test-marker']);
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(
+      JSON.stringify({
+        digest: createHash('sha256').update(value).digest('hex'),
+      }),
+    );
+    return;
+  }
   if (req.method === 'GET' && path === '/counts') {
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify(Object.fromEntries(effects)));

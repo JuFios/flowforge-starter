@@ -5,6 +5,7 @@ import {
   IsOptional,
   IsString,
   Length,
+  Matches,
   MaxLength,
   ValidateIf,
 } from 'class-validator';
@@ -49,6 +50,11 @@ export class CreateWorkflowDto {
 
 /** Часткова зміна workflow: ті самі правила, усі поля необов'язкові. */
 export class UpdateWorkflowDto {
+  @ValidateIf((_dto, value: unknown) => value !== undefined)
+  @IsString()
+  @Matches(/^[1-9][0-9]{0,18}$/)
+  editRevision?: string;
+
   @ValidateIf((_dto, value: unknown) => value !== undefined)
   @IsString()
   @IsStorableText()

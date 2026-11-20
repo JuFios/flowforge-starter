@@ -1,7 +1,13 @@
 import { Injectable, Module, OnModuleInit } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import { ApiKeyGuard } from './auth/api-key.guard';
+import { SessionsController } from './sessions/sessions.controller';
+import { SessionsService } from './sessions/sessions.service';
+import {
+  ApiKeyGuard,
+  BrowserSessionGuard,
+  TenantAuthGuard,
+} from './auth/api-key.guard';
 import {
   EnvironmentVariables,
   validateApiEnv,
@@ -19,6 +25,9 @@ import { QueueDepthMetrics } from './engine/queue-depth.metrics';
 import { QueueMetrics } from './engine/queue.metrics';
 import { StepExecutor } from './engine/step-executor';
 import { ExecutionsController } from './executions/executions.controller';
+import { ExecutionGateway } from './realtime/execution-gateway.service';
+import { ExecutionFeed } from './realtime/execution-feed.service';
+import { ExecutionReader } from './executions/execution-reader.service';
 import { ExecutionsService } from './executions/executions.service';
 import { LimitsModule } from './limits/limits.module';
 import { MetricsController } from './observability/metrics.controller';
@@ -86,6 +95,7 @@ class ApiEnvironmentCheck implements OnModuleInit {
 @Module({
   imports: [...coreImports, TenancyModule.forRoot('api'), LimitsModule],
   controllers: [
+    SessionsController,
     TenantsController,
     WorkflowsController,
     ExecutionsController,
@@ -96,8 +106,14 @@ class ApiEnvironmentCheck implements OnModuleInit {
   providers: [
     ApiEnvironmentCheck,
     ApiKeyGuard,
+    BrowserSessionGuard,
+    TenantAuthGuard,
+    SessionsService,
     WorkflowsService,
     ExecutionsService,
+    ExecutionReader,
+    ExecutionGateway,
+    ExecutionFeed,
     WebhookKeysService,
     NotificationsService,
     SchedulerService,

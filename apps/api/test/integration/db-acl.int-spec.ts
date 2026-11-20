@@ -8,12 +8,14 @@ const ROLES = [
 ];
 
 /**
- * Права на таблиці — точна відповідність (README, «Операції → права»): зайве право — такий самий
+ * Права на таблиці — точна відповідність (docs/operations.md, «Операції → права»): зайве право — такий самий
  * провал, як і відсутнє. Звуження до рядків тенанта дає RLS, крос-тенантні операції — лише
  * SECURITY DEFINER-функції. Виконуваність цих прав доводить role-operations.int-spec.
  */
 const TABLE_PRIVILEGES: Record<string, Record<string, string>> = {
   flowforge_api_role: {
+    browser_sessions: 'DELETE,INSERT,SELECT',
+    realtime_tickets: 'DELETE,INSERT,SELECT',
     executions: 'INSERT,SELECT,UPDATE',
     jobs: 'INSERT,SELECT,UPDATE',
     notification_settings: 'DELETE,INSERT,SELECT,UPDATE',
@@ -35,6 +37,9 @@ const TABLE_PRIVILEGES: Record<string, Record<string, string>> = {
     workflow_versions: 'SELECT',
   },
   flowforge_system: {
+    workflow_usage: 'INSERT,SELECT,UPDATE',
+    browser_sessions: 'DELETE,SELECT,UPDATE',
+    realtime_tickets: 'DELETE,SELECT,UPDATE',
     executions: 'DELETE,INSERT,SELECT,UPDATE',
     jobs: 'DELETE,INSERT,SELECT,UPDATE',
     limit_defaults: 'DELETE,INSERT,SELECT,UPDATE',
@@ -54,11 +59,14 @@ const TABLE_PRIVILEGES: Record<string, Record<string, string>> = {
 const FUNCTION_EXECUTE: Record<string, string[]> = {
   flowforge_api_role: [
     'app_current_tenant()',
+    'auth_session(bytea)',
     'auth_tenant(text)',
     'due_schedule_tenants(uuid,integer)',
     'lock_tenant_usage()',
+    'purge_browser_credentials(integer)',
     'purge_rate_limits(integer)',
     'rate_limit_hit(text,integer,integer)',
+    'redeem_realtime_ticket(bytea)',
     'tenant_limits()',
     'webhook_tenant(uuid)',
   ],
@@ -77,6 +85,7 @@ const FUNCTION_EXECUTE: Record<string, string[]> = {
   // Власник: тіла definer-функцій і тригерні функції обліку (їх викликає лише тригер).
   flowforge_system: [
     'app_current_tenant()',
+    'auth_session(bytea)',
     'auth_tenant(text)',
     'claim_job(text,integer)',
     'claim_outbox_event(text,integer,integer)',
@@ -88,17 +97,20 @@ const FUNCTION_EXECUTE: Record<string, string[]> = {
     'lock_tenant_usage()',
     'outbox_backlog()',
     'outbox_on_execution()',
+    'purge_browser_credentials(integer)',
     'purge_delivered_events(integer,integer)',
     'purge_execution_history(integer,integer)',
     'purge_finished_jobs(integer,integer)',
     'purge_rate_limits(integer)',
     'queue_depth_by_tenant()',
     'rate_limit_hit(text,integer,integer)',
+    'redeem_realtime_ticket(bytea)',
     'tenant_limits()',
     'tenant_usage_on_defaults()',
     'tenant_usage_on_job()',
     'tenant_usage_on_tenant()',
     'webhook_tenant(uuid)',
+    'workflow_quota()',
   ],
 };
 

@@ -20,7 +20,21 @@ export type ExecutionStatus = 'pending' | 'running' | 'succeeded' | 'failed';
   unique: true,
   where: '"scheduledAt" IS NOT NULL',
 })
-@Index(['tenantId', 'createdAt'])
+@Index('IDX_execution_page_tenant', ['tenantId', 'createdAt', 'id'])
+@Index('IDX_execution_page_status', ['tenantId', 'status', 'createdAt', 'id'])
+@Index('IDX_execution_page_workflow', [
+  'tenantId',
+  'workflowId',
+  'createdAt',
+  'id',
+])
+@Index('IDX_execution_page_workflow_status', [
+  'tenantId',
+  'workflowId',
+  'status',
+  'createdAt',
+  'id',
+])
 // Ціль композитних FK із jobs і step_runs: задача чи крок можуть посилатися лише на виконання
 // свого тенанта.
 @Unique('UQ_executions_id_tenant', ['id', 'tenantId'])
@@ -52,6 +66,9 @@ export class Execution {
     foreignKeyConstraintName: 'FK_executions_tenant',
   })
   tenant?: Tenant;
+
+  @Column({ type: 'bigint', default: 0, select: false })
+  revision: string;
 
   @Column('uuid')
   workflowId: string;

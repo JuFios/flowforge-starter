@@ -34,6 +34,8 @@ export type LogLevel = (typeof LOG_LEVELS)[number];
 
 /** Найбільша затримка, яку приймають setTimeout/setInterval (2^31 - 1 мс). */
 export const MAX_TIMER_MS = 2_147_483_647;
+/** Найдовший тік планувальника: запізнення вчасного спрацювання не більше хвилини (3.3.8). */
+export const MAX_SCHEDULER_TICK_MS = 60_000;
 
 /** Межі HTTP_BODY_LIMIT, байт: 68 КіБ (визначення 64 КіБ + решта полів) .. 1 МіБ. */
 export const MIN_HTTP_BODY_LIMIT = 68 * 1024;
@@ -49,6 +51,47 @@ export function isObviouslyInsecureSecret(value: string): boolean {
   return (
     PLACEHOLDER_SECRET.test(value) || new Set(value).size < MIN_DISTINCT_CHARS
   );
+}
+
+/** Пароль з URL підключення (`postgres://user:pass@…`), якщо він є. */
+function urlPassword(url: unknown): string | undefined {
+  if (typeof url !== 'string') return undefined;
+  try {
+    return decodeURIComponent(new URL(url).password) || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Секрети-заглушки з `.env.example` дозволені лише поза production: локальний compose
+ * запускається одразу після `cp .env.example .env`, а його порти слухають тільки 127.0.0.1.
+ * У NODE_ENV=production заглушка в паролі БД зупиняє процес; поза production — попередження
+ * на старті (без значень).
+ */
+export function checkPlaceholderSecrets(
+  raw: Record<string, unknown>,
+  secrets: Record<string, string | undefined>,
+): void {
+  const insecure = Object.entries(secrets)
+    .filter(
+      ([, value]) => value !== undefined && isObviouslyInsecureSecret(value),
+    )
+    .map(([name]) => name);
+  if (insecure.length === 0) return;
+  if (raw.NODE_ENV === 'production')
+    throw new Error(
+      `Невалідна конфігурація оточення:\n  ${insecure.join(', ')}: у NODE_ENV=production ` +
+        'значення з прикладу або очевидна заглушка заборонені; згенеруйте випадкове, напр. `openssl rand -hex 24`',
+    );
+  if (raw.NODE_ENV !== 'test')
+    process.stderr.write(
+      JSON.stringify({
+        level: 40,
+        msg: 'placeholder secrets in use: allowed only outside NODE_ENV=production',
+        secrets: insecure,
+      }) + '\n',
+    );
 }
 
 /**
@@ -192,6 +235,32 @@ export class EnvironmentVariables extends DatabaseEnvironment {
   @Min(1)
   @Max(65535)
   PORT = 3000;
+
+  @Type(() => Number)
+  @IsInt()
+  @Min(1000)
+  @Max(86_400_000)
+  SESSION_TTL_MS = 28_800_000;
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(1000)
+  SESSION_MAX_PER_TENANT = 100;
+  @Type(() => Number)
+  @IsInt()
+  @Min(1000)
+  @Max(60_000)
+  REALTIME_TICKET_TTL_MS = 30_000;
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(10000)
+  REALTIME_MAX_CONNECTIONS = 256;
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(1000)
+  REALTIME_MAX_CONNECTIONS_PER_TENANT = 32;
 
   /**
    * Службовий порт API лише для GET /metrics. Не публікується назовні (docker-compose),
@@ -396,12 +465,13 @@ export class EnvironmentVariables extends DatabaseEnvironment {
   /**
    * Інтервал тіку планувальника: найбільше запізнення вчасного спрацювання (README 3.3.8). Тік
    * обробляє лише належні розклади (індекс за `nextFireAt`), тож короткий інтервал не множить
-   * роботу на кількість розкладів.
+   * роботу на кількість розкладів. Верхня межа — хвилина, найдрібніший крок 5-польного cron:
+   * довший тік виконував би щохвилинні розклади пачками.
    */
   @Type(() => Number)
   @IsInt()
   @Min(100)
-  @Max(MAX_TIMER_MS)
+  @Max(MAX_SCHEDULER_TICK_MS)
   SCHEDULER_TICK_MS = 30_000;
 
   /**
@@ -493,7 +563,12 @@ export function validateEnv(
 ): EnvironmentVariables {
   rejectOwnerCredentials(raw);
   outboundSettings(raw);
-  return checkRelations(validateAs(EnvironmentVariables, raw));
+  const env = checkRelations(validateAs(EnvironmentVariables, raw));
+  checkPlaceholderSecrets(raw, {
+    DATABASE_URL: urlPassword(raw.DATABASE_URL),
+    ADMIN_TOKEN: env.ADMIN_TOKEN,
+  });
+  return env;
 }
 
 /** Узгодженість пов'язаних параметрів: межа пропуску, таймаут і backoff сповіщень. */
@@ -532,7 +607,9 @@ export function validateApiEnv(raw: Record<string, unknown>): ApiEnvironment {
 export function validateDatabaseEnv(
   raw: Record<string, unknown>,
 ): DatabaseEnvironment {
-  return validateAs(DatabaseEnvironment, raw);
+  const env = validateAs(DatabaseEnvironment, raw);
+  checkPlaceholderSecrets(raw, { DATABASE_URL: urlPassword(raw.DATABASE_URL) });
+  return env;
 }
 
 function validateAs<T extends object>(

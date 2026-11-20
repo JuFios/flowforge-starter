@@ -38,7 +38,15 @@ import { NotificationOutbox1796200000000 } from './1796200000000-NotificationOut
 
 import { SerializeOutbox1796300000000 } from './1796300000000-SerializeOutbox';
 
+import { WorkflowQuota1796500000000 } from './1796500000000-WorkflowQuota';
 import { CloseCancelledAttempts1796400000000 } from './1796400000000-CloseCancelledAttempts';
+
+import { ExecutionPages1796600000000 } from './1796600000000-ExecutionPages';
+
+import { BrowserSessions1796700000000 } from './1796700000000-BrowserSessions';
+
+import { ExecutionRevision1796800000000 } from './1796800000000-ExecutionRevision';
+import { WorkflowEditRevision1796900000000 } from './1796900000000-WorkflowEditRevision';
 
 export const MIGRATIONS = [
   InitialSchema1794920217603,
@@ -69,4 +77,9 @@ export const MIGRATIONS = [
   NotificationOutbox1796200000000,
   SerializeOutbox1796300000000,
   CloseCancelledAttempts1796400000000,
+  WorkflowQuota1796500000000,
+  ExecutionPages1796600000000,
+  BrowserSessions1796700000000,
+  ExecutionRevision1796800000000,
+  WorkflowEditRevision1796900000000,
 ];

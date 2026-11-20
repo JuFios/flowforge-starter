@@ -26,6 +26,9 @@ describe('scheduler and outbox query plans', () => {
       tenant: { id: tenantId },
     } = await createTenant(ds));
     // 20 000 розкладів, належний — один із тисячі; 50 000 подій, недоставлені — одиниці.
+    await ds.query('UPDATE tenants SET "maxWorkflows"=20000 WHERE id=$1', [
+      tenantId,
+    ]);
     await ds.query(
       `INSERT INTO workflows("tenantId", name, steps, cron, "nextFireAt")
        SELECT $1, 'w', '[]', '0 * * * *',

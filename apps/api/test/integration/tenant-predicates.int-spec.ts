@@ -97,7 +97,9 @@ describe('tenant predicates in the services (row-level security bypassed)', () =
     await expect(workflows.remove(b, wfA.id)).rejects.toThrow(
       NotFoundException,
     );
-    expect((await workflows.list(b)).map((w) => w.id)).not.toContain(wfA.id);
+    expect((await workflows.list(b, {})).items.map((w) => w.id)).not.toContain(
+      wfA.id,
+    );
     expect(
       await owner.getRepository(Workflow).findOneByOrFail({ id: wfA.id }),
     ).toMatchObject({ name: 'wf-a' });
@@ -107,7 +109,7 @@ describe('tenant predicates in the services (row-level security bypassed)', () =
     await expect(executions.get(b, failedA.id)).rejects.toThrow(
       NotFoundException,
     );
-    expect((await executions.list(b)).map((e) => e.id)).not.toContain(
+    expect((await executions.list(b)).items.map((e) => e.id)).not.toContain(
       failedA.id,
     );
     await expect(executions.retry(b, failedA.id)).rejects.toThrow(

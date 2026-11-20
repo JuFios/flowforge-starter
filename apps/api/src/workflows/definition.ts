@@ -79,9 +79,47 @@ function stringField(
   return value;
 }
 
+function marker(value: unknown, key: string): boolean {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    Object.keys(value).length === 1 &&
+    (value as Record<string, unknown>)[key] === true
+  );
+}
+
+function resolveHeader(
+  value: unknown,
+  name: string,
+  where: string,
+  url: string,
+  previous?: Extract<StepDefinition, { type: 'http' }>,
+): unknown {
+  if (marker(value, 'stored'))
+    fail(
+      `${where}: для збереження значення використайте {"keep":true} у PATCH`,
+    );
+  if (!marker(value, 'keep')) return value;
+  if (previous && previous.url !== url)
+    fail(
+      `${where}: після зміни URL введіть значення заголовка або видаліть його`,
+    );
+  const headers = previous?.headers;
+  if (headers && Object.hasOwn(headers, name)) return headers[name];
+  const matches = Object.entries(headers ?? {}).filter(
+    ([key]) => key.toLowerCase() === name.toLowerCase(),
+  );
+  if (matches.length !== 1)
+    fail(
+      `${where}: keep потребує актуальної editRevision і наявного заголовка цього кроку`,
+    );
+  return matches[0][1];
+}
+
 function validateHttp(
   step: Record<string, unknown>,
   where: string,
+  previous?: StepDefinition,
 ): StepDefinition {
   const url = stringField(step, 'url', where, MAX_URL_LENGTH);
   // Шаблон {{ … }} у шляху чи query дозволений, але схема має бути http(s) уже у визначенні.
@@ -108,10 +146,22 @@ function validateHttp(
     if (entries.length > MAX_HEADERS)
       fail(`${where}.headers: не більше ${MAX_HEADERS} заголовків`);
     headers = Object.create(null) as Record<string, string>;
-    for (const [name, value] of entries) {
+    const names = new Set<string>();
+    for (const [name, rawValue] of entries) {
       if (name.length > MAX_HEADER_NAME_LENGTH || !HEADER_NAME.test(name))
         fail(`${where}.headers: невалідне ім'я заголовка`);
-      if (RESERVED_HEADERS.has(name.toLowerCase()))
+      const lower = name.toLowerCase();
+      if (names.has(lower))
+        fail(`${where}.headers.${name}: повторена назва заголовка`);
+      names.add(lower);
+      const value = resolveHeader(
+        rawValue,
+        name,
+        `${where}.headers.${name}`,
+        url,
+        previous?.type === 'http' ? previous : undefined,
+      );
+      if (RESERVED_HEADERS.has(lower))
         fail(`${where}.headers: заголовок ${name} задає платформа`);
       if (
         typeof value !== 'string' ||
@@ -144,7 +194,7 @@ function validateHttp(
     type: 'http',
     url,
     ...(method !== undefined && { method }),
-    ...(headers !== undefined && { headers }),
+    ...(headers !== undefined && { headers: { ...headers } }),
     ...(body !== undefined && { body }),
   };
 }
@@ -152,6 +202,7 @@ function validateHttp(
 function validateStep(
   step: Record<string, unknown>,
   where: string,
+  previous?: StepDefinition,
 ): StepDefinition {
   const type = step.type as StepType;
   const unknown = Object.keys(step).filter(
@@ -161,7 +212,7 @@ function validateStep(
   const id = step.id as string;
   switch (type) {
     case 'http':
-      return validateHttp(step, where);
+      return validateHttp(step, where, previous);
     case 'transform': {
       const expr = stringField(step, 'expr', where, MAX_EXPRESSION_LENGTH);
       if (step.language === undefined && LEGACY_PATH.test(expr))
@@ -198,7 +249,10 @@ function validateStep(
  * Валідує масив кроків і повертає його нормалізованим (лише відомі поля, метод у верхньому
  * регістрі). Кидає BadRequestException з поясненням для тенанта.
  */
-export function validateSteps(raw: unknown): StepDefinition[] {
+export function validateSteps(
+  raw: unknown,
+  previous?: StepDefinition[],
+): StepDefinition[] {
   if (!Array.isArray(raw) || raw.length === 0 || raw.length > MAX_STEPS) {
     fail(`steps має бути масивом від 1 до ${MAX_STEPS} елементів`);
   }
@@ -213,7 +267,7 @@ export function validateSteps(raw: unknown): StepDefinition[] {
       `${unstorable} містить символ U+0000 або некоректний Unicode (одиночний сурогат)`,
     );
   const seen = new Set<string>();
-  return raw.map((s: unknown, i) => {
+  const steps = raw.map((s: unknown, i) => {
     const where = `steps[${i}]`;
     if (typeof s !== 'object' || s === null || Array.isArray(s))
       fail(`${where} має бути об'єктом`);
@@ -224,6 +278,18 @@ export function validateSteps(raw: unknown): StepDefinition[] {
     seen.add(step.id);
     if (!STEP_TYPES.includes(step.type as StepType))
       fail(`${where}.type невідомий`);
-    return validateStep(step, where);
+    return validateStep(
+      step,
+      where,
+      previous?.find((old) => old.id === step.id),
+    );
   });
+  if (
+    previous &&
+    Buffer.byteLength(JSON.stringify(steps)) > MAX_DEFINITION_BYTES
+  )
+    fail(
+      `steps більший за ${MAX_DEFINITION_BYTES} байт після збереження заголовків`,
+    );
+  return steps;
 }

@@ -84,13 +84,18 @@ describe('missed scheduled runs', () => {
       const response = await patch;
       const state = (await response.json()) as {
         scheduleCursor: string;
-        nextFireAt: string;
+        nextFireAt: string | null;
       };
       expect(response.status).toBe(200);
       expect(Date.parse(state.scheduleCursor)).toBeGreaterThanOrEqual(
         beforeRelease.getTime(),
       );
-      expect(state.nextFireAt).toBe(state.scheduleCursor);
+      expect(state.nextFireAt).toBeNull();
+      const [stored]: Array<{ nextFireAt: Date }> = await ds.query(
+        'SELECT "nextFireAt" FROM workflows WHERE id=$1',
+        [id],
+      );
+      expect(stored.nextFireAt.toISOString()).toBe(state.scheduleCursor);
     } finally {
       if (holder.isTransactionActive) await holder.rollbackTransaction();
       await holder.release();

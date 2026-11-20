@@ -517,6 +517,7 @@ export class JobRunnerService implements BeforeApplicationShutdown {
           output = await this.executor.execute(step, ctx, {
             signal,
             idempotencyKey: current.idempotencyKey,
+            execution: { executionId: job.executionId, tenantId: job.tenantId },
           });
         } catch (err) {
           this.metrics.observeStep(step.type, 'failed', startedAt);

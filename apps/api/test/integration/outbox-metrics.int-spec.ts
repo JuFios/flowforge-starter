@@ -24,7 +24,7 @@ function sample(text: string, series: string): number | undefined {
 }
 
 /**
- * Метрики сповіщень і планувальника (ТЗ 3.3.10, README «Метрики»): значення після відомої
+ * Метрики сповіщень і планувальника (ТЗ 3.3.10, docs/operations.md «Метрики»): значення після відомої
  * послідовності операцій на справжніх `/metrics` воркера й API, а не лише наявність назв.
  */
 describe('outbox and scheduler metrics', () => {

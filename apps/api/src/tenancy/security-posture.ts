@@ -26,7 +26,7 @@ interface FunctionPosture {
 }
 
 /**
- * Кінцевий стан каталогу після всіх міграцій (README 3.3.4, «Інваріанти безпеки»). Старі міграції
+ * Кінцевий стан каталогу після всіх міграцій (docs/architecture.md 3.3.4, «Інваріанти безпеки»). Старі міграції
  * його не імпортують. Нова таблиця чи функція в `public` без запису тут зупиняє `db:migrate` і
  * старт процесів, доки її права не описано явно.
  */
@@ -35,6 +35,24 @@ export const POSTURE: {
   functions: Readonly<Record<string, FunctionPosture>>;
 } = {
   tables: {
+    workflow_usage: {
+      tenantColumn: 'tenantId',
+      grants: { [SYSTEM_ROLE]: ['SELECT', 'INSERT', 'UPDATE'] },
+    },
+    browser_sessions: {
+      tenantColumn: 'tenantId',
+      grants: {
+        [API_ROLE]: ['SELECT', 'INSERT', 'DELETE'],
+        [SYSTEM_ROLE]: ['SELECT', 'UPDATE', 'DELETE'],
+      },
+    },
+    realtime_tickets: {
+      tenantColumn: 'tenantId',
+      grants: {
+        [API_ROLE]: ['SELECT', 'INSERT', 'DELETE'],
+        [SYSTEM_ROLE]: ['SELECT', 'UPDATE', 'DELETE'],
+      },
+    },
     tenants: {
       tenantColumn: 'id',
       grants: {
@@ -120,6 +138,19 @@ export const POSTURE: {
       owner: MIGRATION_OWNER,
       execute: [API_ROLE, WORKER_ROLE, SYSTEM_ROLE],
     },
+    'purge_browser_credentials(integer)': {
+      owner: SYSTEM_ROLE,
+      execute: [API_ROLE],
+    },
+    'auth_session(bytea)': { owner: SYSTEM_ROLE, execute: [API_ROLE] },
+    'redeem_realtime_ticket(bytea)': {
+      owner: SYSTEM_ROLE,
+      execute: [API_ROLE],
+    },
+    'bump_execution_revision()': { owner: MIGRATION_OWNER, execute: [] },
+    'notify_execution()': { owner: MIGRATION_OWNER, execute: [] },
+    'touch_step_execution()': { owner: MIGRATION_OWNER, execute: [] },
+    'notify_session_revoked()': { owner: MIGRATION_OWNER, execute: [] },
     'auth_tenant(text)': { owner: SYSTEM_ROLE, execute: [API_ROLE] },
     'webhook_tenant(uuid)': { owner: SYSTEM_ROLE, execute: [API_ROLE] },
     'due_schedule_tenants(uuid,integer)': {
@@ -167,6 +198,7 @@ export const POSTURE: {
     'outbox_backlog()': { owner: SYSTEM_ROLE, execute: [WORKER_ROLE] },
     'tenant_usage_on_tenant()': { owner: SYSTEM_ROLE, execute: [] },
     'tenant_usage_on_defaults()': { owner: SYSTEM_ROLE, execute: [] },
+    'workflow_quota()': { owner: SYSTEM_ROLE, execute: [] },
   },
 };
 
@@ -379,7 +411,7 @@ function checkPolicies(row: PolicyRow, problems: string[]): void {
 }
 
 /**
- * Інваріанти безпеки каталогу (README 3.3.4, «Інваріанти безпеки»): службові ролі (I-1), точні
+ * Інваріанти безпеки каталогу (docs/architecture.md 3.3.4, «Інваріанти безпеки»): службові ролі (I-1), точні
  * права на кожен об'єкт public для будь-якого одержувача (I-2) і точний набір політик (I-3).
  * Перелік порушень порожній — каталог відповідає `POSTURE`. Повідомлення містять лише імена
  * об'єктів і ролей. Викликається в транзакції `db:migrate` перед COMMIT і на старті процесів.

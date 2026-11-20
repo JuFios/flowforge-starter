@@ -15,7 +15,7 @@ import { api, Receiver, sleep, startWorker, waitFor } from '../helpers/queue';
 import { TEST_ADMIN_TOKEN } from '../helpers/test-env';
 
 /**
- * Кожна операція з матриці прав (README, «Операції → права») справді виконується справжніми
+ * Кожна операція з матриці прав (docs/operations.md, «Операції → права») справді виконується справжніми
  * runtime-ролями на непорожніх даних: матриця не лише збігається з каталогом (db-acl), а й
  * достатня для роботи API, воркера, reaper-а й очищення.
  */
@@ -98,7 +98,9 @@ describe('every operation works with the runtime roles', () => {
       (await call('PATCH', `/workflows/${wf.body.id}`, { name: 'ops2' }))
         .status,
     ).toBe(200);
-    expect((await call<unknown[]>('GET', '/workflows')).body).toHaveLength(1);
+    expect(
+      (await call<{ items: unknown[] }>('GET', '/workflows')).body.items,
+    ).toHaveLength(1);
 
     const run = await call<{ id: string }>(
       'POST',
@@ -123,7 +125,9 @@ describe('every operation works with the runtime roles', () => {
       'succeeded',
       'succeeded',
     ]);
-    expect((await call<unknown[]>('GET', '/executions')).body).toHaveLength(1);
+    expect(
+      (await call<{ items: unknown[] }>('GET', '/executions')).body.items,
+    ).toHaveLength(1);
 
     // Неповторювана помилка → failed → /retry продовжує (API: execution FOR UPDATE, jobs).
     receiver.respond = (_req, res) => void res.writeHead(400).end();
