@@ -1,7 +1,7 @@
 /**
  * Ліміти тенанта: значення за замовчуванням (поки db:provision не записав значень з env), межі
  * (CHECK у БД, валідація адмін-API й db:provision) і вирази CHECK перевизначень у `tenants`.
- * Контракт — README, «Контракт лімітів».
+ * Контракт — docs/architecture.md, «Контракт лімітів».
  */
 
 /** Значення лімітів за замовчуванням до першого `db:provision` (те саме, що й у env за замовчуванням). */
@@ -15,7 +15,7 @@ export const BUILT_IN_LIMIT_DEFAULTS = {
   maxWorkflows: 1_000,
 };
 
-/** Межі лімітів (CHECK у БД, валідація адмін-API і db:provision — README, «Контракт лімітів»). */
+/** Межі лімітів (CHECK у БД, валідація адмін-API і db:provision — docs/architecture.md, «Контракт лімітів»). */
 export const LIMIT_BOUNDS = {
   maxRunning: [1, 1_000],
   maxQueueSize: [1, 10_000_000],

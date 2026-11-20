@@ -23,9 +23,9 @@ const KEYS = [
   'TENANT_MAX_RUNNING',
 ];
 
-/** Bash-блоки розділу `## <title>` README. */
-function blocks(title: string): string[] {
-  const docs = readFileSync(join(__dirname, '../../../../README.md'), 'utf8');
+/** Bash-блоки розділу `## <title>` README або документа з `docs/`. */
+function blocks(title: string, file = 'README.md'): string[] {
+  const docs = readFileSync(join(__dirname, '../../../..', file), 'utf8');
   const section = docs.split(`\n## ${title}\n`)[1]?.split('\n## ')[0] ?? '';
   return [...section.matchAll(/```bash\n([\s\S]*?)```/g)].map((m) => m[1]);
 }
@@ -65,7 +65,7 @@ function runFresh(block: string): string[] {
 
 describe('README commands in a new terminal', () => {
   it('passes the owner password and the role secrets to the migration commands', () => {
-    const [block] = blocks('Міграції БД').filter((b) =>
+    const [block] = blocks('Міграції БД', 'docs/operations.md').filter((b) =>
       b.includes('MIGRATION_DATABASE_URL'),
     );
     expect(block).toBeDefined();
@@ -145,12 +145,15 @@ describe('README commands in a new terminal', () => {
 
   // util.parseEnv, яким команди README читають .env, з'явився в Node 21.7.0 і перенесений у 20.12.0:
   // 21.0–21.6 його не мають, тож одного «>=20.12.0» замало.
-  it('admits only Node.js versions with util.parseEnv and states the same range in README', () => {
+  it('admits only Node.js versions with util.parseEnv and states the same range in the operations guide', () => {
     const { engines } = JSON.parse(
       readFileSync(join(__dirname, '../../package.json'), 'utf8'),
     ) as { engines: { node: string } };
     expect(engines.node).toBe('^20.12.0 || >=21.7.0');
-    const docs = readFileSync(join(__dirname, '../../../../README.md'), 'utf8');
+    const docs = readFileSync(
+      join(__dirname, '../../../../docs/operations.md'),
+      'utf8',
+    );
     expect(docs).toContain(
       'Потрібні Node.js 20.12+ (гілка 20) або 21.7+ (21 і новіші)',
     );

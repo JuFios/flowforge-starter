@@ -169,7 +169,7 @@ export class ExecutionsService {
     return usage;
   }
 
-  /** Місце в черзі (README, «Контракт лімітів»); повна черга — 429 `queue_full`. */
+  /** Місце в черзі (docs/architecture.md, «Контракт лімітів»); повна черга — 429 `queue_full`. */
   private assertQueueSlot(usage: QueueUsage, trigger: EnqueueTrigger): void {
     if (usage.queued + usage.running < usage.maxQueueSize) return;
     this.limits.enqueueRejected.inc({ reason: 'queue_full', trigger });
@@ -390,7 +390,7 @@ export class ExecutionsService {
         throw new ConflictException(
           'виконання створене до появи знімків версій workflow і не може бути повторене',
         );
-      // Порядок блокувань: виконання → облік тенанта → задача (README, «Порядок блокувань»).
+      // Порядок блокувань: виконання → облік тенанта → задача (docs/architecture.md, «Порядок блокувань»).
       this.assertQueueSlot(await this.lockUsage(em), 'retry');
       const [{ started }]: Array<{ started: boolean }> = await em.query(
         `SELECT EXISTS (SELECT 1 FROM step_runs WHERE "executionId" = $1 AND "tenantId" = $2) AS started`,

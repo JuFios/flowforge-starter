@@ -26,7 +26,7 @@ import { RateLimitedException } from './limit-exceptions';
 import { LimitsMetrics } from './limits.metrics';
 import { setRateLimitHeaders } from './rate-limit-headers';
 
-/** Імена лімітів частоти (README, «Контракт лімітів»). */
+/** Імена лімітів частоти (docs/architecture.md, «Контракт лімітів»). */
 export const THROTTLERS = ['tenant', 'webhook', 'admin'] as const;
 export type ThrottlerName = (typeof THROTTLERS)[number];
 

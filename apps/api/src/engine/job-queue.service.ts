@@ -257,7 +257,7 @@ export class JobQueueService {
   /**
    * Задача виконана; викликач уже заблокував рядок через assertLease або вибірку прострочених
    * задач. Це оновлення `jobs` зачіпає облік тенанта (тригер), тож у транзакції воно — останнє
-   * (README, «Порядок блокувань»).
+   * (docs/architecture.md, «Порядок блокувань»).
    */
   private async markLockedJobDone(em: EntityManager, job: Job): Promise<void> {
     await em.query(`${MARK_JOB_DONE} WHERE id = $1 AND "tenantId" = $2`, [

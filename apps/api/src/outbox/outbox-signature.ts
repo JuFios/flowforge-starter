@@ -1,6 +1,6 @@
 import { createHmac } from 'node:crypto';
 
-/** Заголовки вихідного сповіщення (README 3.3.9, «Контракт події»). */
+/** Заголовки вихідного сповіщення (docs/operations.md 3.3.9, «Контракт події»). */
 export const EVENT_ID_HEADER = 'x-flowforge-event-id';
 export const TIMESTAMP_HEADER = 'x-flowforge-timestamp';
 export const ATTEMPT_HEADER = 'x-flowforge-attempt';

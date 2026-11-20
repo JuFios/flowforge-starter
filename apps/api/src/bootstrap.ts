@@ -92,7 +92,7 @@ export function configureApp(app: INestApplication): INestApplication {
   app.useLogger(app.get(Logger));
   // Більше тіло — 413 ще до розбору (межі значення — у env.validation.ts). Стиснені тіла
   // (Content-Encoding) — 415: API їх не потребує, а розпакування — код body-parser, досяжний до
-  // автентифікації (README, «Аудит залежностей»).
+  // автентифікації (docs/operations.md, «Аудит залежностей»).
   const http = app as NestExpressApplication;
   const config = app.get(ConfigService<EnvironmentVariables, true>);
   // IP клієнта для лімітів за IP (req.ip): X-Forwarded-For — лише від довірених проксі.

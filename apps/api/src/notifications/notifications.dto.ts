@@ -12,7 +12,7 @@ import {
 import { IsStorableText } from '../common/storable-text';
 import { MAX_URL_LENGTH } from '../workflows/definition';
 
-/** Налаштування сповіщень тенанта (README 3.3.9, «Налаштування»). */
+/** Налаштування сповіщень тенанта (docs/operations.md 3.3.9, «Налаштування»). */
 export class NotificationSettingsDto {
   /** Endpoint отримувача: `https:`, без облікових даних, лише публічні адреси. */
   @IsString()

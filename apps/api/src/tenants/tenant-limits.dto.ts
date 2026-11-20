@@ -8,7 +8,7 @@ const [WEBHOOK_MIN, WEBHOOK_MAX] = OVERRIDE_BOUNDS.webhookRateLimit;
 const [WORKFLOWS_MIN, WORKFLOWS_MAX] = OVERRIDE_BOUNDS.maxWorkflows;
 
 /**
- * Перевизначення лімітів тенанта (README, «Контракт лімітів»). Поле відсутнє — без змін, `null` —
+ * Перевизначення лімітів тенанта (docs/architecture.md, «Контракт лімітів»). Поле відсутнє — без змін, `null` —
  * значення за замовчуванням (`TENANT_*` у db:provision), число — у межах контракту.
  */
 export class TenantLimitsDto {

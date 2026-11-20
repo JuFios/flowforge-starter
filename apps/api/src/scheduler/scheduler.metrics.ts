@@ -7,7 +7,7 @@ export type FiringOutcome =
   'created' | 'existing' | 'missed_skipped' | 'missed_run_once';
 
 /**
- * Метрики планувальника (процес API, README «Метрики»). Мітки — лише з обмеженого набору значень,
+ * Метрики планувальника (процес API, docs/operations.md, «Метрики»). Мітки — лише з обмеженого набору значень,
  * без ідентифікаторів тенантів і workflow. Лічильники процесу: між інстансами — `sum`.
  */
 @Injectable()

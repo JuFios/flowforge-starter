@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { Counter } from 'prom-client';
 import { MetricsService } from '../observability/metrics.service';
 
-/** Метрики лімітів API (README, «Метрики»). */
+/** Метрики лімітів API (docs/operations.md, «Метрики»). */
 @Injectable()
 export class LimitsMetrics {
   /** Запити, відхилені лімітом частоти (`tenant`, `webhook`, `admin`, `auth-failures`). */

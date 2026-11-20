@@ -11,7 +11,10 @@ import { join } from 'node:path';
 
 it('passes only the secrets needed by each documented local command', () => {
   const dir = mkdtempSync(join(tmpdir(), 'ff-local-'));
-  const docs = readFileSync(join(__dirname, '../../../../README.md'), 'utf8')
+  const docs = readFileSync(
+    join(__dirname, '../../../../docs/operations.md'),
+    'utf8',
+  )
     .split('### Локальний запуск поза docker')[1]
     .split('### Оновлення')[0];
   const blocks = [...docs.matchAll(/```bash\n([\s\S]*?)```/g)].map((m) => m[1]);

@@ -10,7 +10,7 @@ import {
 import { TenantDb } from '../tenancy/tenant-db';
 
 /**
- * Ключ підпису webhook-ів тенанта (README 3.3.7, «Ротація без простою»). `current` — ключ, що діяв
+ * Ключ підпису webhook-ів тенанта (docs/architecture.md 3.3.7, «Ротація без простою»). `current` — ключ, що діяв
  * до останньої ротації; `next` — ключ, створений нею. Обидва приймаються, доки `current` не відкличуть.
  */
 export type WebhookKeyView = SigningKeyView;
