@@ -34,6 +34,8 @@ export type LogLevel = (typeof LOG_LEVELS)[number];
 
 /** Найбільша затримка, яку приймають setTimeout/setInterval (2^31 - 1 мс). */
 export const MAX_TIMER_MS = 2_147_483_647;
+/** Найдовший тік планувальника: запізнення вчасного спрацювання не більше хвилини (3.3.8). */
+export const MAX_SCHEDULER_TICK_MS = 60_000;
 
 /** Межі HTTP_BODY_LIMIT, байт: 68 КіБ (визначення 64 КіБ + решта полів) .. 1 МіБ. */
 export const MIN_HTTP_BODY_LIMIT = 68 * 1024;
@@ -422,12 +424,13 @@ export class EnvironmentVariables extends DatabaseEnvironment {
   /**
    * Інтервал тіку планувальника: найбільше запізнення вчасного спрацювання (README 3.3.8). Тік
    * обробляє лише належні розклади (індекс за `nextFireAt`), тож короткий інтервал не множить
-   * роботу на кількість розкладів.
+   * роботу на кількість розкладів. Верхня межа — хвилина, найдрібніший крок 5-польного cron:
+   * довший тік виконував би щохвилинні розклади пачками.
    */
   @Type(() => Number)
   @IsInt()
   @Min(100)
-  @Max(MAX_TIMER_MS)
+  @Max(MAX_SCHEDULER_TICK_MS)
   SCHEDULER_TICK_MS = 30_000;
 
   /**

@@ -136,16 +136,13 @@ describe('validateEnv', () => {
 
   it('rejects timer values Node would silently clamp to 1 ms', () => {
     // setInterval/setTimeout приймають щонайбільше 2^31-1 мс; більше значення стає 1 мс.
-    expect(() =>
-      validateEnv({ ...base, SCHEDULER_TICK_MS: '2147483648' }),
-    ).toThrow(/SCHEDULER_TICK_MS/);
-    // Межа пропуску не коротша за тік, тож найбільший тік — разом із найбільшою межею.
+    // Тік обмежено хвилиною (тест вище); межа таймера Node лишається для межі пропуску.
     expect(
       validateEnv({
         ...base,
-        SCHEDULER_TICK_MS: '2147483647',
+        SCHEDULER_TICK_MS: '60000',
         SCHEDULER_MISFIRE_GRACE_MS: '2147483647',
-      }).SCHEDULER_TICK_MS,
+      }).SCHEDULER_MISFIRE_GRACE_MS,
     ).toBe(2147483647);
     expect(() =>
       validateEnv({ ...base, SCHEDULER_MISFIRE_GRACE_MS: '2147483648' }),
