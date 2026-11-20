@@ -1,6 +1,11 @@
+import { ConfigService } from '@nestjs/config';
 import { DataSource } from 'typeorm';
 import { AppModule, WorkerModule } from '../../src/app.module';
+import { DB_POOL_HEADROOM } from '../../src/config/env.validation';
+import { buildDataSourceOptions } from '../../src/database/database.options';
 import { JobQueueService } from '../../src/engine/job-queue.service';
+import { SystemDb } from '../../src/tenancy/system-db';
+import { TenantDb } from '../../src/tenancy/tenant-db';
 import { Execution } from '../../src/entities';
 import { RunningApp, startApp } from '../helpers/app';
 import {
@@ -10,6 +15,7 @@ import {
   truncateAll,
 } from '../helpers/db';
 import { api, Receiver, sleep, startWorker, waitFor } from '../helpers/queue';
+import { testDatabaseEnv, testWorkerDatabaseUrl } from '../helpers/test-env';
 
 /**
  * Ліміт одночасних виконань тенанта (ТЗ 3.3.4): задач у стані `running` не більше за
@@ -69,22 +75,56 @@ describe('tenant concurrent executions limit', () => {
   }
 
   it('claims exactly the limit with 50 concurrent claim loops', async () => {
-    const t = await tenantWithJobs(3, 100);
-    // Як цикли воркера: зайняті кандидати (undefined) — нова спроба, порожня черга (null) — кінець.
-    const claimed = await Promise.all(
-      Array.from({ length: 50 }, async (_, i) => {
-        let mine = 0;
-        for (;;) {
-          const job = await queue.claimNext(`c-${i}`);
-          if (job === null) return mine;
-          if (job) mine++;
-          else await sleep(5);
-        }
-      }),
-    );
-    expect(claimed.reduce((a, b) => a + b, 0)).toBe(3);
-    expect(await running(t)).toBe(3);
-  });
+    const loops = 50;
+    // Тест перевіряє ліміт під конкуренцією захоплень, а не швидкість, з якою сервер приймає
+    // з'єднання. На спільному пулі воркера (10) 50 циклів чекали в черзі до пулу й відкривали
+    // з'єднання посеред змагання; під навантаженням повного прогону це перевищувало
+    // DB_CONNECT_TIMEOUT_MS (5 с) — "timeout exceeded when trying to connect". Тепер кожен цикл
+    // має власне з'єднання, як у розгортанні (DB_POOL_SIZE ≥ паралельність + DB_POOL_HEADROOM),
+    // і всі вони відкриті до початку змагання з найбільшим допустимим таймаутом підключення.
+    const size = loops + DB_POOL_HEADROOM;
+    const pool = await new DataSource(
+      buildDataSourceOptions(
+        {
+          ...testDatabaseEnv(),
+          DATABASE_URL: testWorkerDatabaseUrl(),
+          DB_CONNECT_TIMEOUT_MS: 60_000,
+        },
+        { poolSize: size },
+      ),
+    ).initialize();
+    try {
+      // Прогрів: кожне з'єднання пулу встановлено й зайнято одночасно.
+      const runners = Array.from({ length: size }, () =>
+        pool.createQueryRunner(),
+      );
+      await Promise.all(runners.map((r) => r.connect()));
+      await Promise.all(runners.map((r) => r.release()));
+      const claimQueue = new JobQueueService(
+        worker.app.get(TenantDb),
+        new SystemDb(pool),
+        worker.app.get(ConfigService),
+      );
+      const t = await tenantWithJobs(3, 100);
+      // Як цикли воркера: зайняті кандидати (undefined) — нова спроба, порожня черга (null) — кінець.
+      const claimed = await Promise.all(
+        Array.from({ length: loops }, async (_, i) => {
+          let mine = 0;
+          for (;;) {
+            const job = await claimQueue.claimNext(`c-${i}`);
+            if (job === null) return mine;
+            if (job) mine++;
+            else await sleep(5);
+          }
+        }),
+      );
+      expect(claimed.reduce((a, b) => a + b, 0)).toBe(3);
+      expect(await running(t)).toBe(3);
+    } finally {
+      await pool.destroy();
+    }
+    // Прогрів 54 з'єднань на перевантаженому сервері займає час: межа тесту — не таймаут підключення.
+  }, 120_000);
 
   it('never runs more jobs of a tenant than its limit under two workers, while another tenant uses the free slots', async () => {
     receiver.respond = async (_req, res) => {
