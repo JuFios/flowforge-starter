@@ -53,6 +53,47 @@ export function isObviouslyInsecureSecret(value: string): boolean {
   );
 }
 
+/** Пароль з URL підключення (`postgres://user:pass@…`), якщо він є. */
+function urlPassword(url: unknown): string | undefined {
+  if (typeof url !== 'string') return undefined;
+  try {
+    return decodeURIComponent(new URL(url).password) || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Секрети-заглушки з `.env.example` дозволені лише поза production: локальний compose
+ * запускається одразу після `cp .env.example .env`, а його порти слухають тільки 127.0.0.1.
+ * У NODE_ENV=production заглушка в паролі БД зупиняє процес; поза production — попередження
+ * на старті (без значень).
+ */
+export function checkPlaceholderSecrets(
+  raw: Record<string, unknown>,
+  secrets: Record<string, string | undefined>,
+): void {
+  const insecure = Object.entries(secrets)
+    .filter(
+      ([, value]) => value !== undefined && isObviouslyInsecureSecret(value),
+    )
+    .map(([name]) => name);
+  if (insecure.length === 0) return;
+  if (raw.NODE_ENV === 'production')
+    throw new Error(
+      `Невалідна конфігурація оточення:\n  ${insecure.join(', ')}: у NODE_ENV=production ` +
+        'значення з прикладу або очевидна заглушка заборонені; згенеруйте випадкове, напр. `openssl rand -hex 24`',
+    );
+  if (raw.NODE_ENV !== 'test')
+    process.stderr.write(
+      JSON.stringify({
+        level: 40,
+        msg: 'placeholder secrets in use: allowed only outside NODE_ENV=production',
+        secrets: insecure,
+      }) + '\n',
+    );
+}
+
 /**
  * У production секрет не може бути прикладом із .env.example чи очевидною заглушкою.
  * У development/test приклад дозволений, щоб локальний запуск працював «з коробки».
@@ -522,7 +563,12 @@ export function validateEnv(
 ): EnvironmentVariables {
   rejectOwnerCredentials(raw);
   outboundSettings(raw);
-  return checkRelations(validateAs(EnvironmentVariables, raw));
+  const env = checkRelations(validateAs(EnvironmentVariables, raw));
+  checkPlaceholderSecrets(raw, {
+    DATABASE_URL: urlPassword(raw.DATABASE_URL),
+    ADMIN_TOKEN: env.ADMIN_TOKEN,
+  });
+  return env;
 }
 
 /** Узгодженість пов'язаних параметрів: межа пропуску, таймаут і backoff сповіщень. */
@@ -561,7 +607,9 @@ export function validateApiEnv(raw: Record<string, unknown>): ApiEnvironment {
 export function validateDatabaseEnv(
   raw: Record<string, unknown>,
 ): DatabaseEnvironment {
-  return validateAs(DatabaseEnvironment, raw);
+  const env = validateAs(DatabaseEnvironment, raw);
+  checkPlaceholderSecrets(raw, { DATABASE_URL: urlPassword(raw.DATABASE_URL) });
+  return env;
 }
 
 function validateAs<T extends object>(

@@ -7,7 +7,8 @@ import { validateEnv } from '../../src/config/env.validation';
 describe('ADMIN_TOKEN in production', () => {
   const production = {
     NODE_ENV: 'production',
-    DATABASE_URL: 'postgres://u:p@localhost:5432/db',
+    // Пароль БД — не заглушка: у production її відхилила б окрема перевірка.
+    DATABASE_URL: 'postgres://u:Zq7Rk2Lm9Tx4Vb8Nc3Wd6Yf1@localhost:5432/db',
   };
   const text = readFileSync(join(__dirname, '../../.env.example'), 'utf8');
   const example = parseEnv(text);

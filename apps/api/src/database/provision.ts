@@ -11,7 +11,10 @@ import {
 } from '../tenancy/login-role-check';
 import { loadDotEnvIfPresent } from './cli-env';
 import { buildDataSourceOptions } from './database.options';
-import { validateDatabaseEnv } from '../config/env.validation';
+import {
+  checkPlaceholderSecrets,
+  validateDatabaseEnv,
+} from '../config/env.validation';
 
 /** Ітерацій PBKDF2 у SCRAM verifier — як `scram_iterations` Postgres за замовчуванням. */
 export const SCRAM_ITERATIONS = 4096;
@@ -249,6 +252,10 @@ async function main(): Promise<void> {
       'MIGRATION_DATABASE_URL is required for db:provision: the URL of the schema owner',
     );
   const roles = loginRolesFromEnv(process.env);
+  checkPlaceholderSecrets(process.env, {
+    API_DB_PASSWORD: process.env.API_DB_PASSWORD,
+    WORKER_DB_PASSWORD: process.env.WORKER_DB_PASSWORD,
+  });
   const limits = limitDefaultsFromEnv(process.env);
   const ds = await new DataSource(
     buildDataSourceOptions(
