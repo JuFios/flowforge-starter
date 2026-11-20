@@ -3,15 +3,15 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 COPY . .
-RUN npm run build
+RUN npm run build && npm prune --omit=dev
 
 FROM node:20-alpine
 WORKDIR /app
-ENV NODE_ENV=production
-# Next standalone слухає HOSTNAME; у контейнері це має бути 0.0.0.0, а не id контейнера.
-ENV HOSTNAME=0.0.0.0
-COPY --from=build /app/.next/standalone ./
-COPY --from=build /app/.next/static ./.next/static
+ENV NODE_ENV=production HOSTNAME=0.0.0.0
+COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /app/.next ./.next
+COPY --from=build /app/dist ./dist
+COPY --from=build /app/next.config.js /app/package.json ./
 USER node
 EXPOSE 3000
-CMD ["node", "server.js"]
+CMD ["node","dist/server.js"]

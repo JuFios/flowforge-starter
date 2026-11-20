@@ -1,7 +1,7 @@
-import Link from 'next/link';
-
-export const metadata = { title: 'FlowForge' };
-
+import { Navigation } from '@/components/navigation';
+import './styles.css';
+export const dynamic = 'force-dynamic';
+export const metadata = { title: 'FlowForge · Робочий простір' };
 export default function RootLayout({
   children,
 }: {
@@ -9,20 +9,9 @@ export default function RootLayout({
 }) {
   return (
     <html lang="uk">
-      <body style={{ fontFamily: 'system-ui, sans-serif', margin: 0 }}>
-        <nav
-          style={{
-            display: 'flex',
-            gap: 16,
-            padding: '12px 24px',
-            borderBottom: '1px solid #ddd',
-          }}
-        >
-          <strong>FlowForge</strong>
-          <Link href="/workflows">Workflows</Link>
-          <Link href="/connect">API key</Link>
-        </nav>
-        <div style={{ padding: 24, maxWidth: 800 }}>{children}</div>
+      <body>
+        <Navigation />
+        <main>{children}</main>
       </body>
     </html>
   );
