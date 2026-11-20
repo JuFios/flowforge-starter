@@ -35,6 +35,7 @@ services:
       # Ліміти тенантів за замовчуванням (README, «Контракт лімітів»): db:provision записує їх у
       # БД — одне джерело для API і воркера; перевизначення тенанта — адмін-API.
       TENANT_MAX_RUNNING: ${TENANT_MAX_RUNNING:-10}
+      TENANT_MAX_WORKFLOWS: ${TENANT_MAX_WORKFLOWS:-1000}
       TENANT_MAX_QUEUE_SIZE: ${TENANT_MAX_QUEUE_SIZE:-100000}
       TENANT_RATE_LIMIT: ${TENANT_RATE_LIMIT:-600}
       TENANT_RATE_WINDOW_MS: ${TENANT_RATE_WINDOW_MS:-60000}

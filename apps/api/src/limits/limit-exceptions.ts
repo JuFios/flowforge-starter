@@ -30,3 +30,20 @@ export class RateLimitedException extends HttpException {
     );
   }
 }
+
+/**
+ * Квота збережених workflow тенанта вичерпана: новий workflow не створено. Без `Retry-After`, як
+ * `queue_full`: місце звільняє лише видалення наявного workflow.
+ */
+export class WorkflowLimitException extends HttpException {
+  constructor(limit: number) {
+    super(
+      {
+        statusCode: HttpStatus.TOO_MANY_REQUESTS,
+        error: 'workflow_limit_reached',
+        message: `досягнуто квоти тенанта: не більше ${limit} workflow; видаліть непотрібні workflow, щоб створити новий`,
+      },
+      HttpStatus.TOO_MANY_REQUESTS,
+    );
+  }
+}

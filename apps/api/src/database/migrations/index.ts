@@ -38,6 +38,7 @@ import { NotificationOutbox1796200000000 } from './1796200000000-NotificationOut
 
 import { SerializeOutbox1796300000000 } from './1796300000000-SerializeOutbox';
 
+import { WorkflowQuota1796500000000 } from './1796500000000-WorkflowQuota';
 import { CloseCancelledAttempts1796400000000 } from './1796400000000-CloseCancelledAttempts';
 
 export const MIGRATIONS = [
@@ -69,4 +70,5 @@ export const MIGRATIONS = [
   NotificationOutbox1796200000000,
   SerializeOutbox1796300000000,
   CloseCancelledAttempts1796400000000,
+  WorkflowQuota1796500000000,
 ];

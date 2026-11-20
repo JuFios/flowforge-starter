@@ -113,9 +113,12 @@ describe('tenant isolation over HTTP', () => {
     expect(
       (await asB('POST', `/workflows/${wfA.id}/run`, { x: 1 })).status,
     ).toBe(404);
-    const list = await asB<Array<{ id: string }>>('GET', '/workflows');
+    const list = await asB<{ items: Array<{ id: string }> }>(
+      'GET',
+      '/workflows',
+    );
     expect(list.status).toBe(200);
-    expect(list.body.map((w) => w.id)).not.toContain(wfA.id);
+    expect(list.body.items.map((w) => w.id)).not.toContain(wfA.id);
     expect(await snapshotA()).toEqual(before);
   });
 });

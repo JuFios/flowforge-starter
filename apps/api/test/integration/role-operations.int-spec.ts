@@ -98,7 +98,9 @@ describe('every operation works with the runtime roles', () => {
       (await call('PATCH', `/workflows/${wf.body.id}`, { name: 'ops2' }))
         .status,
     ).toBe(200);
-    expect((await call<unknown[]>('GET', '/workflows')).body).toHaveLength(1);
+    expect(
+      (await call<{ items: unknown[] }>('GET', '/workflows')).body.items,
+    ).toHaveLength(1);
 
     const run = await call<{ id: string }>(
       'POST',

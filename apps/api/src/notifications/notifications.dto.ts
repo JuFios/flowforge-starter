@@ -1,4 +1,4 @@
-import { Type } from 'class-transformer';
+import { QueryInt } from '../common/keyset-cursor';
 import {
   IsBoolean,
   IsIn,
@@ -36,7 +36,7 @@ export type EventStatus = (typeof EVENT_STATUSES)[number];
 /** Сторінка подій: найновіші першими, курсор — з відповіді попередньої сторінки. */
 export class AttemptPageQuery {
   @IsOptional()
-  @Type(() => Number)
+  @QueryInt()
   @IsInt()
   @Min(1)
   @Max(100)

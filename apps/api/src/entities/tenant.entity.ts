@@ -6,7 +6,7 @@ import {
   Generated,
   PrimaryGeneratedColumn,
 } from 'typeorm';
-import { TENANT_LIMIT_CHECKS } from '../tenancy/limits';
+import { TENANT_LIMIT_CHECKS, WORKFLOW_QUOTA_CHECK } from '../tenancy/limits';
 
 @Entity('tenants')
 @Check(
@@ -26,6 +26,7 @@ import { TENANT_LIMIT_CHECKS } from '../tenancy/limits';
   'CHK_tenants_webhook_rate_limit',
   TENANT_LIMIT_CHECKS.CHK_tenants_webhook_rate_limit,
 )
+@Check(WORKFLOW_QUOTA_CHECK.name, WORKFLOW_QUOTA_CHECK.expression)
 export class Tenant {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -66,6 +67,10 @@ export class Tenant {
 
   @Column({ type: 'int', nullable: true })
   webhookRateLimit: number | null;
+
+  /** Квота збережених workflow (NULL — `limit_defaults.maxWorkflows`). */
+  @Column({ type: 'int', nullable: true })
+  maxWorkflows: number | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;

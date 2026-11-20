@@ -8,11 +8,13 @@ import {
   ParseUUIDPipe,
   Patch,
   Post,
+  Query,
 } from '@nestjs/common';
 import { ApiKeyGuard } from '../auth/api-key.guard';
 import { RateLimit } from '../limits/rate-limit.guard';
 import { CurrentTenant } from '../auth/current-tenant.decorator';
 import { Tenant } from '../entities';
+import { ListWorkflowsQuery } from './dto/list-workflows.query';
 import { CreateWorkflowDto, UpdateWorkflowDto } from './dto/workflow.dto';
 import { WorkflowsService } from './workflows.service';
 
@@ -22,8 +24,8 @@ export class WorkflowsController {
   constructor(private readonly workflows: WorkflowsService) {}
 
   @Get()
-  list(@CurrentTenant() t: Tenant) {
-    return this.workflows.list(t.id);
+  list(@CurrentTenant() t: Tenant, @Query() query: ListWorkflowsQuery) {
+    return this.workflows.list(t.id, query);
   }
 
   @Get(':id')

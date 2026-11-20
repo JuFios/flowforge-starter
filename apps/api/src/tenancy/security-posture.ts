@@ -167,6 +167,7 @@ export const POSTURE: {
     'outbox_backlog()': { owner: SYSTEM_ROLE, execute: [WORKER_ROLE] },
     'tenant_usage_on_tenant()': { owner: SYSTEM_ROLE, execute: [] },
     'tenant_usage_on_defaults()': { owner: SYSTEM_ROLE, execute: [] },
+    'workflow_quota()': { owner: SYSTEM_ROLE, execute: [] },
   },
 };
 

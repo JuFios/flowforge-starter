@@ -68,7 +68,8 @@ async function limitsView(
     `SELECT jsonb_build_object(
        'maxConcurrentExecutions', t."maxConcurrentExecutions",
        'maxQueueSize', t."maxQueueSize", 'rateLimit', t."rateLimit",
-       'webhookRateLimit', t."webhookRateLimit") AS overrides,
+       'webhookRateLimit', t."webhookRateLimit",
+       'maxWorkflows', t."maxWorkflows") AS overrides,
        to_jsonb(l) AS effective
        FROM tenants t CROSS JOIN public.tenant_limits() l WHERE t.id = $1`,
     [id],
