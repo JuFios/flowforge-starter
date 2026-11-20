@@ -56,6 +56,34 @@ export function markInexactJsonNumbers(
 }
 
 /**
+ * Обробник помилок Express одразу після JSON-парсера. Невалідний байт поза рядком JSON (на місці
+ * значення, між токенами) ламає розбір тексту з U+FFFD, і body-parser відповів би 400 до guard-ів.
+ * Якщо `verify` уже позначив тіло як невалідний UTF-8, помилку розбору відкладаємо: тіло порожнє,
+ * а 400 дає ExactJsonNumbersInterceptor після автентифікації — так само, як для байта в рядку.
+ * Решта помилок (зламаний JSON у валідному UTF-8, 413) проходять без змін.
+ */
+export function deferInvalidUtf8ParseError(
+  err: unknown,
+  req: IncomingMessage & { body?: unknown },
+  _res: unknown,
+  next: (err?: unknown) => void,
+): void {
+  const mark = (req as Marked)[INEXACT_NUMBER];
+  if (
+    mark &&
+    'invalidUtf8' in mark &&
+    typeof err === 'object' &&
+    err !== null &&
+    (err as { type?: unknown }).type === 'entity.parse.failed'
+  ) {
+    req.body = {};
+    next();
+    return;
+  }
+  next(err);
+}
+
+/**
  * Після guard-ів: 400 для невалідних байтів UTF-8 і для числа, яке змінилося б до збереження;
  * 415 — для JSON з іншою міткою кодування.
  */

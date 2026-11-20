@@ -12,6 +12,7 @@ import { CreateTenantDto } from './tenants/tenants.controller';
 import { LIMIT_FIELDS } from './tenants/tenant-limits.dto';
 import { getMetadataStorage } from 'class-validator';
 import {
+  deferInvalidUtf8ParseError,
   ExactJsonNumbersInterceptor,
   markInexactJsonNumbers,
 } from './common/exact-json-numbers';
@@ -107,6 +108,7 @@ export function configureApp(app: INestApplication): INestApplication {
   // Числа, які змінилися б після розбору (1e400, цілі поза точністю double), видно лише в сирому
   // тексті: verify позначає запит, 400 — після guard-ів (ExactJsonNumbersInterceptor).
   http.useBodyParser('json', { ...options, verify: markInexactJsonNumbers });
+  http.use(deferInvalidUtf8ParseError);
   http.useBodyParser('urlencoded', { ...options, extended: true });
   // Невідомі поля — 400, а не мовчазне відкидання: тенант бачить, що поле не діє.
   app.useGlobalPipes(
