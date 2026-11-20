@@ -92,20 +92,26 @@ function resolveHeader(
   value: unknown,
   name: string,
   where: string,
-  previous?: Record<string, string>,
+  url: string,
+  previous?: Extract<StepDefinition, { type: 'http' }>,
 ): unknown {
   if (marker(value, 'stored'))
     fail(
       `${where}: для збереження значення використайте {"keep":true} у PATCH`,
     );
   if (!marker(value, 'keep')) return value;
-  if (previous && Object.hasOwn(previous, name)) return previous[name];
-  const matches = Object.entries(previous ?? {}).filter(
+  if (previous && previous.url !== url)
+    fail(
+      `${where}: після зміни URL введіть значення заголовка або видаліть його`,
+    );
+  const headers = previous?.headers;
+  if (headers && Object.hasOwn(headers, name)) return headers[name];
+  const matches = Object.entries(headers ?? {}).filter(
     ([key]) => key.toLowerCase() === name.toLowerCase(),
   );
   if (matches.length !== 1)
     fail(
-      `${where}: keep потребує однозначного наявного заголовка цього кроку у PATCH`,
+      `${where}: keep потребує актуальної editRevision і наявного заголовка цього кроку`,
     );
   return matches[0][1];
 }
@@ -152,7 +158,8 @@ function validateHttp(
         rawValue,
         name,
         `${where}.headers.${name}`,
-        previous?.type === 'http' ? previous.headers : undefined,
+        url,
+        previous?.type === 'http' ? previous : undefined,
       );
       if (RESERVED_HEADERS.has(lower))
         fail(`${where}.headers: заголовок ${name} задає платформа`);
@@ -187,7 +194,7 @@ function validateHttp(
     type: 'http',
     url,
     ...(method !== undefined && { method }),
-    ...(headers !== undefined && { headers }),
+    ...(headers !== undefined && { headers: { ...headers } }),
     ...(body !== undefined && { body }),
   };
 }

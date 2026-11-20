@@ -128,6 +128,12 @@ const workflow = {
   scheduleError: nullable(str),
   createdAt: date,
 };
+const editRevision = {
+  ...str,
+  pattern: '^[1-9][0-9]{0,18}$',
+  description:
+    'Ревізія редагованої конфігурації, незалежна від версії кроків і стану планувальника',
+};
 const run = {
   id: uuid,
   workflowId: uuid,
@@ -232,9 +238,13 @@ export const schemas: Record<string, SchemaObject> = {
     'name',
     'steps',
   ]),
-  UpdateWorkflow: closed({ ...definition, steps: steps('update') }, []),
+  UpdateWorkflow: closed(
+    { ...definition, editRevision, steps: steps('update') },
+    [],
+  ),
   Workflow: object({
     ...workflow,
+    editRevision,
     tenantId: uuid,
     scheduleCursor: date,
     steps: steps('read'),

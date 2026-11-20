@@ -1,11 +1,14 @@
 'use client';
-import { useState, FormEvent } from 'react';
+import { useRef, useState, FormEvent } from 'react';
 export default function Login() {
   const [key, setKey] = useState(''),
     [pending, busy] = useState(false),
     [error, fail] = useState('');
+  const lock = useRef(false);
   async function submit(event: FormEvent) {
     event.preventDefault();
+    if (lock.current) return;
+    lock.current = true;
     busy(true);
     fail('');
     try {
@@ -38,6 +41,7 @@ export default function Login() {
         'Не вдалося зв’язатися з сервером. Перевірте з’єднання й повторіть.',
       );
     } finally {
+      lock.current = false;
       busy(false);
     }
   }
@@ -49,6 +53,8 @@ export default function Login() {
         <label>
           API-ключ
           <input
+            aria-invalid={!!error}
+            aria-describedby={error ? 'login-error' : undefined}
             type="password"
             autoComplete="off"
             maxLength={256}
@@ -57,7 +63,11 @@ export default function Login() {
             onChange={(e) => setKey(e.target.value)}
           />
         </label>
-        {error && <p role="alert">{error}</p>}
+        {error && (
+          <p className="notice" role="alert" id="login-error">
+            {error}
+          </p>
+        )}
         <button disabled={pending}>{pending ? 'Вхід…' : 'Увійти'}</button>
       </form>
     </section>

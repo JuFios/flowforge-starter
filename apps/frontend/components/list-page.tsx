@@ -14,6 +14,13 @@ export const statuses: Record<ExecutionStatus, string> = {
   succeeded: 'Успішно',
   failed: 'Помилка',
 };
+const triggers = { api: 'Вручну / API', cron: 'Розклад', webhook: 'Webhook' };
+
+const dateTime = new Intl.DateTimeFormat('uk-UA', {
+  dateStyle: 'medium',
+  timeStyle: 'short',
+});
+
 export function Status({ value }: { value: ExecutionStatus }) {
   return (
     <span className={'status ' + (value === 'succeeded' ? 'success' : value)}>
@@ -27,8 +34,7 @@ function Results({ path, workflows }: { path: string; workflows: boolean }) {
     [cursor, setCursor] = useState<string | null>(null),
     [loading, busy] = useState(true),
     [error, fail] = useState('');
-  const active = useRef<AbortController>(),
-    next = useRef<string | null>(null);
+  const active = useRef<AbortController>();
   async function read(after: string | null) {
     active.current?.abort();
     const ctrl = new AbortController();
@@ -47,8 +53,7 @@ function Results({ path, workflows }: { path: string; workflows: boolean }) {
       setItems((old) =>
         after ? [...old, ...result.data.items] : result.data.items,
       );
-      next.current = result.data.nextCursor;
-      setCursor(next.current);
+      setCursor(result.data.nextCursor);
     } else if (result.kind !== 'aborted')
       fail(
         result.kind === 'rejected' ? describeRejection(result) : result.message,
@@ -57,7 +62,7 @@ function Results({ path, workflows }: { path: string; workflows: boolean }) {
   useEffect(() => {
     void read(null);
     function online() {
-      void read(next.current);
+      void read(null);
     }
     window.addEventListener('online', online);
     return () => {
@@ -71,53 +76,98 @@ function Results({ path, workflows }: { path: string; workflows: boolean }) {
       aria-label={workflows ? 'Список процесів' : 'Список виконань'}
       aria-busy={loading}
     >
-      {items.map((item) =>
-        'enabled' in item ? (
-          <article className="row" key={item.id}>
-            <div>
-              <Link href={'/workflows/' + item.id}>{item.name}</Link>
-              <small>
-                Версія {item.version} · {item.cron ?? 'Без розкладу'}
-              </small>
-            </div>
-            <span className="status">
-              {item.enabled ? 'Увімкнено' : 'Вимкнено'}
-            </span>
-          </article>
-        ) : (
-          <article className="row" key={item.id}>
-            <div>
-              <Link href={'/executions/' + item.id}>
-                {item.workflowName ?? 'Видалений процес'}
-              </Link>
-              <small>
-                {new Date(item.createdAt).toLocaleString('uk-UA')} ·{' '}
-                {item.id.slice(0, 8)}
-              </small>
-            </div>
-            <Status value={item.status} />
-          </article>
-        ),
+      {items.length > 0 && (
+        <div className="table-frame">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Процес</th>
+                <th className="wide-cell" scope="col">
+                  {workflows ? 'Розклад' : 'Джерело'}
+                </th>
+                <th scope="col">Статус</th>
+              </tr>
+            </thead>
+            <tbody>
+              {items.map((item) =>
+                'enabled' in item ? (
+                  <tr key={item.id}>
+                    <td>
+                      <Link
+                        className="record-link"
+                        href={'/workflows/' + item.id}
+                      >
+                        {item.name}
+                      </Link>
+                      <small>Версія {item.version}</small>
+                    </td>
+                    <td className="wide-cell">
+                      {item.cron ? (
+                        <>
+                          <code>{item.cron}</code>
+                          <small>{item.timezone}</small>
+                        </>
+                      ) : (
+                        <span className="muted">Без розкладу</span>
+                      )}
+                    </td>
+                    <td>
+                      <span
+                        className={'status' + (item.enabled ? ' success' : '')}
+                      >
+                        {item.enabled ? 'Увімкнено' : 'Вимкнено'}
+                      </span>
+                    </td>
+                  </tr>
+                ) : (
+                  <tr key={item.id}>
+                    <td>
+                      <Link
+                        className="record-link"
+                        href={'/executions/' + item.id}
+                      >
+                        {item.workflowName ?? 'Видалений процес'}
+                      </Link>
+                      <small>
+                        <time dateTime={item.createdAt}>
+                          {dateTime.format(new Date(item.createdAt))}
+                        </time>
+                      </small>
+                    </td>
+                    <td className="wide-cell">{triggers[item.trigger]}</td>
+                    <td>
+                      <Status value={item.status} />
+                    </td>
+                  </tr>
+                ),
+              )}
+            </tbody>
+          </table>
+        </div>
       )}
       {error && (
-        <p role="alert">
-          {error}{' '}
+        <div className="notice actions">
+          <span role="alert">{error}</span>
           <button className="secondary" onClick={() => read(cursor)}>
             Повторити
           </button>
+        </div>
+      )}
+      {loading && (
+        <p className="list-note" role="status">
+          Завантаження…
         </p>
       )}
-      {loading && <p role="status">Завантаження…</p>}
       {!loading && !error && !items.length && (
-        <div className="panel">
-          {workflows
-            ? 'Процесів ще немає. Створіть перший процес.'
-            : 'Виконань за цими умовами немає.'}
+        <div className="panel empty-state">
+          <p>
+            {workflows ? 'Процесів ще немає' : 'Виконань за цими умовами немає'}
+          </p>
         </div>
       )}
       {cursor && !error && (
         <button
-          className="secondary"
+          className="secondary load-more"
           disabled={loading}
           onClick={() => read(cursor)}
         >
@@ -143,7 +193,7 @@ export function ListPage({
   const path = (workflows ? 'workflows' : 'executions') + '?' + query;
   return (
     <>
-      <div className="toolbar">
+      <div className="toolbar page-heading">
         <h1>{workflows ? 'Процеси' : 'Виконання'}</h1>
         {workflows && (
           <Link className="button" href="/workflows/new">

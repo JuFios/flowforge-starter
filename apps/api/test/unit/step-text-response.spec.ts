@@ -38,4 +38,23 @@ describe('http step text response', () => {
       retryable: false,
     });
   });
+
+  it.each(['9007199254740993', '1e400', '1e-400'])(
+    'rejects the inexact JSON number %s as a permanent step error',
+    async (raw) => {
+      respond(`{"order": ${raw}}`);
+      await expect(executor.execute(step, ctx)).rejects.toMatchObject({
+        message: 'http response JSON contains an inexact number',
+        retryable: false,
+      });
+    },
+  );
+
+  it('preserves the result of a successful response with exact JSON numbers', async () => {
+    respond('{"order":9007199254740991,"amount":0.25}');
+    await expect(executor.execute(step, ctx)).resolves.toEqual({
+      status: 200,
+      body: { order: 9007199254740991, amount: 0.25 },
+    });
+  });
 });

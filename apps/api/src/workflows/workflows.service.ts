@@ -1,8 +1,11 @@
 import {
   BadRequestException,
+  ConflictException,
+  HttpException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { isDeepStrictEqual } from 'node:util';
 import { EntityManager, QueryFailedError } from 'typeorm';
 import {
   cursorAtSql,
@@ -46,7 +49,8 @@ export interface WorkflowSummary {
  * диска й не потрапляє в пам'ять API.
  */
 const SUMMARY_COLUMNS = `id, name, enabled, cron, timezone, version, "missedRunPolicy",
-  "nextFireAt", "scheduleBlockedSince", "scheduleError", "createdAt"`;
+  CASE WHEN "nextFireAt" > "scheduleCursor" THEN "nextFireAt" END AS "nextFireAt",
+  "scheduleBlockedSince", "scheduleError", "createdAt"`;
 
 /** Відмова тригера квоти (SQLSTATE FF001, межа — у DETAIL) → 429 workflow_limit_reached. */
 function quotaRejection(err: unknown): WorkflowLimitException | undefined {
@@ -177,6 +181,7 @@ export class WorkflowsService {
     tenantId: string,
     id: string,
     input: UpdateWorkflowDto,
+    requireRevision = false,
   ): Promise<Workflow> {
     return this.db.run(tenantId, async (em) => {
       const wf = await em.findOne(Workflow, {
@@ -184,49 +189,70 @@ export class WorkflowsService {
         lock: { mode: 'pessimistic_write' },
       });
       if (!wf) throw new NotFoundException('Workflow не знайдено');
+      if (requireRevision && input.editRevision === undefined)
+        throw new HttpException('Вкажіть актуальну editRevision', 428);
+      if (
+        input.editRevision !== undefined &&
+        input.editRevision !== wf.editRevision
+      )
+        throw new ConflictException({
+          error: 'workflow_edit_conflict',
+          message: 'Процес уже змінено. Завантажте актуальну версію.',
+        });
+
       const steps =
         input.steps === undefined
-          ? undefined
-          : validateSteps(input.steps, wf.steps);
+          ? wf.steps
+          : validateSteps(
+              input.steps,
+              input.editRevision ? wf.steps : undefined,
+            );
+      const name = input.name ?? wf.name;
       const cron = input.cron !== undefined ? input.cron : wf.cron;
       const timezone = input.timezone ?? wf.timezone;
-      // Новий розклад (вираз, зона) чи ввімкнення починають відлік з моменту зміни: пропущені
-      // моменти старого розкладу чи вимкненого періоду не наздоганяються (README 3.3.8).
+      const enabled = input.enabled ?? wf.enabled;
+      const missedRunPolicy = input.missedRunPolicy ?? wf.missedRunPolicy;
+      const stepsChanged = !isDeepStrictEqual(steps, wf.steps);
+      const scheduleChanged = cron !== wf.cron || timezone !== wf.timezone;
+      if (
+        !stepsChanged &&
+        !scheduleChanged &&
+        name === wf.name &&
+        enabled === wf.enabled &&
+        missedRunPolicy === wf.missedRunPolicy
+      )
+        return wf;
+      if (scheduleChanged) assertSchedule(cron, timezone);
+
+      // Новий розклад чи повторне ввімкнення починають відлік з моменту зміни.
       const reanchor =
-        cron !== null &&
-        (cron !== wf.cron ||
-          timezone !== wf.timezone ||
-          (input.enabled === true && !wf.enabled));
-      if (cron !== wf.cron || timezone !== wf.timezone)
-        assertSchedule(cron, timezone);
-      if (input.name !== undefined) wf.name = input.name;
-      if (!cron || input.enabled === false) {
+        cron !== null && enabled && (scheduleChanged || !wf.enabled);
+      if (!cron || !enabled) {
         wf.nextFireAt = null;
         wf.scheduleError = null;
         wf.scheduleBlockedSince = null;
       }
-      wf.cron = cron;
-      wf.timezone = timezone;
-      if (input.enabled !== undefined) wf.enabled = input.enabled;
-      if (input.missedRunPolicy !== undefined)
-        wf.missedRunPolicy = input.missedRunPolicy;
-      if (steps !== undefined) {
-        wf.steps = steps;
-        wf.version += 1;
-      }
+      Object.assign(wf, {
+        name,
+        cron,
+        timezone,
+        enabled,
+        missedRunPolicy,
+        steps,
+      });
+      wf.editRevision = (BigInt(wf.editRevision) + 1n).toString();
+      if (stepsChanged) wf.version += 1;
       const saved = await em.save(wf);
-      if (steps !== undefined) await this.saveVersion(em, saved);
-      if (reanchor && wf.enabled) {
-        const [rows]: [Workflow[], number] = await em.query(
-          `UPDATE workflows SET "scheduleCursor" = stamp.at, "nextFireAt" = stamp.at,
-                  "scheduleError" = NULL, "scheduleBlockedSince" = NULL
-            FROM (SELECT clock_timestamp() AS at) stamp
-            WHERE id = $1 AND "tenantId" = $2 RETURNING workflows.*`,
-          [id, tenantId],
-        );
-        return rows[0];
-      }
-      return saved;
+      if (stepsChanged) await this.saveVersion(em, saved);
+      if (!reanchor) return saved;
+      const [rows]: [Workflow[], number] = await em.query(
+        `UPDATE workflows SET "scheduleCursor" = stamp.at, "nextFireAt" = stamp.at,
+                "scheduleError" = NULL, "scheduleBlockedSince" = NULL
+          FROM (SELECT clock_timestamp() AS at) stamp
+          WHERE id = $1 AND "tenantId" = $2 RETURNING workflows.*`,
+        [id, tenantId],
+      );
+      return rows[0];
     });
   }
 

@@ -11,11 +11,12 @@ import { SystemDb } from '../tenancy/system-db';
 const PURGE_INTERVAL_MS = 60_000;
 /** Скільки відер видаляє одна транзакція. */
 const PURGE_BATCH = 1_000;
+const PURGE_BATCHES_PER_PASS = 16;
 
 /**
  * Очищення `rate_limit_buckets`: без нього таблиця росла б із кожним новим тенантом і IP. Пачками
- * (кожна — окрема коротка транзакція, SKIP LOCKED), доки пачка неповна. Помилка не зупиняє API —
- * наступний прохід повторить.
+ * (кожна — окрема коротка транзакція, SKIP LOCKED). Відра й облікові дані мають незалежний
+ * прогрес та обмежений бюджет на прохід. Після помилки очищення продовжить наступний прохід.
  */
 @Injectable()
 export class RateLimitPurger
@@ -61,11 +62,24 @@ export class RateLimitPurger
   /** Один прохід очищення; кількість видалених відер. */
   async purge(): Promise<number> {
     let total = 0;
-    while (!this.stopped) {
-      await this.system.purgeBrowserCredentials(PURGE_BATCH);
-      const deleted = await this.system.purgeRateLimits(PURGE_BATCH);
-      total += deleted;
-      if (deleted < PURGE_BATCH) break;
+    let bucketsPending = true;
+    let credentialsPending = true;
+    for (
+      let batch = 0;
+      batch < PURGE_BATCHES_PER_PASS &&
+      !this.stopped &&
+      (bucketsPending || credentialsPending);
+      batch++
+    ) {
+      if (credentialsPending)
+        credentialsPending =
+          (await this.system.purgeBrowserCredentials(PURGE_BATCH)) >=
+          PURGE_BATCH;
+      if (bucketsPending && !this.stopped) {
+        const deleted = await this.system.purgeRateLimits(PURGE_BATCH);
+        total += deleted;
+        bucketsPending = deleted === PURGE_BATCH;
+      }
     }
     return total;
   }

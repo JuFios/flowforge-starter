@@ -4,6 +4,10 @@ import { Workflow } from '../entities';
 export function workflowView(workflow: Workflow) {
   return {
     ...workflow,
+    nextFireAt:
+      workflow.nextFireAt && workflow.nextFireAt > workflow.scheduleCursor
+        ? workflow.nextFireAt
+        : null,
     steps: workflow.steps.map((step) =>
       step.type === 'http' && step.headers
         ? {

@@ -9,8 +9,9 @@ import {
   Patch,
   Post,
   Query,
+  Req,
 } from '@nestjs/common';
-import { TenantAuthGuard } from '../auth/api-key.guard';
+import { TenantAuthGuard, TenantRequest } from '../auth/api-key.guard';
 import { RateLimit } from '../limits/rate-limit.guard';
 import { CurrentTenant } from '../auth/current-tenant.decorator';
 import { Tenant } from '../entities';
@@ -47,8 +48,11 @@ export class WorkflowsController {
     @CurrentTenant() t: Tenant,
     @Param('id', ParseUUIDPipe) id: string,
     @Body() body: UpdateWorkflowDto,
+    @Req() req: TenantRequest,
   ) {
-    return workflowView(await this.workflows.update(t.id, id, body));
+    return workflowView(
+      await this.workflows.update(t.id, id, body, !!req.sessionId),
+    );
   }
 
   @Delete(':id')

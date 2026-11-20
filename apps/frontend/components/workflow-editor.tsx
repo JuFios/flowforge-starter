@@ -21,6 +21,7 @@ type Draft = {
   key: string;
   id: string;
   originalId: string;
+  originalUrl: string;
   type: StepView['type'];
   url: string;
   method: string;
@@ -34,9 +35,10 @@ function draft(step?: StepView): Draft {
   const id = step?.id ?? 'step1';
   const http = step?.type === 'http' ? step : undefined;
   return {
-    key: crypto.randomUUID(),
+    key: step?.id ?? crypto.randomUUID(),
     id,
     originalId: id,
+    originalUrl: http?.url ?? '',
     type: step?.type ?? 'log',
     url: http?.url ?? '',
     method: http?.method ?? 'GET',
@@ -66,7 +68,9 @@ function payload(step: Draft) {
             .filter((h) => h.mode !== 'remove')
             .map((h) => [h.name, h.mode === 'keep' ? { keep: true } : h.value]),
         ),
-        ...(step.body ? { body: step.body } : {}),
+        ...(step.body && step.method !== 'GET' && step.method !== 'HEAD'
+          ? { body: step.body }
+          : {}),
       };
     case 'log':
       return { id, type, message: step.message };
@@ -77,7 +81,13 @@ function payload(step: Draft) {
   }
 }
 
-export function WorkflowEditor({ workflow }: { workflow?: WorkflowView }) {
+export function WorkflowEditor({
+  workflow,
+  onCancel,
+}: {
+  workflow?: WorkflowView;
+  onCancel?: (refresh: boolean) => void;
+}) {
   const [name, setName] = useState(workflow?.name ?? ''),
     [steps, setSteps] = useState(() =>
       workflow ? workflow.steps.map(draft) : [draft()],
@@ -85,10 +95,11 @@ export function WorkflowEditor({ workflow }: { workflow?: WorkflowView }) {
     [cron, setCron] = useState(workflow?.cron ?? ''),
     [timezone, setZone] = useState(workflow?.timezone ?? 'UTC'),
     [enabled, enable] = useState(workflow?.enabled ?? true),
-    [policy, setPolicy] = useState(workflow?.missedRunPolicy ?? 'skip'),
+    [policy, setPolicy] = useState(workflow?.missedRunPolicy ?? 'run_once'),
     [issues, errors] = useState<Record<string, string>>({}),
     [saving, busy] = useState(false),
     [message, note] = useState(''),
+    [conflict, setConflict] = useState(false),
     [dirty, setDirty] = useState(false),
     [unknown, uncertain] = useState(false);
   const [zones, setZones] = useState<string[]>([]);
@@ -129,11 +140,16 @@ export function WorkflowEditor({ workflow }: { workflow?: WorkflowView }) {
   });
   async function save(event: FormEvent) {
     event.preventDefault();
-    if (lock.current || unknown) return;
+    if (lock.current || unknown || conflict) return;
     note('');
+    const definition = steps.map(payload);
+    const sameDefinition =
+      workflow &&
+      JSON.stringify(definition) ===
+        JSON.stringify(workflow.steps.map((step) => payload(draft(step))));
     const body = {
       name,
-      steps: steps.map(payload),
+      ...(sameDefinition ? {} : { steps: definition }),
       enabled,
       cron: cron.trim() || null,
       timezone,
@@ -155,9 +171,12 @@ export function WorkflowEditor({ workflow }: { workflow?: WorkflowView }) {
           invalid['steps.' + i + '.headers'] =
             'Назви заголовків мають бути унікальні';
         names.add(key);
-        if (h.mode === 'keep' && s.originalId !== s.id)
+        if (
+          h.mode === 'keep' &&
+          (s.originalId !== s.id || s.originalUrl !== s.url)
+        )
           invalid['steps.' + i + '.headers'] =
-            'Після зміни ID введіть збережені значення повторно.';
+            'Після зміни ID або URL введіть збережені значення повторно чи видаліть їх.';
       }
     });
     errors(invalid);
@@ -171,7 +190,11 @@ export function WorkflowEditor({ workflow }: { workflow?: WorkflowView }) {
       const r = await apiRequest<WorkflowView>(
         workflow ? 'PATCH' : 'POST',
         workflow ? 'workflows/' + workflow.id : 'workflows',
-        { body },
+        {
+          body: workflow
+            ? { ...body, editRevision: workflow.editRevision }
+            : body,
+        },
       );
       if (r.kind === 'ok') {
         setDirty(false);
@@ -191,6 +214,7 @@ export function WorkflowEditor({ workflow }: { workflow?: WorkflowView }) {
         return;
       }
       if (r.kind === 'rejected') {
+        if (r.error === 'workflow_edit_conflict') setConflict(true);
         for (const text of r.messages) {
           const p =
             /^(steps\[\d+\](?:\.[\w-]+)*|name|timezone|cron|enabled|missedRunPolicy)/.exec(
@@ -209,18 +233,24 @@ export function WorkflowEditor({ workflow }: { workflow?: WorkflowView }) {
     }
   }
   return (
-    <form onSubmit={save} onChange={() => setDirty(true)} noValidate>
+    <form
+      className="editor"
+      onSubmit={save}
+      onChange={() => setDirty(true)}
+      noValidate
+    >
       <section className="panel">
-        <label>
+        <label htmlFor="workflow-name">
           Назва процесу
           <input
+            id="workflow-name"
             {...attrs('name')}
             value={name}
             maxLength={LIMITS.maxNameLength}
             onChange={(e) => setName(e.target.value)}
           />
-          {errorFor('name')}
         </label>
+        {errorFor('name')}
         <label className="check">
           <input
             type="checkbox"
@@ -238,23 +268,31 @@ export function WorkflowEditor({ workflow }: { workflow?: WorkflowView }) {
           title: string,
           area = false,
         ) => (
-          <label>
-            {title}
+          <div className="field">
+            <label htmlFor={base + '.' + field}>{title}</label>
             {area ? (
               <textarea
                 {...attrs(base + '.' + field)}
+                id={base + '.' + field}
+                className={
+                  field === 'expr' || field === 'body'
+                    ? 'code-input'
+                    : undefined
+                }
+                spellCheck={field === 'message'}
                 value={s[field]}
                 onChange={(e) => patch(i, { [field]: e.target.value })}
               />
             ) : (
               <input
                 {...attrs(base + '.' + field)}
+                id={base + '.' + field}
                 value={s[field]}
                 onChange={(e) => patch(i, { [field]: e.target.value })}
               />
-            )}{' '}
+            )}
             {errorFor(base + '.' + field)}
-          </label>
+          </div>
         );
         const updateHeader = (j: number, part: Partial<Header>) =>
           patch(i, {
@@ -263,7 +301,7 @@ export function WorkflowEditor({ workflow }: { workflow?: WorkflowView }) {
         return (
           <fieldset key={s.key}>
             <legend>Крок {i + 1}</legend>
-            <div className="actions">
+            <div className="actions step-actions">
               <button
                 type="button"
                 className="secondary"
@@ -294,20 +332,22 @@ export function WorkflowEditor({ workflow }: { workflow?: WorkflowView }) {
                 Прибрати крок
               </button>
             </div>
-            {text('id', 'ID кроку')}
-            <label>
-              Тип кроку
-              <select
-                value={s.type}
-                onChange={(e) =>
-                  patch(i, { type: e.target.value as Draft['type'] })
-                }
-              >
-                {['http', 'transform', 'log', 'delay'].map((t) => (
-                  <option key={t}>{t}</option>
-                ))}
-              </select>
-            </label>
+            <div className="field-grid">
+              {text('id', 'ID кроку')}
+              <label>
+                Тип кроку
+                <select
+                  value={s.type}
+                  onChange={(e) =>
+                    patch(i, { type: e.target.value as Draft['type'] })
+                  }
+                >
+                  {['http', 'transform', 'log', 'delay'].map((t) => (
+                    <option key={t}>{t}</option>
+                  ))}
+                </select>
+              </label>
+            </div>
             {s.type === 'log' ? (
               text('message', 'Повідомлення', true)
             ) : s.type === 'transform' ? (
@@ -316,18 +356,20 @@ export function WorkflowEditor({ workflow }: { workflow?: WorkflowView }) {
               text('ms', 'Затримка, мс')
             ) : (
               <>
-                {text('url', 'URL запиту')}
-                <label>
-                  Метод
-                  <select
-                    value={s.method}
-                    onChange={(e) => patch(i, { method: e.target.value })}
-                  >
-                    {HTTP_METHODS.map((m) => (
-                      <option key={m}>{m}</option>
-                    ))}
-                  </select>
-                </label>
+                <div className="field-grid http-fields">
+                  {text('url', 'URL запиту')}
+                  <label>
+                    Метод
+                    <select
+                      value={s.method}
+                      onChange={(e) => patch(i, { method: e.target.value })}
+                    >
+                      {HTTP_METHODS.map((m) => (
+                        <option key={m}>{m}</option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
                 {!['GET', 'HEAD'].includes(s.method) &&
                   text('body', 'Тіло HTTP-запиту', true)}
                 <h3>Заголовки</h3>
@@ -450,8 +492,8 @@ export function WorkflowEditor({ workflow }: { workflow?: WorkflowView }) {
             value={cron}
             onChange={(e) => setCron(e.target.value)}
           />
-          {errorFor('cron')}
         </label>
+        {errorFor('cron')}
         <label>
           Часова зона
           <input
@@ -460,8 +502,8 @@ export function WorkflowEditor({ workflow }: { workflow?: WorkflowView }) {
             value={timezone}
             onChange={(e) => setZone(e.target.value)}
           />
-          {errorFor('timezone')}
         </label>
+        {errorFor('timezone')}
         <datalist id="timezones">
           <option>UTC</option>
           {zones.map((z) => (
@@ -488,15 +530,37 @@ export function WorkflowEditor({ workflow }: { workflow?: WorkflowView }) {
           </select>
         </label>
       </section>
-      {message && <p role="alert">{message}</p>}
+      {message && (
+        <p className="notice" role="alert">
+          {message}
+        </p>
+      )}
       {unknown && <Link href="/workflows">Перевірити список процесів</Link>}
-      <div className="actions">
-        <button disabled={saving || unknown}>
+      <div className="actions editor-actions">
+        <button disabled={saving || unknown || conflict}>
           {saving ? 'Збереження…' : 'Зберегти процес'}
         </button>
-        <Link href={workflow ? '/workflows/' + workflow.id : '/workflows'}>
-          Скасувати
-        </Link>
+        {conflict && (
+          <button
+            className="secondary"
+            type="button"
+            onClick={() => location.reload()}
+          >
+            Завантажити актуальну версію
+          </button>
+        )}
+        {onCancel ? (
+          <button
+            className="secondary"
+            type="button"
+            onClick={() => onCancel(conflict)}
+            disabled={saving}
+          >
+            Скасувати
+          </button>
+        ) : (
+          <Link href="/workflows">Скасувати</Link>
+        )}
       </div>
     </form>
   );

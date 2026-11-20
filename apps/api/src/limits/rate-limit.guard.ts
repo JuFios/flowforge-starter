@@ -27,7 +27,12 @@ import { LimitsMetrics } from './limits.metrics';
 import { setRateLimitHeaders } from './rate-limit-headers';
 
 /** Імена лімітів частоти (docs/architecture.md, «Контракт лімітів»). */
-export const THROTTLERS = ['tenant', 'webhook', 'admin'] as const;
+export const THROTTLERS = [
+  'tenant',
+  'webhook',
+  'admin',
+  'session_revoke',
+] as const;
 export type ThrottlerName = (typeof THROTTLERS)[number];
 
 /** Запит, тенанта й ліміти якого вже встановив guard автентифікації (ключ або підпис). */
@@ -78,6 +83,12 @@ export function throttlerOptions(
         limit: config.get('ADMIN_RATE_LIMIT', { infer: true }),
         ttl: config.get('ADMIN_RATE_WINDOW_MS', { infer: true }),
         getTracker: (req) => clientIp(req as Request),
+      },
+      {
+        name: 'session_revoke',
+        limit: 60,
+        ttl: 60_000,
+        getTracker: (_req, ctx) => authenticated(ctx).tenant.id,
       },
     ],
   };

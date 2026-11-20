@@ -100,6 +100,10 @@ export function ExecutionPage({ id }: { id: string }) {
   }, [id]);
   async function detail(path: string) {
     abort.current?.abort();
+    if (selected === path) {
+      select(undefined);
+      return;
+    }
     const c = new AbortController();
     abort.current = c;
     select(path);
@@ -141,20 +145,36 @@ export function ExecutionPage({ id }: { id: string }) {
       <Link href="/executions" className="heading-link">
         ← Виконання
       </Link>
-      <div className="toolbar">
+      <div className="toolbar page-heading">
         <h1>{data?.workflowName ?? 'Виконання'}</h1>
-        <span role="status">{connection}</span>
+        <span
+          className={state === 'live' ? 'connection live' : 'connection'}
+          role="status"
+        >
+          {connection}
+        </span>
       </div>
       {state !== 'gone' && data ? (
         <>
-          <section className="panel">
+          <section className="panel execution-overview">
             <div className="toolbar">
               <Status value={data.status} />
-              <time>{new Date(data.createdAt).toLocaleString('uk-UA')}</time>
+              <time dateTime={data.createdAt}>
+                {new Date(data.createdAt).toLocaleString('uk-UA')}
+              </time>
             </div>
-            <p>
-              {data.id} · Версія {data.workflowVersion ?? '—'}
-            </p>
+            <dl className="facts">
+              <div>
+                <dt>Ідентифікатор</dt>
+                <dd>
+                  <code>{data.id}</code>
+                </dd>
+              </div>
+              <div>
+                <dt>Версія процесу</dt>
+                <dd>{data.workflowVersion ?? '—'}</dd>
+              </div>
+            </dl>
             {data.error && <p role="alert">{data.error}</p>}
             {data.status === 'failed' && (
               <button disabled={waiting} onClick={retry}>
@@ -164,42 +184,62 @@ export function ExecutionPage({ id }: { id: string }) {
             {error && <p role="alert">{error}</p>}
           </section>
           <h2>Кроки виконання</h2>
-          {data.plan.map((step, i) => {
-            const run = data.steps.find((s) => s.stepIndex === i);
-            const path = 'steps/' + i;
-            return (
-              <section className="panel" key={i}>
-                <div className="toolbar">
-                  <strong>
-                    {i + 1}. {step.id}
-                  </strong>
-                  <span>
-                    {run
-                      ? run.status === 'succeeded'
-                        ? 'Завершено'
-                        : run.status === 'failed'
-                          ? 'Помилка'
-                          : 'Виконується'
-                      : 'Очікує'}
-                  </span>
-                </div>
-                <small>
-                  {step.type}
-                  {run ? ' · Спроб: ' + run.attempts : ''}
-                </small>
-                {run?.error && <p>{run.error}</p>}
-                {run?.outputBytes != null && (
-                  <button className="plain" onClick={() => detail(path)}>
-                    Результат кроку
-                  </button>
-                )}
-                {selected === path && <pre>{output}</pre>}
-              </section>
-            );
-          })}
+          <ol className="execution-steps">
+            {data.plan.map((step, i) => {
+              const run = data.steps.find((s) => s.stepIndex === i);
+              const path = 'steps/' + i;
+              return (
+                <li className="panel execution-step" key={step.id}>
+                  <div className="toolbar">
+                    <strong>
+                      <span className="step-index" aria-hidden="true">
+                        {i + 1}
+                      </span>{' '}
+                      {step.id}
+                    </strong>
+                    <span
+                      className={
+                        'status ' +
+                        (run?.status === 'succeeded'
+                          ? 'success'
+                          : (run?.status ?? ''))
+                      }
+                    >
+                      {run
+                        ? run.status === 'succeeded'
+                          ? 'Завершено'
+                          : run.status === 'failed'
+                            ? 'Помилка'
+                            : 'Виконується'
+                        : 'Очікує'}
+                    </span>
+                  </div>
+                  <small>
+                    {step.type}
+                    {run ? ' · Спроб: ' + run.attempts : ''}
+                  </small>
+                  {run?.error && <p>{run.error}</p>}
+                  {run?.outputBytes != null && (
+                    <button
+                      className="plain result-toggle"
+                      onClick={() => detail(path)}
+                      aria-expanded={selected === path}
+                    >
+                      Результат кроку
+                    </button>
+                  )}
+                  {selected === path && <pre>{output}</pre>}
+                </li>
+              );
+            })}
+          </ol>
           {data.outputBytes != null && (
             <section className="panel">
-              <button className="secondary" onClick={() => detail('output')}>
+              <button
+                className="secondary"
+                onClick={() => detail('output')}
+                aria-expanded={selected === 'output'}
+              >
                 Результат виконання
               </button>
               {selected === 'output' && <pre>{output}</pre>}

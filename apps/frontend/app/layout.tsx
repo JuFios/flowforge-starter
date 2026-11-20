@@ -10,8 +10,11 @@ export default function RootLayout({
   return (
     <html lang="uk">
       <body>
+        <a className="skip-link" href="#content">
+          До вмісту
+        </a>
         <Navigation />
-        <main>{children}</main>
+        <main id="content">{children}</main>
       </body>
     </html>
   );

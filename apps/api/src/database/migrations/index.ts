@@ -46,6 +46,7 @@ import { ExecutionPages1796600000000 } from './1796600000000-ExecutionPages';
 import { BrowserSessions1796700000000 } from './1796700000000-BrowserSessions';
 
 import { ExecutionRevision1796800000000 } from './1796800000000-ExecutionRevision';
+import { WorkflowEditRevision1796900000000 } from './1796900000000-WorkflowEditRevision';
 
 export const MIGRATIONS = [
   InitialSchema1794920217603,
@@ -80,4 +81,5 @@ export const MIGRATIONS = [
   ExecutionPages1796600000000,
   BrowserSessions1796700000000,
   ExecutionRevision1796800000000,
+  WorkflowEditRevision1796900000000,
 ];

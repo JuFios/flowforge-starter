@@ -341,7 +341,7 @@ export function issuePath(path: ReadonlyArray<string | number>): string {
 /** Вхід запуску: JSON-об'єкт до 64 КіБ. */
 export function parseRunInput(
   text: string,
-): { ok: true; value: Record<string, unknown> } | { ok: false; error: string } {
+): { ok: true; source: string } | { ok: false; error: string } {
   const source = text.trim() === '' ? '{}' : text;
   if (byteLength(source) > LIMITS.maxRunInputBytes)
     return {
@@ -356,5 +356,5 @@ export function parseRunInput(
   }
   if (value === null || typeof value !== 'object' || Array.isArray(value))
     return { ok: false, error: 'вхід має бути JSON-об’єктом' };
-  return { ok: true, value: value as Record<string, unknown> };
+  return { ok: true, source };
 }

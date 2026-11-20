@@ -22,11 +22,12 @@ export type ClientResult<T> =
   | { kind: 'network'; message: string; uncertain: boolean }
   | { kind: 'aborted' };
 
-export interface RequestOptions {
-  body?: unknown;
+export type RequestOptions = (
+  { body?: unknown; rawJson?: never } | { body?: never; rawJson: string }
+) & {
   idempotencyKey?: string;
   signal?: AbortSignal;
-}
+};
 
 function messagesOf(body: ApiErrorBody | undefined): string[] {
   const message = body?.message;
@@ -41,7 +42,10 @@ export async function apiRequest<T>(
   options: RequestOptions = {},
 ): Promise<ClientResult<T>> {
   const headers: Record<string, string> = {};
-  if (options.body !== undefined) headers['content-type'] = 'application/json';
+  const bodyText =
+    options.rawJson ??
+    (options.body === undefined ? undefined : JSON.stringify(options.body));
+  if (bodyText !== undefined) headers['content-type'] = 'application/json';
   if (options.idempotencyKey)
     headers['idempotency-key'] = options.idempotencyKey;
   let res: Response;
@@ -49,8 +53,7 @@ export async function apiRequest<T>(
     res = await fetch(`/api/proxy/${path}`, {
       method,
       headers,
-      body:
-        options.body === undefined ? undefined : JSON.stringify(options.body),
+      body: bodyText,
       signal: options.signal,
       cache: 'no-store',
       credentials: 'same-origin',

@@ -24,7 +24,13 @@ function urls(raw: string | undefined): URL[] {
     const url = new URL(value);
     if (url.protocol !== 'http:' && url.protocol !== 'https:')
       throw new Error('API_URLS entries must be http(s) URLs');
-    if (url.pathname !== '/' || url.search || url.hash)
+    if (
+      url.pathname !== '/' ||
+      url.search ||
+      url.hash ||
+      url.username ||
+      url.password
+    )
       throw new Error('API_URLS entries must be origins without a path');
     return url;
   });

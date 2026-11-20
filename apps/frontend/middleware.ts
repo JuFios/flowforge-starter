@@ -37,6 +37,7 @@ export function middleware(req: NextRequest): NextResponse {
     if (pathname !== '/')
       login.searchParams.set('next', `${pathname}${search}`);
     const res = NextResponse.redirect(login);
+    res.headers.set('cache-control', 'private, no-store');
     if (req.cookies.has(LEGACY_KEY_COOKIE))
       res.cookies.delete(LEGACY_KEY_COOKIE);
     return res;

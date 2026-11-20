@@ -28,7 +28,7 @@ export class SessionsController {
 
   @Delete('sessions/current')
   @HttpCode(204)
-  @RateLimit('tenant', { before: [TenantAuthGuard] })
+  @RateLimit('session_revoke', { before: [TenantAuthGuard] })
   revoke(@Req() req: TenantRequest) {
     return this.sessions.revoke(req.tenant.id, req.sessionId);
   }

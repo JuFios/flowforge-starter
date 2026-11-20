@@ -71,6 +71,10 @@ export class Workflow {
   @Column({ default: 1 })
   version: number;
 
+  /** Ревізія редагованих полів. Стан планувальника її не змінює. */
+  @Column({ type: 'bigint', default: '1' })
+  editRevision: string;
+
   /**
    * Політика моментів розкладу, пропущених довше за SCHEDULER_MISFIRE_GRACE_MS (простій, БД
    * недоступна, повна черга): пропустити, виконати один раз чи виконати всі (README 3.3.8).

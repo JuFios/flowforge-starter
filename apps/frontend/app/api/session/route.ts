@@ -37,7 +37,10 @@ function apiHeaders(req: NextRequest, extra: Record<string, string>): Headers {
 }
 
 /** Відкликає поточну сесію в API; результат визначає, чи можна прибрати cookie. */
-async function revoke(req: NextRequest, token: string): Promise<boolean> {
+async function revoke(
+  req: NextRequest,
+  token: string,
+): Promise<Response | null> {
   try {
     const res = await callApi({
       method: 'DELETE',
@@ -45,10 +48,37 @@ async function revoke(req: NextRequest, token: string): Promise<boolean> {
       headers: apiHeaders(req, { authorization: `Bearer ${token}` }),
     });
     await res.body?.cancel();
-    return res.ok || res.status === 401;
+    if (res.ok || res.status === 401) return null;
+    if (res.status === 429) {
+      const headers = sessionResponseHeaders(res);
+      return json(
+        429,
+        {
+          error: 'rate_limited',
+          message: 'Забагато спроб завершити сесію. Спробуйте пізніше.',
+        },
+        headers,
+      );
+    }
+    return revokeUnavailable();
   } catch {
-    return false;
+    return revokeUnavailable();
   }
+}
+
+function sessionResponseHeaders(upstream: Response): Headers {
+  const headers = new Headers();
+  for (const name of [
+    'retry-after',
+    'x-ratelimit-limit',
+    'x-ratelimit-remaining',
+    'x-ratelimit-reset',
+    'x-request-id',
+  ]) {
+    const value = upstream.headers.get(name);
+    if (value !== null) headers.set(name, value);
+  }
+  return headers;
 }
 
 /**
@@ -85,7 +115,10 @@ export async function POST(req: NextRequest): Promise<Response> {
   const previous = validSessionToken(
     req.cookies.get(sessionCookieName())?.value,
   );
-  if (previous && !(await revoke(req, previous))) return revokeUnavailable();
+  if (previous) {
+    const rejection = await revoke(req, previous);
+    if (rejection) return rejection;
+  }
 
   let upstream: Response;
   try {
@@ -102,17 +135,7 @@ export async function POST(req: NextRequest): Promise<Response> {
       });
     throw err;
   }
-  const passthrough = new Headers();
-  for (const name of [
-    'retry-after',
-    'x-ratelimit-limit',
-    'x-ratelimit-remaining',
-    'x-ratelimit-reset',
-    'x-request-id',
-  ]) {
-    const value = upstream.headers.get(name);
-    if (value !== null) passthrough.set(name, value);
-  }
+  const passthrough = sessionResponseHeaders(upstream);
   if (upstream.status !== 201) {
     const body = (await upstream.json().catch(() => ({}))) as Record<
       string,
@@ -158,9 +181,9 @@ function revokeUnavailable() {
 export async function DELETE(req: NextRequest): Promise<Response> {
   if (!sameOrigin(req)) return forbiddenOrigin();
   const token = validSessionToken(req.cookies.get(sessionCookieName())?.value);
-  const revoked = token ? await revoke(req, token) : true;
-  if (!revoked) return revokeUnavailable();
-  const res = json(200, { revoked });
+  const rejection = token ? await revoke(req, token) : null;
+  if (rejection) return rejection;
+  const res = json(200, { revoked: true });
   res.cookies.set(sessionCookieName(), '', {
     ...sessionCookieOptions(),
     maxAge: 0,

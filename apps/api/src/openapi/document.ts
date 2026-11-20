@@ -86,7 +86,7 @@ const contracts: Record<string, Contract> = {
     result: 'Session',
   },
   'delete /sessions/current': {
-    title: 'Відкликати поточну сесію',
+    title: 'Відкликати поточну сесію. Ліміт 60 запитів на хвилину на тенанта',
     auth: [{ browserSession: [] }],
     code: 204,
   },
@@ -108,10 +108,12 @@ const contracts: Record<string, Contract> = {
     result: 'Workflow',
   },
   'patch /workflows/{id}': {
-    title: 'Оновити процес. Маркер keep зберігає заголовок цього кроку',
+    title:
+      'Оновити процес. Браузерні сесії та маркери keep потребують актуальної editRevision',
     auth: tenant,
     result: 'Workflow',
     body: 'UpdateWorkflow',
+    errors: [409, 428],
   },
   'delete /workflows/{id}': {
     title: 'Видалити процес',
@@ -266,6 +268,7 @@ const descriptions: Record<number, string> = {
   413: 'Перевищено межу тіла',
   415: 'Непідтримуване кодування тіла',
   422: 'Ключ повторно використано з іншими даними',
+  428: 'Браузерний запит має містити актуальну editRevision',
   429: 'rate_limited повертає Retry-After. queue_full та workflow_limit_reached не мають визначеного часу повтору.',
   503: 'Залежність недоступна',
 };

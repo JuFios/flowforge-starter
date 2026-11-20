@@ -91,6 +91,18 @@ test('a tenant edits a masked header, runs a workflow and follows its durable re
     await page.getByRole('button', { name: 'Вийти' }).click();
     await expect(page).toHaveURL(/\/login$/);
   } finally {
-    if (project) compose('start');
+    if (project) {
+      compose('start');
+      const api = process.env.API_ORIGIN ?? 'http://localhost:3000';
+      await expect
+        .poll(async () => {
+          try {
+            return (await request.get(api + '/ready', { timeout: 1_000 })).ok();
+          } catch {
+            return false;
+          }
+        })
+        .toBe(true);
+    }
   }
 });

@@ -39,6 +39,7 @@ export type StepView =
   | { id: string; type: 'delay'; ms: number };
 
 export interface WorkflowView extends WorkflowSummary {
+  editRevision: string;
   steps: StepView[];
   scheduleCursor: string;
 }

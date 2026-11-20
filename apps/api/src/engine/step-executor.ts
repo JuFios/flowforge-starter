@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { exceedsJsonDepth, MAX_STEP_RESULT_DEPTH } from '../common/json-depth';
+import { findInexactNumber } from '../common/json-numbers';
 import { findUnstorable } from '../common/storable-text';
 import { StepDefinition } from '../entities';
 import { isolatedTransform } from './isolated-transform';
@@ -147,6 +148,11 @@ export class StepExecutor {
     if (exceedsJsonDepth(body, MAX_STEP_RESULT_DEPTH))
       throw new StepError(
         `http response JSON is nested deeper than ${MAX_STEP_RESULT_DEPTH} levels`,
+        false,
+      );
+    if (findInexactNumber(text))
+      throw new StepError(
+        'http response JSON contains an inexact number',
         false,
       );
     return { status: res.status, body };
