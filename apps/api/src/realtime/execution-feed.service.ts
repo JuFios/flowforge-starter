@@ -4,6 +4,9 @@ import { Client } from 'pg';
 import { EventEmitter } from 'node:events';
 import { EnvironmentVariables } from '../config/env.validation';
 
+/** Як часто перевіряти, що з'єднання LISTEN живе. */
+const LIVENESS_INTERVAL_MS = 10_000;
+
 /** LISTEN лише пробуджує читачів. Після кожного успішного LISTEN вони перечитують БД. */
 @Injectable()
 export class ExecutionFeed implements OnApplicationShutdown {
@@ -11,6 +14,7 @@ export class ExecutionFeed implements OnApplicationShutdown {
   private readonly logger = new Logger(ExecutionFeed.name);
   private client?: Client;
   private retry?: NodeJS.Timeout;
+  private probe?: NodeJS.Timeout;
   private delay = 250;
   private stopped = false;
   constructor(
@@ -33,6 +37,8 @@ export class ExecutionFeed implements OnApplicationShutdown {
     const lost = () => {
       if (client !== this.client) return;
       this.client = undefined;
+      clearInterval(this.probe);
+      this.probe = undefined;
       this.events.emit('available', false);
       void client
         .end()
@@ -58,12 +64,18 @@ export class ExecutionFeed implements OnApplicationShutdown {
       await client.query('LISTEN ff_execution; LISTEN ff_session_revoked');
       if (client !== this.client) return;
       this.delay = 250;
+      // Напіввідкрите з'єднання (NAT чи firewall мовчки відкинули його) не дає ні error, ні end:
+      // запит із таймаутом виявляє його, і після перепідключення підписки перечитуються.
+      this.probe = setInterval(() => {
+        client.query('SELECT 1').catch(lost);
+      }, LIVENESS_INTERVAL_MS);
       this.events.emit('available', true);
     })().catch(lost);
   }
   async onApplicationShutdown() {
     this.stopped = true;
     clearTimeout(this.retry);
+    clearInterval(this.probe);
     const client = this.client;
     this.client = undefined;
     if (client)

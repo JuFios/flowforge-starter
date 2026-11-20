@@ -135,7 +135,7 @@ export class ExecutionGateway
       this.subscriptions.size >=
         this.config.get('REALTIME_MAX_CONNECTIONS', { infer: true })
     )
-      return done(false, 429, 'Too Many Requests');
+      return done(false, 429, 'Too Many Requests', { 'Retry-After': '1' });
     this.checking++;
     const expire = setTimeout(() => req.socket.destroy(), 8000);
     void this.authorize(req, done)
@@ -194,7 +194,7 @@ export class ExecutionGateway
       this.subscriptions.size >=
         this.config.get('REALTIME_MAX_CONNECTIONS', { infer: true })
     )
-      return done(false, 429, 'Too Many Requests');
+      return done(false, 429, 'Too Many Requests', { 'Retry-After': '1' });
     this.pending.set(req, grant);
     done(true);
   }
