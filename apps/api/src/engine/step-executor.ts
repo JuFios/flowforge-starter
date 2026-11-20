@@ -128,7 +128,9 @@ export class StepExecutor {
     try {
       body = JSON.parse(text);
     } catch {
-      return { status: res.status, body: text.slice(0, 10_000) };
+      // Увесь текст: розмір уже обмежив readLimited (HTTP_RESPONSE_BYTES, та сама межа, що й для
+      // JSON). Обрізання змінило б дані для наступних кроків при успішному статусі кроку.
+      return { status: res.status, body: text };
     }
     // Результат кроку зберігається в jsonb і серіалізується (рекурсивно) у чекпоінті й шаблонах
     // наступних кроків: надглибокий JSON переповнив би стек. Повтор дав би той самий результат.
