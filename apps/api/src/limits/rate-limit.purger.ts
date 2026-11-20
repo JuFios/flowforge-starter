@@ -62,6 +62,7 @@ export class RateLimitPurger
   async purge(): Promise<number> {
     let total = 0;
     while (!this.stopped) {
+      await this.system.purgeBrowserCredentials(PURGE_BATCH);
       const deleted = await this.system.purgeRateLimits(PURGE_BATCH);
       total += deleted;
       if (deleted < PURGE_BATCH) break;

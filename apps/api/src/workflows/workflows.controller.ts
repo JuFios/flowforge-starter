@@ -10,7 +10,7 @@ import {
   Post,
   Query,
 } from '@nestjs/common';
-import { ApiKeyGuard } from '../auth/api-key.guard';
+import { TenantAuthGuard } from '../auth/api-key.guard';
 import { RateLimit } from '../limits/rate-limit.guard';
 import { CurrentTenant } from '../auth/current-tenant.decorator';
 import { Tenant } from '../entities';
@@ -20,7 +20,7 @@ import { workflowView } from './workflow-view';
 import { WorkflowsService } from './workflows.service';
 
 @Controller('workflows')
-@RateLimit('tenant', { before: [ApiKeyGuard] })
+@RateLimit('tenant', { before: [TenantAuthGuard] })
 export class WorkflowsController {
   constructor(private readonly workflows: WorkflowsService) {}
 

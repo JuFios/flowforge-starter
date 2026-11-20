@@ -1,7 +1,9 @@
 import { Injectable, Module, OnModuleInit } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import { ApiKeyGuard } from './auth/api-key.guard';
+import { SessionsController } from './sessions/sessions.controller';
+import { SessionsService } from './sessions/sessions.service';
+import { ApiKeyGuard, TenantAuthGuard } from './auth/api-key.guard';
 import {
   EnvironmentVariables,
   validateApiEnv,
@@ -86,6 +88,7 @@ class ApiEnvironmentCheck implements OnModuleInit {
 @Module({
   imports: [...coreImports, TenancyModule.forRoot('api'), LimitsModule],
   controllers: [
+    SessionsController,
     TenantsController,
     WorkflowsController,
     ExecutionsController,
@@ -96,6 +99,8 @@ class ApiEnvironmentCheck implements OnModuleInit {
   providers: [
     ApiEnvironmentCheck,
     ApiKeyGuard,
+    TenantAuthGuard,
+    SessionsService,
     WorkflowsService,
     ExecutionsService,
     WebhookKeysService,

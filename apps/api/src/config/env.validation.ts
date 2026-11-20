@@ -193,6 +193,22 @@ export class EnvironmentVariables extends DatabaseEnvironment {
   @Max(65535)
   PORT = 3000;
 
+  @Type(() => Number)
+  @IsInt()
+  @Min(1000)
+  @Max(86_400_000)
+  SESSION_TTL_MS = 28_800_000;
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(1000)
+  SESSION_MAX_PER_TENANT = 100;
+  @Type(() => Number)
+  @IsInt()
+  @Min(1000)
+  @Max(60_000)
+  REALTIME_TICKET_TTL_MS = 30_000;
+
   /**
    * Службовий порт API лише для GET /metrics. Не публікується назовні (docker-compose),
    * на публічному PORT метрик немає. 0 — випадковий вільний порт (інтеграційні тести).

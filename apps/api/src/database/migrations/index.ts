@@ -43,6 +43,8 @@ import { CloseCancelledAttempts1796400000000 } from './1796400000000-CloseCancel
 
 import { ExecutionPages1796600000000 } from './1796600000000-ExecutionPages';
 
+import { BrowserSessions1796700000000 } from './1796700000000-BrowserSessions';
+
 export const MIGRATIONS = [
   InitialSchema1794920217603,
   AddCorrelationId1794920232623,
@@ -74,4 +76,5 @@ export const MIGRATIONS = [
   CloseCancelledAttempts1796400000000,
   WorkflowQuota1796500000000,
   ExecutionPages1796600000000,
+  BrowserSessions1796700000000,
 ];

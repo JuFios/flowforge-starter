@@ -40,6 +40,9 @@ export const GROUP_FUNCTIONS: Readonly<Record<string, readonly string[]>> = {
   [API_ROLE]: [
     'app_current_tenant()',
     'auth_tenant(text)',
+    'auth_session(bytea)',
+    'redeem_realtime_ticket(bytea)',
+    'purge_browser_credentials(integer)',
     'due_schedule_tenants(uuid,integer)',
     'lock_tenant_usage()',
     'purge_rate_limits(integer)',
@@ -76,6 +79,8 @@ export const UNSAFE_GROUP_SQL = `
   WITH runtime AS (SELECT oid,rolname,rolcanlogin,rolsuper,rolbypassrls,rolcreaterole,rolcreatedb,rolreplication
                      FROM pg_roles WHERE rolname = $1),
   allowed(role_name, table_name, rights) AS (VALUES
+     ('flowforge_api_role','browser_sessions',ARRAY['SELECT','INSERT','DELETE']),
+     ('flowforge_api_role','realtime_tickets',ARRAY['SELECT','INSERT','DELETE']),
      ('flowforge_api_role','tenants',ARRAY['SELECT','INSERT','UPDATE']),
      ('flowforge_api_role','webhook_deliveries',ARRAY['SELECT','INSERT']),
      ('flowforge_api_role','workflows',ARRAY['SELECT','INSERT','UPDATE','DELETE']),

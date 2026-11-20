@@ -35,6 +35,20 @@ export const POSTURE: {
   functions: Readonly<Record<string, FunctionPosture>>;
 } = {
   tables: {
+    browser_sessions: {
+      tenantColumn: 'tenantId',
+      grants: {
+        [API_ROLE]: ['SELECT', 'INSERT', 'DELETE'],
+        [SYSTEM_ROLE]: ['SELECT', 'UPDATE', 'DELETE'],
+      },
+    },
+    realtime_tickets: {
+      tenantColumn: 'tenantId',
+      grants: {
+        [API_ROLE]: ['SELECT', 'INSERT', 'DELETE'],
+        [SYSTEM_ROLE]: ['SELECT', 'UPDATE', 'DELETE'],
+      },
+    },
     tenants: {
       tenantColumn: 'id',
       grants: {
@@ -120,6 +134,16 @@ export const POSTURE: {
       owner: MIGRATION_OWNER,
       execute: [API_ROLE, WORKER_ROLE, SYSTEM_ROLE],
     },
+    'purge_browser_credentials(integer)': {
+      owner: SYSTEM_ROLE,
+      execute: [API_ROLE],
+    },
+    'auth_session(bytea)': { owner: SYSTEM_ROLE, execute: [API_ROLE] },
+    'redeem_realtime_ticket(bytea)': {
+      owner: SYSTEM_ROLE,
+      execute: [API_ROLE],
+    },
+    'notify_session_revoked()': { owner: MIGRATION_OWNER, execute: [] },
     'auth_tenant(text)': { owner: SYSTEM_ROLE, execute: [API_ROLE] },
     'webhook_tenant(uuid)': { owner: SYSTEM_ROLE, execute: [API_ROLE] },
     'due_schedule_tenants(uuid,integer)': {

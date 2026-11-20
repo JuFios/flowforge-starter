@@ -11,7 +11,7 @@ import {
   Res,
 } from '@nestjs/common';
 import type { Response } from 'express';
-import { ApiKeyGuard } from '../auth/api-key.guard';
+import { TenantAuthGuard } from '../auth/api-key.guard';
 import { RateLimit } from '../limits/rate-limit.guard';
 import { CurrentTenant } from '../auth/current-tenant.decorator';
 import { Tenant } from '../entities';
@@ -22,7 +22,7 @@ import { ListExecutionsQuery } from './list-executions.query';
 import { RunInputPipe } from './run-input.pipe';
 
 @Controller()
-@RateLimit('tenant', { before: [ApiKeyGuard] })
+@RateLimit('tenant', { before: [TenantAuthGuard] })
 export class ExecutionsController {
   constructor(
     private readonly executions: ExecutionsService,
