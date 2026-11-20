@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { exceedsJsonDepth, MAX_STEP_RESULT_DEPTH } from '../common/json-depth';
+import { findUnstorable } from '../common/storable-text';
 import { StepDefinition } from '../entities';
 import { isolatedTransform } from './isolated-transform';
 import { outboundHttp } from './outbound-http';
@@ -28,6 +29,7 @@ export { StepError } from './step-error';
 export interface StepRunOptions {
   /** Скасування кроку (втрата lease, завершення воркера). */
   signal?: AbortSignal;
+  execution?: { executionId: string; tenantId: string };
   /** Стабільний ключ ідемпотентності кроку (для `http` — заголовок `Idempotency-Key`). */
   idempotencyKey?: string;
 }
@@ -39,20 +41,28 @@ export class StepExecutor {
   async execute(
     step: StepDefinition,
     ctx: StepContext,
-    { signal, idempotencyKey }: StepRunOptions = {},
+    { signal, idempotencyKey, execution }: StepRunOptions = {},
   ): Promise<unknown> {
     switch (step.type) {
-      case 'log':
-        this.logger.log(
-          renderTemplate(
-            step.message,
-            ctx,
-            MAX_LOG_MESSAGE_LENGTH * 4,
-            'log message is too large',
-            MAX_LOG_MESSAGE_LENGTH,
-          ),
+      case 'log': {
+        const message = renderTemplate(
+          step.message,
+          ctx,
+          MAX_LOG_MESSAGE_LENGTH * 4,
+          'log message is too large',
+          MAX_LOG_MESSAGE_LENGTH,
         );
-        return { logged: true };
+        if (findUnstorable(message))
+          throw new StepError(
+            'log message contains invalid Unicode or U+0000',
+            false,
+          );
+        this.logger.log(
+          { ...execution, stepId: step.id, length: message.length },
+          'log step recorded its message',
+        );
+        return { logged: true, message };
+      }
       case 'delay':
         // Пауза — довговічний таймер у черзі (JobRunnerService), а не очікування в процесі.
         throw new StepError(

@@ -20,7 +20,7 @@ describe('log step keeps tenant text out of the operator log', () => {
 
   beforeAll(async () => {
     ds = await openTestDataSource();
-    apiApp = await startApp(AppModule);
+    apiApp = await startApp(AppModule, { captureLogs: true });
     await receiver.start();
   });
 
@@ -99,10 +99,12 @@ describe('log step keeps tenant text out of the operator log', () => {
       message,
     });
 
-    const logText = JSON.stringify(worker.logs);
+    // Обидва Nest-застосунки в цьому тесті ділять фоновий логер процесу.
+    const records = [...apiApp.logs, ...worker.logs];
+    const logText = JSON.stringify(records);
     expect(logText).not.toContain(inputMarker);
     expect(logText).not.toContain(responseMarker);
-    const event = worker.logs.find(
+    const event = records.find(
       (line) => line.msg === 'log step recorded its message',
     );
     expect(event).toMatchObject({
@@ -120,7 +122,7 @@ describe('log step keeps tenant text out of the operator log', () => {
     ).toBe(404);
   });
 
-  it('logs a lone surrogate from a previous response as U+FFFD, the value the previous step stored', async () => {
+  it('uses the sanitized checkpoint text from a previous HTTP step', async () => {
     // Екранований одиночний сурогат: JSON.parse дає рядок, який jsonb не прийме. Чекпоінт http
     // зберігає U+FFFD, і крок log бачить саме збережене значення.
     receiver.respond = (_req, res) =>
