@@ -1,6 +1,6 @@
 'use client';
 import Link from 'next/link';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { apiRequest, describeRejection, goToLogin } from '@/lib/client-api';
 import type {
   Page,
@@ -35,42 +35,51 @@ function Results({ path, workflows }: { path: string; workflows: boolean }) {
     [loading, busy] = useState(true),
     [error, fail] = useState('');
   const active = useRef<AbortController>();
-  async function read(after: string | null) {
-    active.current?.abort();
-    const ctrl = new AbortController();
-    active.current = ctrl;
-    busy(true);
-    fail('');
-    const result = await apiRequest<Page<Item>>(
-      'GET',
-      path + (after ? '&cursor=' + encodeURIComponent(after) : ''),
-      { signal: ctrl.signal },
-    );
-    if (ctrl.signal.aborted) return;
-    busy(false);
-    if (result.kind === 'session_expired') return goToLogin();
-    if (result.kind === 'ok') {
-      setItems((old) =>
-        after ? [...old, ...result.data.items] : result.data.items,
+  const interruptedPage = useRef<{ after: string | null }>();
+  const read = useCallback(
+    async (after: string | null) => {
+      active.current?.abort();
+      const ctrl = new AbortController();
+      active.current = ctrl;
+      interruptedPage.current = { after };
+      busy(true);
+      fail('');
+      const result = await apiRequest<Page<Item>>(
+        'GET',
+        path + (after ? '&cursor=' + encodeURIComponent(after) : ''),
+        { signal: ctrl.signal },
       );
-      setCursor(result.data.nextCursor);
-    } else if (result.kind !== 'aborted')
-      fail(
-        result.kind === 'rejected' ? describeRejection(result) : result.message,
-      );
-  }
+      if (ctrl.signal.aborted) return;
+      active.current = undefined;
+      if (result.kind !== 'network') interruptedPage.current = undefined;
+      busy(false);
+      if (result.kind === 'session_expired') return goToLogin();
+      if (result.kind === 'ok') {
+        setItems((old) =>
+          after ? [...old, ...result.data.items] : result.data.items,
+        );
+        setCursor(result.data.nextCursor);
+      } else if (result.kind !== 'aborted')
+        fail(
+          result.kind === 'rejected'
+            ? describeRejection(result)
+            : result.message,
+        );
+    },
+    [path],
+  );
   useEffect(() => {
     void read(null);
     function online() {
-      void read(null);
+      const page = interruptedPage.current;
+      if (page) void read(page.after);
     }
     window.addEventListener('online', online);
     return () => {
       active.current?.abort();
       window.removeEventListener('online', online);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- батько перемонтовує список за ключем повного запиту
-  }, []);
+  }, [read]);
   return (
     <section
       aria-label={workflows ? 'Список процесів' : 'Список виконань'}
@@ -131,7 +140,8 @@ function Results({ path, workflows }: { path: string; workflows: boolean }) {
                       <small>
                         <time dateTime={item.createdAt}>
                           {dateTime.format(new Date(item.createdAt))}
-                        </time>
+                        </time>{' '}
+                        · <code title={item.id}>{item.id.slice(0, 8)}</code>
                       </small>
                     </td>
                     <td className="wide-cell">{triggers[item.trigger]}</td>

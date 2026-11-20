@@ -3,7 +3,11 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { SessionsController } from './sessions/sessions.controller';
 import { SessionsService } from './sessions/sessions.service';
-import { ApiKeyGuard, TenantAuthGuard } from './auth/api-key.guard';
+import {
+  ApiKeyGuard,
+  BrowserSessionGuard,
+  TenantAuthGuard,
+} from './auth/api-key.guard';
 import {
   EnvironmentVariables,
   validateApiEnv,
@@ -102,6 +106,7 @@ class ApiEnvironmentCheck implements OnModuleInit {
   providers: [
     ApiEnvironmentCheck,
     ApiKeyGuard,
+    BrowserSessionGuard,
     TenantAuthGuard,
     SessionsService,
     WorkflowsService,

@@ -132,6 +132,28 @@ describe('tenant request rate limit', () => {
     );
   });
 
+  it('keeps the revocation quota for requests authenticated with a browser session', async () => {
+    const login = await fetch(apiA.baseUrl + '/sessions', {
+      method: 'POST',
+      headers: { 'x-api-key': tenant.apiKey },
+    });
+    expect(login.status).toBe(201);
+    const { token } = (await login.json()) as { token: string };
+
+    const rejected = await fetch(apiA.baseUrl + '/sessions/current', {
+      method: 'DELETE',
+      headers: { 'x-api-key': tenant.apiKey },
+    });
+    expect(rejected.status).toBe(401);
+
+    const revoked = await fetch(apiB.baseUrl + '/sessions/current', {
+      method: 'DELETE',
+      headers: { authorization: 'Bearer ' + token },
+    });
+    expect(revoked.status).toBe(204);
+    expect(revoked.headers.get('x-ratelimit-remaining')).toBe('59');
+  });
+
   it('admits exactly the limit out of 30 concurrent requests to two instances', async () => {
     await limit('rateLimit', 10);
     const statuses = await Promise.all(

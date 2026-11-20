@@ -10,6 +10,7 @@ import {
 } from '@nestjs/common';
 import {
   ApiKeyGuard,
+  BrowserSessionGuard,
   TenantAuthGuard,
   TenantRequest,
 } from '../auth/api-key.guard';
@@ -28,7 +29,7 @@ export class SessionsController {
 
   @Delete('sessions/current')
   @HttpCode(204)
-  @RateLimit('session_revoke', { before: [TenantAuthGuard] })
+  @RateLimit('session_revoke', { before: [BrowserSessionGuard] })
   revoke(@Req() req: TenantRequest) {
     return this.sessions.revoke(req.tenant.id, req.sessionId);
   }

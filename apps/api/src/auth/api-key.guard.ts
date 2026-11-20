@@ -34,7 +34,7 @@ export const MAX_API_KEY_LENGTH = 256;
  */
 @Injectable()
 export class ApiKeyGuard implements CanActivate {
-  protected readonly allowSession: boolean = false;
+  protected readonly credentials: 'api-key' | 'either' | 'session' = 'api-key';
   constructor(
     private readonly system: SystemDb,
     private readonly db: TenantDb,
@@ -43,10 +43,11 @@ export class ApiKeyGuard implements CanActivate {
 
   async canActivate(ctx: ExecutionContext): Promise<boolean> {
     const req = ctx.switchToHttp().getRequest<TenantRequest>();
-    const key = req.headers['x-api-key'];
+    const sessionOnly = this.credentials === 'session';
+    const key = sessionOnly ? undefined : req.headers['x-api-key'];
     const authorization = req.headers.authorization;
     const bearer =
-      this.allowSession &&
+      this.credentials !== 'api-key' &&
       key === undefined &&
       typeof authorization === 'string' &&
       /^Bearer ffs_[0-9a-f]{64}$/.test(authorization)
@@ -55,7 +56,9 @@ export class ApiKeyGuard implements CanActivate {
     if (!bearer && (typeof key !== 'string' || key.length === 0))
       return this.authFailures.reject(
         ctx,
-        new UnauthorizedException('Відсутній x-api-key'),
+        new UnauthorizedException(
+          sessionOnly ? 'Потрібна браузерна сесія' : 'Відсутній x-api-key',
+        ),
       );
     // Завелике значення не може бути виданим ключем: не рахуємо хеш і не шукаємо його.
     const session = bearer
@@ -81,7 +84,9 @@ export class ApiKeyGuard implements CanActivate {
     if (!found)
       return this.authFailures.reject(
         ctx,
-        new UnauthorizedException('Невірний API-ключ'),
+        new UnauthorizedException(
+          sessionOnly ? 'Невірна браузерна сесія' : 'Невірний API-ключ',
+        ),
       );
     req.tenant = found.tenant;
     req.limits = found.limits;
@@ -92,5 +97,11 @@ export class ApiKeyGuard implements CanActivate {
 /** Доступ браузера лише до маршрутів workflow і виконань. */
 @Injectable()
 export class TenantAuthGuard extends ApiKeyGuard {
-  protected readonly allowSession = true;
+  protected readonly credentials = 'either';
+}
+
+/** Відкликання потребує ідентифікованої сесії до перевірки квоти. */
+@Injectable()
+export class BrowserSessionGuard extends ApiKeyGuard {
+  protected readonly credentials = 'session';
 }
