@@ -5,10 +5,13 @@ import { AppModule } from './app.module';
 import { configureApp } from './bootstrap';
 import { EnvironmentVariables } from './config/env.validation';
 
+import { installOpenApi } from './openapi/document';
+
 async function bootstrap() {
   const app = configureApp(
     await NestFactory.create(AppModule, { bufferLogs: true }),
   );
+  installOpenApi(app);
   const port = app
     .get(ConfigService<EnvironmentVariables, true>)
     .get('PORT', { infer: true });
