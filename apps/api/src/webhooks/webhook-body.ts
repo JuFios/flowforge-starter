@@ -3,6 +3,10 @@ import {
   UnsupportedMediaTypeException,
 } from '@nestjs/common';
 import type { Request } from 'express';
+import {
+  findInexactNumber,
+  inexactNumberMessage,
+} from '../common/json-numbers';
 import { parseRunInput } from '../executions/run-input.pipe';
 
 const JSON_UTF8 =
@@ -17,12 +21,18 @@ export function parseWebhookBody(req: Request): Record<string, unknown> {
     throw new UnsupportedMediaTypeException();
   const bytes: unknown = req.body;
   if (!Buffer.isBuffer(bytes) || !bytes.length) return parseRunInput({});
+  let text: string;
   let body: unknown;
   try {
-    body = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+    text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    body = JSON.parse(text);
   } catch {
     throw new BadRequestException('Невалідний UTF-8 JSON');
   }
+  // Підписані байти мають означати те саме, що отримає виконання: число, яке змінилося б після
+  // розбору (1e400, ціле поза точністю double), — 400, а не інший вхід.
+  const inexact = findInexactNumber(text);
+  if (inexact) throw new BadRequestException(inexactNumberMessage(inexact));
   if (body === null)
     throw new BadRequestException(
       "Вхідні дані виконання мають бути JSON-об'єктом",
