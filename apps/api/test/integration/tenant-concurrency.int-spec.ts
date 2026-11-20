@@ -66,6 +66,28 @@ describe('tenant concurrent executions limit', () => {
     return tenant.id;
   }
 
+  /**
+   * Прогрів: `size` з'єднань пулу встановлено й зайнято одночасно. Чекає на **кожну** спробу:
+   * Promise.all відхилився б на першій відмові (напр., `too many clients`), поки решта ще
+   * підключаються, і ці з'єднання з'явилися б уже після `pool.destroy()` — сесії лишалися б у БД,
+   * а Jest не завершувався. Успішні з'єднання повертаються в пул, назовні — перша помилка БД.
+   */
+  async function warmUp(pool: DataSource, size: number): Promise<void> {
+    const runners = Array.from({ length: size }, () =>
+      pool.createQueryRunner(),
+    );
+    const attempts = await Promise.allSettled(runners.map((r) => r.connect()));
+    await Promise.all(
+      runners.map((runner, i) =>
+        attempts[i].status === 'fulfilled' ? runner.release() : undefined,
+      ),
+    );
+    const failure = attempts.find(
+      (a): a is PromiseRejectedResult => a.status === 'rejected',
+    );
+    if (failure) throw failure.reason;
+  }
+
   async function running(tenantId: string): Promise<number> {
     const [row]: Array<{ n: number }> = await owner.query(
       `SELECT count(*)::int AS n FROM jobs WHERE "tenantId" = $1 AND status = 'running'`,
@@ -94,12 +116,7 @@ describe('tenant concurrent executions limit', () => {
       ),
     ).initialize();
     try {
-      // Прогрів: кожне з'єднання пулу встановлено й зайнято одночасно.
-      const runners = Array.from({ length: size }, () =>
-        pool.createQueryRunner(),
-      );
-      await Promise.all(runners.map((r) => r.connect()));
-      await Promise.all(runners.map((r) => r.release()));
+      await warmUp(pool, size);
       const claimQueue = new JobQueueService(
         worker.app.get(TenantDb),
         new SystemDb(pool),
