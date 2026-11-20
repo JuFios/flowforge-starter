@@ -362,25 +362,31 @@ export class SchedulerService
       row.scheduleCursor,
       next,
       threshold,
+      row.now,
       row.missedRunPolicy,
     );
-    if (decision.kind === 'skip') {
-      const { lastMissed } = decision;
+    const skipped =
+      decision.kind === 'skip'
+        ? { first: next, last: decision.lastMissed }
+        : decision.skipped;
+    if (skipped)
       afterCommit.push(() => {
         this.metrics.firings.inc({ outcome: 'missed_skipped' });
         this.logger.warn(
           {
             workflowId,
-            firstSkipped: next.toISOString(),
-            lastSkipped: lastMissed.toISOString(),
+            firstSkipped: skipped.first.toISOString(),
+            lastSkipped: skipped.last.toISOString(),
           },
           'missed scheduled runs skipped by the workflow policy',
         );
       });
-      await this.save(em, row, lastMissed, schedule, afterCommit);
+    if (decision.kind === 'skip') {
+      await this.save(em, row, decision.lastMissed, schedule, afterCommit);
       return { attempt: 'skipped', created: false };
     }
-    // Вчасний момент і run_all — окреме виконання для `next`; run_once — одне за весь пропуск.
+    // Вчасний момент і run_all — окреме виконання для `next`; run_once — одне за весь пропуск;
+    // skip — перший вчасний момент разом із відкиданням пропущених (одна транзакція).
     const { at, cursor } = decision;
     if (decision.collapsed) {
       afterCommit.push(() => {

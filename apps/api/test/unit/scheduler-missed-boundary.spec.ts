@@ -27,7 +27,11 @@ interface Outcome {
   skips: number;
 }
 
-/** Проходи спрацювання одного workflow при незмінному часі БД — доки момент не стане майбутнім. */
+/**
+ * Проходи спрацювання одного workflow, доки момент не стане майбутнім. Кожен прохід — окрема
+ * транзакція з власним `clock_timestamp()`: з `clockStepMs > 0` час БД просувається на кожному
+ * читанні, як у живій базі.
+ */
 async function tick(
   cron: string,
   timezone: string,
@@ -35,10 +39,12 @@ async function tick(
   cursorMs: number,
   nowMs: number,
   graceMs: number,
+  clockStepMs = 0,
 ): Promise<Outcome> {
   const state = { cursor: new Date(cursorMs), nextFireAt: null as Date | null };
   const runs: number[] = [];
   let skips = 0;
+  let reads = 0;
   const em = {
     query: (sql: string, params: unknown[]) => {
       if (sql.trimStart().startsWith('SELECT'))
@@ -55,7 +61,7 @@ async function tick(
             nextFireAt: state.nextFireAt,
             scheduleBlockedSince: null,
             scheduleError: null,
-            now: new Date(nowMs),
+            now: new Date(nowMs + clockStepMs * reads++),
           },
         ]);
       if (sql.trimStart().startsWith('UPDATE workflows SET "scheduleCursor"')) {
@@ -81,7 +87,12 @@ async function tick(
     },
   } as unknown as ConfigService<EnvironmentVariables, true>;
   const metrics = {
-    firings: { inc: () => undefined },
+    // Відкидання `skip` рахується метрикою (після COMMIT), навіть коли прохід ще й запускає момент.
+    firings: {
+      inc: ({ outcome }: { outcome: string }) => {
+        if (outcome === 'missed_skipped') skips++;
+      },
+    },
     lag: { observe: () => undefined },
   } as unknown as SchedulerMetrics;
   const service = new SchedulerService(
@@ -102,11 +113,13 @@ async function tick(
     }
   ).fireIn.bind(service);
   for (let pass = 0; pass < 10_000; pass++) {
-    const { attempt } = await fireIn(em, 't', 'wf', []);
+    const afterCommit: Array<() => void> = [];
+    const { attempt } = await fireIn(em, 't', 'wf', afterCommit);
+    for (const run of afterCommit) run();
     if (attempt === 'idle')
       return { runs, cursor: state.cursor.getTime(), skips };
-    if (attempt === 'skipped') skips++;
-    else if (attempt !== 'fired') throw new Error(`unexpected ${attempt}`);
+    if (attempt !== 'fired' && attempt !== 'skipped')
+      throw new Error(`unexpected ${attempt}`);
   }
   throw new Error('the tick did not settle');
 }
@@ -170,6 +183,59 @@ describe('scheduler: the misfire grace edge', () => {
       grace,
     );
     expect(result.runs).toEqual(moments('* * * * * *', 'UTC', cursor, now));
+  });
+
+  // Час БД іде далі між транзакціями: окремий прохід для моменту на межі прочитав би годинник
+  // заново, і за мілісекунду момент став би пропущеним (сценарій незалежного ревʼю).
+  it.each([1, 7, 300])(
+    'skip: the edge moment still runs when the clock moves %i ms per transaction',
+    async (step) => {
+      const result = await tick(
+        '* * * * * *',
+        'UTC',
+        'skip',
+        cursor,
+        now,
+        grace,
+        step,
+      );
+      expect(result.runs[0]).toBe(edge);
+      expect(result.skips).toBe(1);
+      expect(new Set(result.runs).size).toBe(result.runs.length);
+      expect(result.runs.every((r) => r >= edge)).toBe(true);
+    },
+  );
+
+  it.each<MissedRunPolicy>(['run_once', 'run_all'])(
+    '%s: the edge moment runs once when the clock moves between transactions',
+    async (policy) => {
+      const result = await tick(
+        '* * * * * *',
+        'UTC',
+        policy,
+        cursor,
+        now,
+        grace,
+        1,
+      );
+      expect(result.runs.filter((r) => r === edge)).toEqual([edge]);
+      expect(new Set(result.runs).size).toBe(result.runs.length);
+    },
+  );
+
+  it('skip: nothing runs when no moment is on time yet', async () => {
+    // Хвилинний розклад, допуск 5 с: останній момент 00:00:00 пропущений, наступний — 00:01:00.
+    const result = await tick(
+      '* * * * *',
+      'UTC',
+      'skip',
+      iso('2025-12-31T23:50:00Z'),
+      now,
+      grace,
+    );
+    expect(result.runs).toEqual([]);
+    expect(result.skips).toBe(1);
+    expect(result.cursor).toBe(iso('2026-01-01T00:00:00Z'));
   });
 });
 
