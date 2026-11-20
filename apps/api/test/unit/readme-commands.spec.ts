@@ -1,11 +1,9 @@
 import { execFileSync } from 'node:child_process';
 import {
-  chmodSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
-  statSync,
   writeFileSync,
 } from 'node:fs';
 import { parseEnv } from 'node:util';
@@ -91,57 +89,40 @@ describe('README commands in a new terminal', () => {
   });
 
   /**
-   * Команда створення секретів (README «Запуск» і її копія в `.env.example`) з типовим umask 022:
-   * і новий файл, і наявний з правами 0644 після неї доступні лише власнику.
+   * Локальний запуск (README «Запуск»): `cp .env.example .env` дає робочий `.env` для compose —
+   * усі чотири секрети задано заглушками, а режим — development.
    */
-  it.each([
-    ['README', () => blocks('Запуск')[0]],
-    [
-      '.env.example',
-      () =>
-        readFileSync(join(__dirname, '../../../../.env.example'), 'utf8')
-          .split('\n')
-          .filter((line) => /^#\s{3,}/.test(line))
-          .map((line) => line.replace(/^#\s{3}/, ''))
-          .join('\n'),
-    ],
-  ])(
-    'creates the root .env readable only by its owner (%s)',
-    (_source, command) => {
-      const secrets = command()
-        .split('\n')
-        .filter((line) => !/docker-compose|docker compose/.test(line))
-        .join('\n');
-      expect(secrets).toContain('openssl rand');
-      for (const existing of [false, true]) {
-        const dir = mkdtempSync(join(tmpdir(), 'ff-secrets-'));
-        try {
-          if (existing) {
-            writeFileSync(join(dir, '.env'), 'OLD=1\n');
-            chmodSync(join(dir, '.env'), 0o644);
-          }
-          execFileSync('bash', ['-eu', '-c', `umask 022\n${secrets}`], {
-            cwd: dir,
-            env: { PATH: process.env.PATH, HOME: dir },
-            stdio: 'pipe',
-          });
-          expect(statSync(join(dir, '.env')).mode & 0o777).toBe(0o600);
-          expect(
-            Object.keys(
-              parseEnv(readFileSync(join(dir, '.env'), 'utf8')),
-            ).sort(),
-          ).toEqual([
-            'ADMIN_TOKEN',
-            'API_DB_PASSWORD',
-            'POSTGRES_PASSWORD',
-            'WORKER_DB_PASSWORD',
-          ]);
-        } finally {
-          rmSync(dir, { recursive: true, force: true });
-        }
-      }
-    },
-  );
+  it('prepares a working local .env from the example', () => {
+    const command = blocks('Запуск')[0]
+      .split('\n')
+      .filter((line) => !/docker compose|docker-compose/.test(line))
+      .join('\n');
+    expect(command).toContain('cp .env.example .env');
+    const dir = mkdtempSync(join(tmpdir(), 'ff-env-'));
+    try {
+      writeFileSync(
+        join(dir, '.env.example'),
+        readFileSync(join(__dirname, '../../../../.env.example')),
+      );
+      execFileSync('bash', ['-eu', '-c', command], {
+        cwd: dir,
+        env: { PATH: process.env.PATH, HOME: dir },
+        stdio: 'pipe',
+      });
+      const env = parseEnv(readFileSync(join(dir, '.env'), 'utf8'));
+      expect(env.NODE_ENV).toBe('development');
+      expect(env.PUBLISH_ADDRESS).toBe('127.0.0.1');
+      for (const name of [
+        'ADMIN_TOKEN',
+        'POSTGRES_PASSWORD',
+        'API_DB_PASSWORD',
+        'WORKER_DB_PASSWORD',
+      ])
+        expect(env[name]).toEqual(expect.any(String));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 
   // util.parseEnv, яким команди README читають .env, з'явився в Node 21.7.0 і перенесений у 20.12.0:
   // 21.0–21.6 його не мають, тож одного «>=20.12.0» замало.

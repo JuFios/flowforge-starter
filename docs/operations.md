@@ -5,16 +5,21 @@
 ## Запуск
 
 ```bash
-# один раз: випадкові секрети в .env поруч із docker-compose.yml (файл у .gitignore);
-# права 0600 — до запису секретів, тож інші локальні користувачі файл не прочитають
-touch .env && chmod 600 .env
-for v in ADMIN_TOKEN POSTGRES_PASSWORD API_DB_PASSWORD WORKER_DB_PASSWORD; do
-  printf '%s=%s\n' "$v" "$(openssl rand -hex 24)"; done > .env
-docker-compose up --build
+cp .env.example .env
+docker compose up --build
 ```
 
-Секрети — лише з `.env` у корені (або зі змінних оточення); без будь-якого з них compose
-завершується з підказкою. Шаблон — `.env.example` у корені. Кожен сервіс отримує тільки свої:
+Для локальної розробки цього досить. `.env.example` містить заглушки секретів, які дозволені лише поза `NODE_ENV=production`, а compose відкриває порти тільки на `127.0.0.1` (`PUBLISH_ADDRESS`). Під час старту з заглушками процеси пишуть у журнал попередження.
+
+**Production.** У `.env` (права `chmod 600 .env`) задайте:
+
+- `NODE_ENV=production` — з будь-якою заглушкою `migrate`, API й воркери не стартують;
+- `ADMIN_TOKEN`, `POSTGRES_PASSWORD`, `API_DB_PASSWORD`, `WORKER_DB_PASSWORD` — випадкові значення, напр. `openssl rand -hex 24` (паролі БД — лише літери й цифри, щонайменше 24);
+- `PUBLISH_ADDRESS` — адреса, на якій compose відкриває API та інтерфейс за TLS-проксі, `PUBLIC_ORIGIN=https://<домен>` і `COOKIE_SECURE=true`.
+
+`POSTGRES_PASSWORD` діє лише під час створення порожнього тому `pgdata`: змінити його пізніше можна лише в самій БД ([docs/operations.md](#оновлення-з-попередньої-версії), «Оновлення з попередньої версії»).
+
+Секрети — лише з `.env` у корені (або зі змінних оточення); без будь-якого з них compose завершується з підказкою. Кожен сервіс отримує тільки свої:
 
 | Секрет | Хто отримує | Навіщо |
 |---|---|---|
@@ -23,8 +28,8 @@ docker-compose up --build
 | `WORKER_DB_PASSWORD` | `migrate`, `worker` | роль `flowforge_worker` (без BYPASSRLS), якою ходить воркер |
 | `ADMIN_TOKEN` | лише `api` | службові ендпоінти `/tenants…` |
 
-Compose запускає API й воркери з `NODE_ENV=production`: приклад `change-me-admin` чи очевидна
-заглушка зупиняють API помилкою валідації (див. «Конфігурація»). Паролі ролей — лише латинські
+Compose бере `NODE_ENV` з `.env` (типово `development`). У `NODE_ENV=production` заглушка будь-якого секрету
+зупиняє `migrate`, API й воркери помилкою валідації (див. «Конфігурація»). Паролі ролей — лише латинські
 літери й цифри (щонайменше 24), бо потрапляють у URL підключення; `openssl rand -hex 24` підходить.
 CI перевіряє розподіл секретів за сервісами через `docker inspect` (job `compose`).
 
@@ -32,7 +37,7 @@ CI перевіряє розподіл секретів за сервісами 
 `db:provision` створює або оновлює runtime-ролі `flowforge_api` і `flowforge_worker`, і
 завершується з кодом 0) → `api` і два `worker` (healthy за `/ready`; кожен перед стартом перевіряє,
 що його роль не обходить RLS, див. 3.3.4) → `frontend` (healthy, коли відповідає сторінка).
-`docker-compose up -d --wait` повертає керування, коли всі сервіси healthy (або з помилкою). Схема БД будується лише міграціями,
+`docker compose up -d --wait` повертає керування, коли всі сервіси healthy (або з помилкою). Схема БД будується лише міграціями,
 тож система піднімається з порожнього тому.
 
 | Сервіс | Адреса |
@@ -46,12 +51,12 @@ CI перевіряє розподіл секретів за сервісами 
 ### Локальний запуск поза docker
 
 Потрібні Node.js 20.12+ (гілка 20) або 21.7+ (21 і новіші), Docker (для Postgres) та `.env` у корені з розділу вище. Діапазон Node.js — `engines` у `apps/api/package.json`: команди нижче й CLI міграцій читають `.env` через `util.parseEnv`, якого немає в 20.0–20.11 і 21.0–21.6. Якщо compose-стек
-уже запущено, звільніть порти: `docker-compose stop api worker frontend`.
+уже запущено, звільніть порти: `docker compose stop api worker frontend`.
 
 ```bash
 # з кореня репозиторію
 env -i HOME="$HOME" PATH="$PATH" bash -eu <<'LOCAL_API'
-docker-compose up -d postgres
+docker compose up -d postgres
 cd apps/api
 cp .env.example .env              # несекретні налаштування; секрети — нижче, окремо для процесу
 npm ci
@@ -96,13 +101,13 @@ LOCAL_WORKER
 репозиторію, `.env` з чотирма секретами — як у «Запуск»):
 
 ```bash
-docker-compose stop api worker frontend   # старі процеси не працюють під час міграції
-docker-compose up -d postgres
+docker compose stop api worker frontend   # старі процеси не працюють під час міграції
+docker compose up -d postgres
 # POSTGRES_PASSWORD діє лише для порожнього тому: власнику наявного тому пароль змінюють один раз.
 # Через локальний сокет контейнера старий пароль не потрібен; \password рахує verifier на клієнті,
 # тож пароль не потрапляє в лог Postgres. Введіть значення POSTGRES_PASSWORD із .env.
-docker-compose exec postgres psql -U flowforge -d flowforge -c '\password flowforge'
-docker-compose up --build --wait
+docker compose exec postgres psql -U flowforge -d flowforge -c '\password flowforge'
+docker compose up --build --wait
 ```
 
 Міграція `TenantIsolation` перед змінами перевіряє цілісність наявних даних і зупиняється з
@@ -463,13 +468,13 @@ npm run build && npm run migration:generate -- src/database/migrations/<Name>
 [«Запуск»](#запуск); Node.js на хості не потрібен:
 
 ```bash
-docker-compose up -d postgres
-docker-compose exec postgres psql -U flowforge -d flowforge -c '\password flowforge'  # див. «Оновлення з попередньої версії»
-docker-compose exec -T postgres psql -U flowforge -d flowforge -c \
+docker compose up -d postgres
+docker compose exec postgres psql -U flowforge -d flowforge -c '\password flowforge'  # див. «Оновлення з попередньої версії»
+docker compose exec -T postgres psql -U flowforge -d flowforge -c \
   "CREATE TABLE IF NOT EXISTS migrations (id SERIAL PRIMARY KEY, \"timestamp\" bigint NOT NULL, name varchar NOT NULL);
    INSERT INTO migrations (\"timestamp\", name) VALUES (1794920217603, 'InitialSchema1794920217603');"
-docker-compose run --rm --build migrate
-docker-compose up --build
+docker compose run --rm --build migrate
+docker compose up --build
 ```
 
 Те саме з хоста — після кроків [«Локальний запуск поза docker»](#локальний-запуск-поза-docker)
@@ -500,7 +505,7 @@ npm run test:all            # обидва набори
   прогоном глобальний setup створює базу `flowforge_test` (якщо її немає), **видаляє схему
   `public` і будує її міграціями з нуля** — тож кожен прогін заодно перевіряє міграції.
   Запуск дозволений лише на базі з суфіксом `_test`. Файли виконуються послідовно; кожен тест
-  очищає таблиці (`test/helpers/db.ts`). Локально достатньо `docker-compose up -d postgres` і
+  очищає таблиці (`test/helpers/db.ts`). Локально достатньо `docker compose up -d postgres` і
   адреси тестової БД власником (суперкористувачем) — `TEST_DATABASE_URL` з блоку вище (пароль
   береться з кореневого `.env`, тож блок працює й у новому терміналі).
 - **Ролі в тестах — як у compose.** Глобальний setup після міграцій створює runtime-ролі

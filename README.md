@@ -35,15 +35,21 @@
 ## Запуск
 
 ```bash
-# один раз: випадкові секрети в .env поруч із docker-compose.yml (файл у .gitignore);
-# права 0600 — до запису секретів, тож інші локальні користувачі файл не прочитають
-touch .env && chmod 600 .env
-for v in ADMIN_TOKEN POSTGRES_PASSWORD API_DB_PASSWORD WORKER_DB_PASSWORD; do
-  printf '%s=%s\n' "$v" "$(openssl rand -hex 24)"; done > .env
-docker-compose up --build
+cp .env.example .env
+docker compose up --build
 ```
 
-Порядок старту: `postgres` → `migrate` (міграції власником схеми й створення runtime-ролей без `BYPASSRLS`) → `api`, `api-2`, два `worker` (кожен перевіряє на старті, що його роль не обходить RLS) → `frontend`. Схема будується лише міграціями, тож система піднімається з порожнього тому. Кожен сервіс отримує лише свої секрети; приклад-заглушка в `NODE_ENV=production` зупиняє процес на старті.
+Для локальної розробки цього досить. `.env.example` містить заглушки секретів, які дозволені лише поза `NODE_ENV=production`, а compose відкриває порти тільки на `127.0.0.1` (`PUBLISH_ADDRESS`). Під час старту з заглушками процеси пишуть у журнал попередження.
+
+**Production.** У `.env` (права `chmod 600 .env`) задайте:
+
+- `NODE_ENV=production` — з будь-якою заглушкою `migrate`, API й воркери не стартують;
+- `ADMIN_TOKEN`, `POSTGRES_PASSWORD`, `API_DB_PASSWORD`, `WORKER_DB_PASSWORD` — випадкові значення, напр. `openssl rand -hex 24` (паролі БД — лише літери й цифри, щонайменше 24);
+- `PUBLISH_ADDRESS` — адреса, на якій compose відкриває API та інтерфейс за TLS-проксі, `PUBLIC_ORIGIN=https://<домен>` і `COOKIE_SECURE=true`.
+
+`POSTGRES_PASSWORD` діє лише під час створення порожнього тому `pgdata`: змінити його пізніше можна лише в самій БД ([docs/operations.md](docs/operations.md), «Оновлення з попередньої версії»).
+
+Порядок старту: `postgres` → `migrate` (міграції власником схеми й створення runtime-ролей без `BYPASSRLS`) → `api`, `api-2`, два `worker` (кожен перевіряє на старті, що його роль не обходить RLS) → `frontend`. Схема будується лише міграціями, тож система піднімається з порожнього тому. Кожен сервіс отримує лише свої секрети.
 
 | Сервіс | Адреса |
 |---|---|

@@ -31,7 +31,7 @@ it('passes only the secrets needed by each documented local command', () => {
       keys.map((k) => 'export ' + k + '=marker' + k).join('\n'),
     );
     writeFileSync(join(dir, 'apps/api/.env.example'), '');
-    writeFileSync(join(dir, 'docker-compose'), '#!/bin/sh\nexit 0\n', {
+    writeFileSync(join(dir, 'docker'), '#!/bin/sh\nexit 0\n', {
       mode: 0o700,
     });
     writeFileSync(

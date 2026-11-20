@@ -89,10 +89,12 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      # Як у README «Запуск»: усі секрети — випадкові, у .env поруч із docker-compose.yml.
+      # Як у README «Запуск» для production: NODE_ENV=production і випадкові секрети в .env.
       - name: Generate the secrets
         run: |
           touch .env && chmod 600 .env && : > .env
+          # Production-режим: заглушки з .env.example тут зупинили б migrate, API й воркери.
+          echo "NODE_ENV=production" >> .env
           for name in ADMIN_TOKEN POSTGRES_PASSWORD API_DB_PASSWORD WORKER_DB_PASSWORD; do
             value="$(openssl rand -hex 24)"
             echo "::add-mask::$value"
