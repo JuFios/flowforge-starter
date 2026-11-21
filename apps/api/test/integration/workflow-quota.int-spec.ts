@@ -4,7 +4,6 @@ import { RunningApp, startApp } from '../helpers/app';
 import { createTenant, openTestDataSource, truncateAll } from '../helpers/db';
 import { waitForBlocked } from '../helpers/transaction-barrier';
 import { TEST_ADMIN_TOKEN } from '../helpers/test-env';
-import { newCredentials } from '../helpers/credentials';
 
 /**
  * Квота тенанта на кількість workflow (беклог PR 6, P1): без неї тенант у межах rate limit
@@ -229,7 +228,6 @@ describe('workflow quota of a tenant', () => {
 
   it('accepts the quota when the tenant is created', async () => {
     const res = await admin('POST', '/tenants', {
-      ...newCredentials(),
       name: 'quota',
       limits: { maxWorkflows: 3 },
     });

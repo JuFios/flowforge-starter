@@ -1,10 +1,10 @@
 import { Injectable } from '@nestjs/common';
+import { randomBytes, randomUUID } from 'node:crypto';
 import type { EntityManager } from 'typeorm';
 import {
+  assertCanRotate,
   keyViews,
   planRevoke,
-  planRotate,
-  RotationResult,
   SigningKeyView,
 } from '../common/signing-keys';
 import { TenantDb } from '../tenancy/tenant-db';
@@ -30,46 +30,27 @@ export class WebhookKeysService {
     );
   }
 
-  rotate(tenantId: string, secret: string): Promise<RotationResult> {
-    return this.db.run(tenantId, (em) => this.rotateIn(em, tenantId, secret));
+  rotate(tenantId: string): Promise<{ id: string; secret: string }> {
+    return this.db.run(tenantId, (em) => this.rotateIn(em, tenantId));
   }
 
   revoke(tenantId: string, keyId: string): Promise<void> {
     return this.db.run(tenantId, (em) => this.revokeIn(em, tenantId, keyId));
   }
 
-  /**
-   * Ротація в транзакції тенанта, яку відкрив викликач: секрет `next` передає клієнт, відповідь
-   * містить лише ID (ТЗ 4). Повтор із тим самим секретом після втраченої відповіді повертає той
-   * самий ключ (`created: false`).
-   */
+  /** Ротація в транзакції тенанта, яку відкрив викликач. */
   async rotateIn(
     em: EntityManager,
     tenantId: string,
-    secret: string,
-  ): Promise<RotationResult> {
-    const [row]: Array<{
-      webhookKeyId: string;
-      webhookSecret: string;
-      nextWebhookKeyId: string | null;
-      nextWebhookSecret: string | null;
-    }> = await em.query(
-      'SELECT "webhookKeyId","webhookSecret","nextWebhookKeyId","nextWebhookSecret" FROM tenants WHERE id=$1 FOR NO KEY UPDATE',
-      [tenantId],
-    );
-    const plan = planRotate(
-      { id: row.webhookKeyId, secret: row.webhookSecret },
-      row.nextWebhookKeyId && row.nextWebhookSecret
-        ? { id: row.nextWebhookKeyId, secret: row.nextWebhookSecret }
-        : null,
-      secret,
-    );
-    if (!plan.created) return plan;
+  ): Promise<{ id: string; secret: string }> {
+    assertCanRotate(pair(await keyIds(em, tenantId, true)));
+    const id = randomUUID(),
+      secret = randomBytes(24).toString('hex');
     await em.query(
       'UPDATE tenants SET "nextWebhookKeyId"=$2,"nextWebhookSecret"=$3 WHERE id=$1',
-      [tenantId, plan.id, secret],
+      [tenantId, id, secret],
     );
-    return plan;
+    return { id, secret };
   }
 
   /** Відкликання; повтор для вже відсутнього ключа нічого не змінює. */

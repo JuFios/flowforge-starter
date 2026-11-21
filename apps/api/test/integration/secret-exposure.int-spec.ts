@@ -3,7 +3,6 @@ import { DataSource } from 'typeorm';
 import { SchedulerService } from '../../src/scheduler/scheduler.service';
 import { RunningApp, startApp } from '../helpers/app';
 import { openTestDataSource, truncateAll } from '../helpers/db';
-import { newSecret, tenantBody } from '../helpers/credentials';
 import { Receiver } from '../helpers/queue';
 import { TEST_ADMIN_TOKEN } from '../helpers/test-env';
 
@@ -15,11 +14,13 @@ interface Exchange {
 }
 
 /**
- * ТЗ 4: «Секрети не потрапляють у логи й відповіді API». Інваріант класу, незалежний від маршруту:
- * жодна відповідь (тіло чи заголовок) і жоден рядок логу не містить значення, яким можна
- * автентифікуватися як тенант (API-ключ, хеш якого збережено) або підписати чи перевірити
- * webhook і сповіщення (секрети в БД). Сценарій проходить видачу, ротацію, читання, відкликання й
- * помилки (400, 409, 413) усіх трьох наборів облікових даних.
+ * ТЗ 4: «Секрети не потрапляють у логи й відповіді API». Трактування (README, «Секрети й межа
+ * §4»): новий секрет сервер показує рівно один раз — власнику, у відповіді, що його створює
+ * (`Cache-Control: no-store`), — і більше ніде. Інваріант класу, незалежний від маршруту: жодна
+ * інша відповідь (тіло чи заголовок) і жоден рядок логу не містить значення, яким можна
+ * автентифікуватися як тенант (API-ключ, хеш якого збережено) або підписати чи перевірити webhook і
+ * сповіщення (секрети в БД). Сценарій проходить видачу, ротацію, читання, відкликання й помилки
+ * (400, 409, 413) усіх трьох наборів облікових даних.
  */
 describe('secret exposure', () => {
   let ds: DataSource;
@@ -118,15 +119,35 @@ describe('secret exposure', () => {
     for (const s of secrets) seen.secrets.add(s);
   }
 
+  /** Відповідь, що створює новий секрет: єдине місце, де його видно (один раз). */
+  const ISSUING = new Set([
+    'POST /tenants',
+    'POST /tenants/me/webhook-secrets',
+    'POST /tenants/me/notifications/secrets',
+  ]);
+  const issuing = (ex: Exchange, index: number) =>
+    (ISSUING.has(ex.route) && ex.status === 201) ||
+    // Перше налаштування сповіщень створює ключ; повторні PUT лише оновлюють адресу.
+    (ex.route === 'PUT /tenants/me/notifications' &&
+      ex.status === 200 &&
+      exchanges.findIndex((e) => e.route === ex.route && e.status === 200) ===
+        index);
+
   function assertNoCredentials() {
     const leaks: string[] = [];
-    for (const ex of exchanges)
+    exchanges.forEach((ex, index) => {
+      if (issuing(ex, index)) {
+        if (ex.headers['cache-control'] !== 'no-store')
+          leaks.push(`${ex.route}: issued without no-store`);
+        return;
+      }
       for (const s of strings([ex.headers, ex.body])) {
         const hash = createHash('sha256').update(s).digest('hex');
         if (seen.hashes.has(hash)) leaks.push(`${ex.route}: API key`);
         for (const secret of seen.secrets)
           if (s.includes(secret)) leaks.push(`${ex.route}: signing secret`);
       }
+    });
     const logText = JSON.stringify(app.logs);
     for (const secret of seen.secrets)
       if (logText.includes(secret)) leaks.push('log: signing secret');
@@ -136,20 +157,29 @@ describe('secret exposure', () => {
     expect([...new Set(leaks)]).toEqual([]);
   }
 
-  /** Облікові дані генерує клієнт; запам'ятовуємо API-ключ створеного тенанта. */
-  const issued = new Map<string, string>();
-  function newTenant(name: string): Record<string, unknown> {
-    const body = tenantBody(name);
-    issued.set(name, body.apiKey);
-    return body;
+  /** Кожен виданий секрет справді з'явився у своїй відповіді видачі (і лише там). */
+  function assertIssuedOnce() {
+    const issued = exchanges.filter(issuing);
+    expect(issued.map((ex) => ex.route).sort()).toEqual(
+      [
+        'POST /tenants',
+        'POST /tenants/me/notifications/secrets',
+        'POST /tenants/me/webhook-secrets',
+        'PUT /tenants/me/notifications',
+      ].sort(),
+    );
+    const shown = strings(issued.map((ex) => ex.body));
+    for (const secret of seen.secrets)
+      expect(shown.some((s) => s === secret)).toBe(true);
   }
-  function apiKeyOf(created: Exchange): string {
-    return issued.get((created.body as { name: string }).name)!;
-  }
-  const rotationBody = () => ({ secret: newSecret() });
-  const settingsBody = (url: string) => ({ url, secret: newSecret() });
 
-  it('never returns or logs a credential while issuing, rotating, reading and rejecting', async () => {
+  const apiKeyOf = (created: Exchange) =>
+    (created.body as { apiKey: string }).apiKey;
+  const rotationBody = () => undefined;
+  const settingsBody = (url: string) => ({ url });
+  const newTenant = (name: string) => ({ name });
+
+  it('shows each new secret only once, in its issuing response, and never in other responses or logs', async () => {
     const admin = { 'x-admin-token': TEST_ADMIN_TOKEN };
     const created = await send('POST', '/tenants', admin, newTenant('one'));
     expect(created.status).toBe(201);
@@ -228,5 +258,6 @@ describe('secret exposure', () => {
 
     await remember();
     assertNoCredentials();
+    assertIssuedOnce();
   });
 });

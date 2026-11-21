@@ -14,14 +14,12 @@ import {
 import { OutboxFullException } from '../limits/limit-exceptions';
 import { LimitsMetrics } from '../limits/limits.metrics';
 import {
+  assertCanRotate,
   keyViews,
   planRevoke,
-  planRotate,
-  RotationResult,
   SigningKeyView,
 } from '../common/signing-keys';
-import { safeEqual } from '../common/safe-equal';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import type { EntityManager } from 'typeorm';
 import { assertNotificationUrl } from '../engine/outbound-http';
 import { StepError } from '../engine/step-error';
@@ -95,10 +93,13 @@ const EVENT_COLUMNS = `id, "executionId", sequence, type, status, attempts,
   CASE WHEN status = 'pending' THEN "nextAttemptAt" END AS "nextAttemptAt",
   "lastError", "lastStatus", "correlationId", "createdAt", "deliveredAt"`;
 
+/** Секрет підпису: 32 випадкові байти, hex (показується лише раз). */
+const newSecret = () => randomBytes(32).toString('hex');
+
 /**
  * Налаштування сповіщень і журнал подій тенанта (README 3.3.9). Усе — у транзакції тенанта (RLS) з
- * явним предикатом `tenantId`. Секрети підпису генерує тенант і передає в тілі першого налаштування
- * чи ротації; сервер їх не повертає ніде: ні у відповідях, ні в помилках, ні в логах (ТЗ 4).
+ * явним предикатом `tenantId`. Секрети підпису повертаються лише в момент створення (першого
+ * налаштування чи ротації) і більше ніде: не в читанні, не в помилках, не в логах.
  *
  * Порядок блокувань: рядок налаштувань → події (так само, як у захопленні спроби).
  */
@@ -117,75 +118,33 @@ export class NotificationsService {
 
   /**
    * Створює або змінює налаштування. URL перевіряється до транзакції (DNS — поза з'єднанням із
-   * БД). Перше налаштування вимагає секрет підпису від тенанта; повтор із тим самим секретом —
-   * звичайне оновлення (втрачена відповідь), інший секрет — 409 (новий ключ — лише ротацією).
+   * БД). Перше налаштування повертає ключ підпису разом із секретом — єдиний раз.
    */
   async put(
     tenantId: string,
     input: NotificationSettingsDto,
-  ): Promise<SettingsView> {
+  ): Promise<SettingsView & { secret?: string }> {
     await this.checkUrl(input.url);
     return this.db.run(tenantId, async (em) => {
-      let current = await this.currentSecret(em, tenantId);
-      if (current === undefined) {
-        if (input.secret === undefined)
-          throw new BadRequestException([
-            'secret is required to create notification settings',
-          ]);
-        const [inserted]: SettingsRow[] = await em.query(
-          `INSERT INTO notification_settings ("tenantId", url, enabled, "secretKeyId", secret, "dueAt")
-           VALUES ($1,$2,COALESCE($3,true),$4,$5,
-             -- Події, що чекали без налаштувань, — до відправника з найранішого моменту повтору.
-             (SELECT min("nextAttemptAt") FROM outbox_events
-               WHERE "tenantId" = $1 AND status = 'pending'))
-           ON CONFLICT ("tenantId") DO NOTHING
-           RETURNING url, enabled, revision, "secretKeyId", "nextSecretKeyId"`,
-          [
-            tenantId,
-            input.url,
-            input.enabled ?? null,
-            randomUUID(),
-            input.secret,
-          ],
-        );
-        if (inserted) return view(inserted);
-        // Паралельне перше налаштування встигло першим: далі — як оновлення його рядка.
-        current = await this.currentSecret(em, tenantId);
-        if (current === undefined)
-          throw new ConflictException('Налаштування щойно видалено');
-      }
-      if (input.secret !== undefined && !safeEqual(input.secret, current))
-        throw new ConflictException(
-          'Секрет уже налаштовано; новий ключ додає ротація',
-        );
-      // UPDATE … RETURNING у TypeORM повертає пару [рядки, кількість].
-      const [[row]]: [SettingsRow[], number] = await em.query(
-        `UPDATE notification_settings AS s SET
-           url = $2, enabled = COALESCE($3, s.enabled),
-           revision = s.revision + (s.url <> $2 OR ($3 IS TRUE AND NOT s.enabled))::integer,
-           "dueAt" = CASE WHEN $3 IS TRUE AND NOT s.enabled
-             THEN LEAST(s."dueAt", (SELECT min("nextAttemptAt") FROM outbox_events
-                                     WHERE "tenantId" = $1 AND status = 'pending'))
-             ELSE s."dueAt" END,
-           "updatedAt" = now()
-         WHERE "tenantId" = $1
+      const secret = newSecret();
+      const keyId = randomUUID();
+      const [row]: SettingsRow[] = await em.query(
+        `INSERT INTO notification_settings AS s ("tenantId", url, enabled, "secretKeyId", secret, "dueAt")
+         VALUES ($1,$2,COALESCE($3,true),$4,$5,
+           -- Події, що чекали без налаштувань, — до відправника з найранішого моменту повтору.
+           (SELECT min("nextAttemptAt") FROM outbox_events
+             WHERE "tenantId" = $1 AND status = 'pending'))
+         ON CONFLICT ("tenantId") DO UPDATE SET
+           url=EXCLUDED.url, enabled=COALESCE($3,s.enabled),
+           revision=s.revision + (s.url <> EXCLUDED.url OR ($3 IS TRUE AND NOT s.enabled))::integer,
+           "dueAt"=CASE WHEN $3 IS TRUE AND NOT s.enabled
+             THEN LEAST(s."dueAt", EXCLUDED."dueAt") ELSE s."dueAt" END,
+           "updatedAt"=now()
          RETURNING url, enabled, revision, "secretKeyId", "nextSecretKeyId"`,
-        [tenantId, input.url, input.enabled ?? null],
+        [tenantId, input.url, input.enabled ?? null, keyId, secret],
       );
-      return view(row);
+      return row.secretKeyId === keyId ? { ...view(row), secret } : view(row);
     });
-  }
-
-  /** Чинний секрет під блокуванням рядка налаштувань або undefined, якщо їх немає. */
-  private async currentSecret(
-    em: EntityManager,
-    tenantId: string,
-  ): Promise<string | undefined> {
-    const [row]: Array<{ secret: string }> = await em.query(
-      'SELECT secret FROM notification_settings WHERE "tenantId" = $1 FOR NO KEY UPDATE',
-      [tenantId],
-    );
-    return row?.secret;
   }
 
   /**
@@ -218,7 +177,10 @@ export class NotificationsService {
    * великий беклог не тримав блокування й не впирався в statement_timeout.
    */
   async discard(tenantId: string): Promise<{ discarded: number }> {
-    const cutoff = new Date();
+    // Межа «до цього запиту» — за годинником БД, що пише createdAt, а не процесу API.
+    const [{ cutoff }] = await this.db.run(tenantId, (em) =>
+      em.query<Array<{ cutoff: Date }>>('SELECT now() AS cutoff'),
+    );
     let discarded = 0;
     for (;;) {
       const count = await this.db.run(tenantId, async (em) => {
@@ -236,37 +198,18 @@ export class NotificationsService {
     }
   }
 
-  /**
-   * Ротація: новий ключ `next` із секретом тенанта; підписи — обома, доки не відкличуть. Повтор із
-   * тим самим секретом повертає той самий ID (`created: false`).
-   */
-  async rotate(tenantId: string, secret: string): Promise<RotationResult> {
+  /** Ротація: новий ключ `next` (секрет — лише в цій відповіді); підписи — обома, доки не відкличуть. */
+  async rotate(tenantId: string): Promise<{ id: string; secret: string }> {
     return this.db.run(tenantId, async (em) => {
-      const [row]: Array<{
-        secretKeyId: string;
-        secret: string;
-        nextSecretKeyId: string | null;
-        nextSecret: string | null;
-      }> = await em.query(
-        `SELECT "secretKeyId", secret, "nextSecretKeyId", "nextSecret"
-           FROM notification_settings WHERE "tenantId" = $1 FOR NO KEY UPDATE`,
-        [tenantId],
+      assertCanRotate(pair(await this.settings(em, tenantId, true)));
+      const id = randomUUID(),
+        secret = newSecret();
+      await em.query(
+        `UPDATE notification_settings SET "nextSecretKeyId" = $2, "nextSecret" = $3, "updatedAt" = now()
+          WHERE "tenantId" = $1`,
+        [tenantId, id, secret],
       );
-      if (!row) throw new NotFoundException('Сповіщення не налаштовано');
-      const plan = planRotate(
-        { id: row.secretKeyId, secret: row.secret },
-        row.nextSecretKeyId && row.nextSecret
-          ? { id: row.nextSecretKeyId, secret: row.nextSecret }
-          : null,
-        secret,
-      );
-      if (plan.created)
-        await em.query(
-          `UPDATE notification_settings SET "nextSecretKeyId" = $2, "nextSecret" = $3, "updatedAt" = now()
-            WHERE "tenantId" = $1`,
-          [tenantId, plan.id, secret],
-        );
-      return plan;
+      return { id, secret };
     });
   }
 
@@ -365,11 +308,8 @@ export class NotificationsService {
 
   /**
    * Надіслати подію ще раз негайно (той самий ID і байти): для недоставленої — без очікування
-   * backoff, для доставленої чи скасованої — повторна доставка. Спроба, що триває, — 409.
-   */
-  /**
-   * Надіслати подію ще раз негайно. Без налаштувань подія чекає `pending` і піде, щойно тенант
-   * налаштує endpoint (пауза, а не відмова).
+   * backoff, для доставленої чи скасованої — повторна доставка в межах квоти outbox. Спроба, що
+   * триває, — 409. Без налаштувань подія чекає `pending` і піде, щойно тенант налаштує endpoint.
    */
   async redeliver(tenantId: string, id: string): Promise<EventView> {
     return this.db.run(tenantId, async (em) => {

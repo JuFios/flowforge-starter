@@ -68,13 +68,10 @@ const contracts: Record<string, Contract> = {
     errors: [503],
   },
   'post /tenants': {
-    title:
-      'Створити тенанта з API-ключем і секретом webhook, які згенерував оператор',
+    title: 'Створити тенанта й одноразово отримати обидва секрети',
     auth: admin,
-    result: 'Tenant',
+    result: 'TenantCredentials',
     body: 'CreateTenant',
-    errors: [409],
-    replay: 'Повтор того самого запиту: чинний тенант',
   },
   'get /tenants/{id}/limits': {
     title: 'Прочитати чинні ліміти та перевизначення',
@@ -207,12 +204,10 @@ const contracts: Record<string, Contract> = {
     result: 'SigningKeys',
   },
   ['post ' + keys]: {
-    title: 'Додати наступний ключ вхідних webhook із секретом клієнта',
+    title: 'Видати наступний секрет вхідних webhook один раз',
     auth: key,
     result: 'NewKey',
-    body: 'NewSecret',
     errors: [409],
-    replay: 'Повтор із тим самим секретом: той самий ключ',
   },
   ['delete ' + keys + '/{keyId}']: {
     title:
@@ -229,12 +224,10 @@ const contracts: Record<string, Contract> = {
     errors: [404],
   },
   ['put ' + notes]: {
-    title:
-      'Зберегти підписку. Перше налаштування приймає секрет підпису клієнта',
+    title: 'Зберегти підписку. Перша відповідь містить секрет',
     auth: key,
-    result: 'Settings',
+    result: 'SettingsResult',
     body: 'SettingsInput',
-    errors: [409],
   },
   ['delete ' + notes]: {
     title:
@@ -250,12 +243,10 @@ const contracts: Record<string, Contract> = {
     result: 'Discarded',
   },
   ['post ' + notes + '/secrets']: {
-    title: 'Додати наступний ключ підпису сповіщень із секретом клієнта',
+    title: 'Видати наступний секрет підпису сповіщень один раз',
     auth: key,
     result: 'NewKey',
-    body: 'NewSecret',
     errors: [404, 409],
-    replay: 'Повтор із тим самим секретом: той самий ключ',
   },
   ['delete ' + notes + '/secrets/{keyId}']: {
     title: 'Відкликати ключ підпису сповіщень',

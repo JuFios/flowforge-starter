@@ -1,7 +1,6 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import type { IncomingHttpHeaders } from 'node:http';
 import { RunningApp } from './app';
-import { newSecret } from './credentials';
 import { api } from './queue';
 
 /**
@@ -34,25 +33,21 @@ export function verifyNotification(
   });
 }
 
-/**
- * Налаштовує сповіщення тенанта через API з секретом, який генерує тест (ТЗ 4: сервер секрет не
- * повертає); повертає цей секрет і ID ключа з відповіді.
- */
+/** Налаштовує сповіщення тенанта через API; повертає секрет і ID ключа з єдиної відповіді. */
 export async function configureNotifications(
   app: RunningApp,
   apiKey: string,
   url: string,
   enabled = true,
 ): Promise<{ secret: string; keyId: string }> {
-  const secret = newSecret();
-  const res = await api<{ keys: Array<{ id: string }> }>(
+  const res = await api<{ secret: string; keys: Array<{ id: string }> }>(
     app.baseUrl,
     apiKey,
     'PUT',
     '/tenants/me/notifications',
-    { url, enabled, secret },
+    { url, enabled },
   );
   if (res.status !== 200)
     throw new Error(`PUT /tenants/me/notifications → ${res.status}`);
-  return { secret, keyId: res.body.keys[0].id };
+  return { secret: res.body.secret, keyId: res.body.keys[0].id };
 }

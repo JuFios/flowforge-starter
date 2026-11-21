@@ -8,7 +8,6 @@ import { DataSource } from 'typeorm';
 import { buildDocument } from '../../src/openapi/document';
 import { SchedulerService } from '../../src/scheduler/scheduler.service';
 import { RunningApp, startApp } from '../helpers/app';
-import { newSecret, tenantBody } from '../helpers/credentials';
 import { openTestDataSource, truncateAll } from '../helpers/db';
 import { Receiver } from '../helpers/queue';
 import { TEST_ADMIN_TOKEN } from '../helpers/test-env';
@@ -188,26 +187,29 @@ describe('OpenAPI matches the actual HTTP responses', () => {
 
   it('declares every status, body and header the routes actually return', async () => {
     const admin = { 'x-admin-token': TEST_ADMIN_TOKEN };
-    // Тенанти: успіх, повтор, конфлікт, валідація, токен, межа й кодування тіла.
-    const created = tenantBody('contract');
+    // Тенанти: успіх, валідація, токен, межа й кодування тіла.
     const tenantRes = await send('post /tenants', '/tenants', {
       headers: admin,
-      body: created,
+      body: { name: 'contract' },
     });
     expect(tenantRes.status).toBe(201);
-    const tenantId = (tenantRes.body as { id: string }).id;
-    await send('post /tenants', '/tenants', { headers: admin, body: created });
-    await send('post /tenants', '/tenants', {
-      headers: admin,
-      body: { ...created, name: 'other' },
-    });
+    const created = tenantRes.body as {
+      id: string;
+      apiKey: string;
+      webhookSecret: string;
+    };
+    const tenantId = created.id;
     await send('post /tenants', '/tenants', {
       headers: admin,
       body: { name: 'x' },
     });
     await send('post /tenants', '/tenants', {
+      headers: admin,
+      body: { name: 'extra', apiKey: 'ff_x' },
+    });
+    await send('post /tenants', '/tenants', {
       headers: { 'x-admin-token': 'wrong-token-0123456789' },
-      body: tenantBody('denied'),
+      body: { name: 'denied' },
     });
     await send('post /tenants', '/tenants', {
       headers: admin,
@@ -393,20 +395,8 @@ describe('OpenAPI matches the actual HTTP responses', () => {
     // Ключі вхідних webhook-ів.
     const keys = '/tenants/me/webhook-secrets';
     await send('get ' + keys, keys, { headers: key });
-    await send('post ' + keys, keys, {
-      headers: key,
-      body: { secret: 'weak' },
-    });
-    const rotation = { secret: newSecret() };
-    const rotated = await send('post ' + keys, keys, {
-      headers: key,
-      body: rotation,
-    });
-    await send('post ' + keys, keys, { headers: key, body: rotation });
-    await send('post ' + keys, keys, {
-      headers: key,
-      body: { secret: newSecret() },
-    });
+    const rotated = await send('post ' + keys, keys, { headers: key });
+    await send('post ' + keys, keys, { headers: key });
     const nextKey = (rotated.body as { id: string }).id;
     await send('delete ' + keys + '/{keyId}', `${keys}/${nextKey}`, {
       headers: key,
@@ -428,7 +418,6 @@ describe('OpenAPI matches the actual HTTP responses', () => {
     await send('delete ' + notes, notes, { headers: key });
     await send('post ' + notes + '/secrets', notes + '/secrets', {
       headers: key,
-      body: { secret: newSecret() },
     });
     await send(
       'delete ' + notes + '/secrets/{keyId}',
@@ -437,32 +426,21 @@ describe('OpenAPI matches the actual HTTP responses', () => {
     );
     const url = receiver.url('/notify');
     await send('put ' + notes, notes, { headers: key, body: { url } });
-    const notifySecret = newSecret();
+    await send('put ' + notes, notes, { headers: key, body: { url } });
     await send('put ' + notes, notes, {
       headers: key,
-      body: { url, secret: notifySecret },
-    });
-    await send('put ' + notes, notes, {
-      headers: key,
-      body: { url, secret: newSecret() },
+      body: { url, secret: 'x'.repeat(64) },
     });
     await send('put ' + notes, notes, {
       headers: key,
       raw: JSON.stringify({ url: 'x'.repeat(2 * 1024 * 1024) }),
     });
     await send('get ' + notes, notes, { headers: key });
-    const noteKey = { secret: newSecret() };
     await send('post ' + notes + '/secrets', notes + '/secrets', {
       headers: key,
-      body: noteKey,
     });
     await send('post ' + notes + '/secrets', notes + '/secrets', {
       headers: key,
-      body: noteKey,
-    });
-    await send('post ' + notes + '/secrets', notes + '/secrets', {
-      headers: key,
-      body: { secret: newSecret() },
     });
     const [{ secretKeyId }] = await ds.query<Array<{ secretKeyId: string }>>(
       'SELECT "secretKeyId" FROM notification_settings WHERE "tenantId"=$1',
@@ -473,15 +451,16 @@ describe('OpenAPI matches the actual HTTP responses', () => {
       `${notes}/secrets/${secretKeyId}`,
       { headers: key },
     );
-    const [{ nextSecretKeyId }] = await ds.query<
-      Array<{ nextSecretKeyId: string | null; secretKeyId: string }>
+    // Після відкликання поточного ключа наступний став поточним і останнім: його відкликання — 409.
+    const [{ promotedKeyId }] = await ds.query<
+      Array<{ promotedKeyId: string }>
     >(
-      'SELECT "secretKeyId" AS "nextSecretKeyId" FROM notification_settings WHERE "tenantId"=$1',
+      'SELECT "secretKeyId" AS "promotedKeyId" FROM notification_settings WHERE "tenantId"=$1',
       [tenantId],
     );
     await send(
       'delete ' + notes + '/secrets/{keyId}',
-      `${notes}/secrets/${nextSecretKeyId}`,
+      `${notes}/secrets/${promotedKeyId}`,
       { headers: key },
     );
     // Подія завершення.

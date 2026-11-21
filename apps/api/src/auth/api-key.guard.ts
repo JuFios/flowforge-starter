@@ -24,7 +24,7 @@ export function hashApiKey(key: string): string {
   return createHash('sha256').update(key).digest('hex');
 }
 
-/** Найдовший ключ, який має сенс шукати: ключі тенантів — до 256 символів (common/key-material.ts). */
+/** Найдовший ключ, який має сенс шукати: видані ключі — `ff_` + 48 hex-символів. */
 export const MAX_API_KEY_LENGTH = 256;
 
 /**
@@ -60,7 +60,7 @@ export class ApiKeyGuard implements CanActivate {
           sessionOnly ? 'Потрібна браузерна сесія' : 'Відсутній x-api-key',
         ),
       );
-    // Завелике значення не може бути ключем тенанта: не рахуємо хеш і не шукаємо його.
+    // Завелике значення не може бути виданим ключем: не рахуємо хеш і не шукаємо його.
     const session = bearer
       ? await this.system.authSession(
           createHash('sha256').update(bearer).digest(),
