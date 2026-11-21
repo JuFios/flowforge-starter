@@ -732,7 +732,7 @@ describe('data migrations', () => {
       if (!configured) await configure();
       expect(
         await ds.query(
-          "SELECT * FROM claim_outbox_event('upgrade-test', 1000, 1)",
+          "SELECT id FROM claim_outbox_event('upgrade-test', 1000, 1) WHERE id IS NOT NULL",
         ),
       ).toEqual([]);
     },

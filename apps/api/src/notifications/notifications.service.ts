@@ -183,10 +183,10 @@ export class NotificationsService {
    * стан події повторно, а час очікування обмежує statement_timeout.
    */
   async discard(tenantId: string): Promise<{ discarded: number }> {
-    // Межа «до цього запиту» — за годинником БД і з його точністю до мікросекунд.
+    // Межа й час вставки події використовують годинник БД із точністю до мікросекунд.
     const [{ cutoff }] = await this.db.run(tenantId, (em) =>
       em.query<Array<{ cutoff: string }>>(
-        `SELECT ${cursorAtSql('now()')} AS cutoff`,
+        `SELECT ${cursorAtSql('clock_timestamp()')} AS cutoff`,
       ),
     );
     let discarded = 0;
@@ -196,7 +196,7 @@ export class NotificationsService {
         em.query<Array<KeysetPosition & { count: number }>>(
           `WITH batch AS (
              SELECT id FROM outbox_events
-              WHERE "tenantId" = $1 AND status = 'pending' AND "createdAt" <= $2
+              WHERE "tenantId" = $1 AND status = 'pending' AND "createdAt" < $2
                 AND ("createdAt", id) > (
                   COALESCE($3::timestamptz, '-infinity'::timestamptz),
                   COALESCE($4::uuid, '00000000-0000-0000-0000-000000000000'::uuid)

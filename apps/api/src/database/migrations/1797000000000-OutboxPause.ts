@@ -38,12 +38,12 @@ const PURGE_DELIVERED_SQL = `CREATE OR REPLACE FUNCTION public.purge_delivered_e
  * - Події лишаються `pending`, доки в тенанта немає налаштувань або вони вимкнені: відправник
  *   захоплює лише тенантів з увімкненими налаштуваннями, тож це пауза. Наступне налаштування того
  *   самого тенанта поновлює доставку з тими самими ID і байтами.
- * - `cancelled` — лише явна відмова тенанта (`POST …/events/discard`) з моментом `cancelledAt`;
- *   такі події очищаються після того самого строку зберігання, що й доставлені.
+ * - `cancelled` — явна відмова тенанта (`POST …/events/discard`) або скасування зі старої версії;
+ *   строк зберігання починається від `cancelledAt`. Старі рядки отримують час міграції.
  * - Спроба, що тривала під час видалення налаштувань, закривається з outcome `paused`, а подія
  *   повертається в `pending`: fencing-токен скинуто, пізня відповідь отримувача нічого не змінить.
- * - Події, які попередні версії скасували неявно (видалення налаштувань, оновлення SerializeOutbox),
- *   повертаються в `pending`: явної відмови тенанта до цієї версії не існувало.
+ * - Старий runbook використовував видалення налаштувань для відмови від спірної черги.
+ *   Причину скасування стара схема не зберігала, тому повернення потребує явного redeliver.
  */
 export class OutboxPause1797000000000 implements MigrationInterface {
   async up(runner: QueryRunner): Promise<void> {
@@ -51,21 +51,18 @@ export class OutboxPause1797000000000 implements MigrationInterface {
     await runner.query(
       'LOCK TABLE public.executions, public.notification_settings, public.outbox_events IN SHARE ROW EXCLUSIVE MODE',
     );
+    // Стара транзакція завершення може записати подію вже після початку discard.
     await runner.query(
-      'ALTER TABLE public.outbox_events ADD COLUMN "cancelledAt" timestamptz',
+      `ALTER TABLE public.outbox_events ADD COLUMN "cancelledAt" timestamptz,
+        ALTER COLUMN "createdAt" SET DEFAULT clock_timestamp()`,
     );
     await runner.query(`UPDATE public.outbox_events
-      SET status = 'pending', "nextAttemptAt" = now(), "leaseToken" = NULL, "leaseUntil" = NULL
+      SET "cancelledAt" = now()
       WHERE status = 'cancelled'`);
     await runner.query(`ALTER TABLE public.outbox_events ADD CONSTRAINT "CHK_outbox_events_cancelled"
       CHECK ((status = 'cancelled') = ("cancelledAt" IS NOT NULL))`);
     await runner.query(`CREATE INDEX "IDX_outbox_events_cancelled" ON public.outbox_events ("cancelledAt")
       WHERE status = 'cancelled'`);
-    // Відновлені події тенантів із налаштуваннями — одразу до відправника.
-    await runner.query(`UPDATE public.notification_settings s SET "dueAt" = now()
-      WHERE EXISTS (SELECT 1 FROM public.outbox_events e
-                     WHERE e."tenantId" = s."tenantId" AND e.status = 'pending')
-        AND (s."dueAt" IS NULL OR s."dueAt" > now())`);
     await runner.query(pausedOutboxSql());
 
     await runner.query(`CREATE FUNCTION public.close_paused_attempt() RETURNS trigger
@@ -89,7 +86,7 @@ export class OutboxPause1797000000000 implements MigrationInterface {
       FOR EACH ROW WHEN (OLD.status = 'sending' AND NEW.status = 'pending')
       EXECUTE FUNCTION public.close_paused_attempt()`);
 
-    // Очищення: доставлені після строку зберігання, а також явно скасовані тенантом.
+    // Очищення доставлених і скасованих подій після строку зберігання.
     await runner.query(`CREATE OR REPLACE FUNCTION public.purge_delivered_events(p_days integer, p_batch integer)
       RETURNS integer LANGUAGE sql VOLATILE ${DEFINER} AS $$
         WITH delivered AS (
@@ -125,7 +122,8 @@ export class OutboxPause1797000000000 implements MigrationInterface {
       'ALTER TABLE public.outbox_events DROP CONSTRAINT "CHK_outbox_events_cancelled"',
     );
     await runner.query(
-      'ALTER TABLE public.outbox_events DROP COLUMN "cancelledAt"',
+      `ALTER TABLE public.outbox_events DROP COLUMN "cancelledAt",
+        ALTER COLUMN "createdAt" SET DEFAULT now()`,
     );
   }
 }
