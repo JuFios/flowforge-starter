@@ -102,7 +102,7 @@ const newSecret = () => randomBytes(32).toString('hex');
  * явним предикатом `tenantId`. Секрети підпису повертаються лише в момент створення (першого
  * налаштування чи ротації) і більше ніде: не в читанні, не в помилках, не в логах.
  *
- * Порядок блокувань: рядок налаштувань → події (так само, як у захопленні спроби).
+ * Порядок блокувань: за потреби рядок тенанта → налаштування → подія → облік.
  */
 @Injectable()
 export class NotificationsService {
@@ -127,6 +127,7 @@ export class NotificationsService {
   ): Promise<SettingsView & { secret?: string }> {
     await this.checkUrl(input.url);
     return this.db.run(tenantId, async (em) => {
+      await this.lockSettingsLifecycle(em, tenantId);
       const secret = newSecret();
       const keyId = randomUUID();
       const [row]: SettingsRow[] = await em.query(
@@ -157,8 +158,9 @@ export class NotificationsService {
    */
   async remove(tenantId: string): Promise<void> {
     await this.db.run(tenantId, async (em) => {
+      await this.lockSettingsLifecycle(em, tenantId);
       await this.settings(em, tenantId, true);
-      // Спершу рядок налаштувань: тригер close_paused_attempt розпізнає паузу за його відсутністю.
+      // Тригер close_paused_attempt розпізнає паузу за відсутністю налаштувань.
       await em.query(
         'DELETE FROM notification_settings WHERE "tenantId" = $1',
         [tenantId],
@@ -177,6 +179,8 @@ export class NotificationsService {
    * `cancelled`. Спроби, що зараз тривають, не перериваються. Порціями по окремих транзакціях, щоб
    * великий беклог не тримав блокування й не впирався в statement_timeout. Курсор іде лише вперед:
    * якщо тенант знову поставив оброблену подію на доставку, поточний запит її не скасовує повторно.
+   * Блокування читача журналу сумісне з оновленням стану. Після конкурентного запису БД перевіряє
+   * стан події повторно, а час очікування обмежує statement_timeout.
    */
   async discard(tenantId: string): Promise<{ discarded: number }> {
     // Межа «до цього запиту» — за годинником БД і з його точністю до мікросекунд.
@@ -197,7 +201,7 @@ export class NotificationsService {
                   COALESCE($3::timestamptz, '-infinity'::timestamptz),
                   COALESCE($4::uuid, '00000000-0000-0000-0000-000000000000'::uuid)
                 )
-              ORDER BY "createdAt", id LIMIT $5 FOR UPDATE SKIP LOCKED
+              ORDER BY "createdAt", id LIMIT $5 FOR NO KEY UPDATE
            ), updated AS (
              UPDATE outbox_events e SET status = 'cancelled', "cancelledAt" = now()
               FROM batch b WHERE e."tenantId" = $1 AND e.id = b.id
@@ -337,7 +341,7 @@ export class NotificationsService {
    */
   async redeliver(tenantId: string, id: string): Promise<EventView> {
     return this.db.run(tenantId, async (em) => {
-      // Порядок блокувань: налаштування (якщо є) → подія.
+      await this.lockSettingsLifecycle(em, tenantId);
       await em.query(
         'SELECT 1 FROM notification_settings WHERE "tenantId" = $1 FOR NO KEY UPDATE',
         [tenantId],
@@ -365,10 +369,19 @@ export class NotificationsService {
     });
   }
 
+  /** Серіалізує читання підказки доставки з відновленням подій навіть без рядка налаштувань. */
+  private async lockSettingsLifecycle(
+    em: EntityManager,
+    tenantId: string,
+  ): Promise<void> {
+    await em.query('SELECT id FROM tenants WHERE id=$1 FOR NO KEY UPDATE', [
+      tenantId,
+    ]);
+  }
+
   /**
    * Доставлена чи скасована подія знову стає недоставленою: квота outbox перевіряється так само, як
-   * для нового виконання, під блокуванням рядка обліку тенанта (порядок: налаштування → подія →
-   * облік).
+   * для нового виконання, під блокуванням рядка обліку тенанта після блокування події.
    */
   private async assertOutboxSlot(em: EntityManager): Promise<void> {
     const [usage]: Array<{
