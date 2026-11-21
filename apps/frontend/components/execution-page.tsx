@@ -138,7 +138,11 @@ export function ExecutionPage({ id }: { id: string }) {
     busy(false);
     if (r.kind === 'session_expired') return goToLogin();
     if (r.kind === 'rejected') fail(describeRejection(r));
-    if (r.kind === 'network') fail(r.message);
+    // Повтор міг дійти до API: стан виконання покаже сторінка, повторне натискання безпечне (409).
+    if (r.kind === 'network')
+      fail(
+        `Результат повтору невідомий (${r.message}). Перевірте стан виконання.`,
+      );
   }
   const connection = {
     connecting: 'Підключення…',
