@@ -165,4 +165,17 @@ describe('README commands in a new terminal', () => {
       'Потрібні Node.js 20.12+ (гілка 20) або 21.7+ (21 і новіші)',
     );
   });
+
+  it('documents discarding a disputed outbox backlog before recreating settings and starting workers', () => {
+    const docs = readFileSync(
+      join(__dirname, '../../../../docs/operations.md'),
+      'utf8',
+    );
+    const upgrade = docs
+      .split('\n### Оновлення з першої версії outbox\n')[1]
+      ?.split('\n### ')[0];
+    expect(upgrade).toMatch(
+      /запустіть лише API[\s\S]*`POST \/tenants\/me\/notifications\/events\/discard`[\s\S]*`PUT \/tenants\/me\/notifications`[\s\S]*запустіть воркери/iu,
+    );
+  });
 });

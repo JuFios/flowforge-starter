@@ -15,6 +15,7 @@ import { NotificationsService } from '../../src/notifications/notifications.serv
 import { TenantDb } from '../../src/tenancy/tenant-db';
 import { fakeTenantDb } from '../helpers/fake-tenant-db';
 import { waitForBlocked } from '../helpers/transaction-barrier';
+import { waitFor } from '../helpers/wait-for';
 
 import { verifyNotification } from '../helpers/notifications';
 import { api, Receiver } from '../helpers/queue';
@@ -451,6 +452,112 @@ describe('notification settings', () => {
       expect(await status(id)).toBe('pending');
     } finally {
       barrier.mockRestore();
+    }
+  });
+
+  it('delivers a redelivery racing with creation of new settings', async () => {
+    await setup(a, '/old');
+    const id = await completed(a);
+    expect(await sender.deliverNext()).toBe(true);
+    expect((await call(a, 'DELETE', '/tenants/me/notifications')).status).toBe(
+      204,
+    );
+
+    const holder = ds.createQueryRunner();
+    await holder.connect();
+    await holder.startTransaction();
+    let replay: Promise<{ status: number }> | undefined;
+    try {
+      const settings = new NotificationsService(fakeTenantDb(holder.manager));
+      await settings.put(a.tenant.id, { url: receiver.url('/new') });
+      const [{ pid }] = (await holder.query(
+        'SELECT pg_backend_pid() AS pid',
+      )) as Array<{ pid: number }>;
+      let settled = false;
+      replay = call(
+        a,
+        'POST',
+        `/tenants/me/notifications/events/${id}/redeliver`,
+      );
+      void replay.then(
+        () => {
+          settled = true;
+        },
+        () => {
+          settled = true;
+        },
+      );
+      await waitFor(
+        'redelivery to complete or wait for recreation',
+        async () => {
+          if (settled) return true;
+          const [{ blocked }] = await ds.query<Array<{ blocked: boolean }>>(
+            'SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))) AS blocked',
+            [pid],
+          );
+          return blocked;
+        },
+      );
+      await holder.commitTransaction();
+      expect((await replay).status).toBe(202);
+    } finally {
+      if (holder.isTransactionActive) await holder.rollbackTransaction();
+      await replay;
+      await holder.release();
+    }
+    expect(await sender.deliverNext()).toBe(true);
+    expect(await status(id)).toBe('delivered');
+    expect(receiver.hits('/new')).toHaveLength(1);
+  });
+
+  it('delivers a paused attempt when settings are recreated concurrently with removal', async () => {
+    await setup(a, '/old');
+    const id = await completed(a);
+    await ds.query(`SELECT id FROM claim_outbox_event('lost', 30000, 1)`);
+    expect(await status(id)).toBe('sending');
+
+    const holder = ds.createQueryRunner();
+    await holder.connect();
+    await holder.startTransaction();
+    let put: Promise<{ status: number }> | undefined;
+    try {
+      const settings = new NotificationsService(fakeTenantDb(holder.manager));
+      await settings.remove(a.tenant.id);
+      put = call(a, 'PUT', '/tenants/me/notifications', {
+        url: receiver.url('/new'),
+      });
+      await waitForBlocked(ds, holder);
+      await holder.commitTransaction();
+      expect((await put).status).toBe(200);
+    } finally {
+      if (holder.isTransactionActive) await holder.rollbackTransaction();
+      await put;
+      await holder.release();
+    }
+    expect(await sender.deliverNext()).toBe(true);
+    expect(await status(id)).toBe('delivered');
+    expect(receiver.hits('/new')).toHaveLength(1);
+  });
+
+  it('discards a pending event while its details are being read', async () => {
+    await setup(a);
+    const id = await completed(a);
+    const reader = ds.createQueryRunner();
+    await reader.connect();
+    await reader.startTransaction();
+    try {
+      const settings = new NotificationsService(fakeTenantDb(reader.manager));
+      await settings.eventPage(a.tenant.id, id, 10);
+      const response = await call<{ discarded: number }>(
+        a,
+        'POST',
+        '/tenants/me/notifications/events/discard',
+      );
+      expect(response).toEqual({ status: 200, body: { discarded: 1 } });
+      expect(await status(id)).toBe('cancelled');
+    } finally {
+      await reader.rollbackTransaction();
+      await reader.release();
     }
   });
 
