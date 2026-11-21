@@ -1,3 +1,4 @@
+import { Resolver } from 'node:dns/promises';
 import { DataSource } from 'typeorm';
 import { WorkerModule } from '../../src/app.module';
 import { OutboxMetrics } from '../../src/outbox/outbox.metrics';
@@ -396,10 +397,23 @@ describe('notification delivery', () => {
     const { port } = new URL(receiver.url('/'));
     await ds.query(
       `UPDATE notification_settings SET url = $2 WHERE "tenantId" = $1`,
-      [tenantId, `http://localhost:${port}/hooks/flowforge`],
+      [tenantId, `http://outbox.test:${port}/hooks/flowforge`],
     );
     const s = await sender();
-    await s.deliverNext();
+    const v4 = jest
+      .spyOn(Resolver.prototype, 'resolve4')
+      .mockImplementation(() => Promise.resolve(['127.0.0.1']));
+    const v6 = jest
+      .spyOn(Resolver.prototype, 'resolve6')
+      .mockImplementation(() => Promise.resolve([]));
+    try {
+      await s.deliverNext();
+      expect(v4).toHaveBeenCalledWith('outbox.test');
+      expect(v6).toHaveBeenCalledWith('outbox.test');
+    } finally {
+      v4.mockRestore();
+      v6.mockRestore();
+    }
     expect(receiver.requests).toEqual([]);
     expect(await event(e.id)).toMatchObject({
       status: 'pending',
