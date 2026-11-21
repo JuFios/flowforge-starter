@@ -168,18 +168,21 @@ describe('notification settings', () => {
           revision: number;
           keys: Array<{ id: string }>;
         }>(a, 'PUT', '/tenants/me/notifications', { url: receiver.url(path) });
+      let next: ReturnType<typeof put> | undefined;
       try {
-        // SHARE пропускає пошук FOR NO KEY UPDATE, утримуючи обидві вставки до COMMIT.
-        await holder.query('LOCK TABLE notification_settings IN SHARE MODE');
-        const results = Promise.all([put('/first'), put(secondPath)]);
-        await waitForBlocked(ds, holder, 2);
+        // Перше налаштування тримає запобіжний рядок тенанта до COMMIT.
+        const settings = new NotificationsService(fakeTenantDb(holder.manager));
+        const first = await settings.put(a.tenant.id, {
+          url: receiver.url('/first'),
+        });
+        next = put(secondPath);
+        await waitForBlocked(ds, holder);
         await holder.commitTransaction();
-        const responses = await results;
-        expect(responses.map((r) => r.status)).toEqual([200, 200]);
-        const creator = responses.filter((r) => r.body.secret);
-        expect(creator).toHaveLength(1);
-        expect(responses[0].body.keys).toEqual(responses[1].body.keys);
-        const last = responses.find((r) => !r.body.secret)!;
+        const last = await next;
+        expect(last.status).toBe(200);
+        expect(first.secret).toEqual(expect.any(String));
+        expect(last.body.secret).toBeUndefined();
+        expect(last.body.keys).toEqual(first.keys);
         expect(
           await ds.query(
             'SELECT url, revision FROM notification_settings WHERE "tenantId"=$1',
@@ -190,6 +193,7 @@ describe('notification settings', () => {
         ]);
       } finally {
         if (holder.isTransactionActive) await holder.rollbackTransaction();
+        await next?.catch(() => undefined);
         await holder.release();
       }
     },

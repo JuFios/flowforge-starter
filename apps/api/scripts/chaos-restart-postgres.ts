@@ -1,5 +1,5 @@
 /**
- * Chaos-сценарій: під навантаженням двічі перезапускає Postgres (`docker compose restart postgres`)
+ * Chaos-сценарій: під навантаженням двічі аварійно зупиняє й запускає Postgres
  * і перевіряє, що воркери й API пережили це без перезапуску процесів, кожне виконання
  * завершилось, жоден завершений крок не виконано вдруге, а зовнішній ефект кожного http-кроку
  * стався рівно один раз (один ефект на Idempotency-Key).
@@ -107,19 +107,22 @@ async function restartAtCheckpoint(
         const checkpoint = rows[0]?.id;
         if (checkpoint) {
           candidates++;
+          await captureCheckpoints(batch, observed);
           const until = Date.now() + CANDIDATE_WAIT_MS;
           while (Date.now() < until) {
             const [row] = (await gate.query(
               `SELECT EXISTS(SELECT FROM pg_stat_activity
-               WHERE pg_backend_pid()=ANY(pg_blocking_pids(pid))) AS waiting`,
+               WHERE pg_backend_pid()=ANY(pg_blocking_pids(pid))
+                 AND wait_event_type = 'Lock'
+                 AND query LIKE 'UPDATE step_runs SET status = ''succeeded''%') AS waiting`,
             )) as { waiting: boolean }[];
             if (row.waiting) {
-              await captureCheckpoints(batch, observed);
-              log(
-                `restarting postgres during write to checkpoint ${checkpoint}`,
-              );
+              log(`stopping postgres during write to checkpoint ${checkpoint}`);
               const started = Date.now();
-              docker([...COMPOSE, 'restart', 'postgres']);
+              // Під час штатної зупинки сесія бар'єра може звільнити рядок до завершення сесії
+              // запису. SIGKILL моделює падіння БД з незавершеним чекпоінтом.
+              docker([...COMPOSE, 'kill', '--signal', 'SIGKILL', 'postgres']);
+              docker([...COMPOSE, 'start', 'postgres']);
               return { checkpoint, started };
             }
             await sleep(25);
@@ -176,9 +179,9 @@ async function main(): Promise<void> {
           'SELECT attempts, status FROM step_runs WHERE id=$1',
           [checkpoint],
         );
-      if (step.status !== 'succeeded' || step.attempts < 2)
+      if (step?.status !== 'succeeded' || step.attempts < 2)
         throw new Error(
-          `round ${round + 1}: observed HTTP checkpoint did not retry and succeed`,
+          `round ${round + 1}: HTTP checkpoint ${checkpoint}, status=${step?.status ?? 'missing'}, attempts=${step?.attempts ?? 0}; expected succeeded after a retry`,
         );
     } finally {
       await verification.destroy();
