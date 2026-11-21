@@ -459,6 +459,58 @@ describe('notification settings', () => {
     }
   });
 
+  it('keeps an event inserted after the first discard batch by an older transaction', async () => {
+    await setup(a);
+    const tenantId = a.tenant.id;
+    await ds.query(
+      `INSERT INTO outbox_events ("tenantId", "executionId", sequence, type, payload)
+       SELECT $1, gen_random_uuid(), 1, 'execution.succeeded', '{}'
+       FROM generate_series(1, 1001)`,
+      [tenantId],
+    );
+    const execution = await createExecution(
+      ds,
+      await createWorkflow(ds, tenantId),
+    );
+    const completion = ds.createQueryRunner();
+    await completion.connect();
+    await completion.startTransaction();
+    const db = apiApp.app.get(TenantDb);
+    const run = db.run.bind(db);
+    let transactions = 0;
+    const barrier = jest
+      .spyOn(db, 'run')
+      .mockImplementation(async (context, fn) => {
+        const result = await run(context, fn);
+        if (++transactions === 2) {
+          await completion.query(
+            `UPDATE executions SET status = 'succeeded', "finishedAt" = now() WHERE id = $1`,
+            [execution.id],
+          );
+          await completion.commitTransaction();
+        }
+        return result;
+      });
+    try {
+      expect(
+        await apiApp.app.get(NotificationsService).discard(tenantId),
+      ).toEqual({
+        discarded: 1001,
+      });
+      expect(
+        await ds.query(
+          'SELECT status FROM outbox_events WHERE "executionId" = $1',
+          [execution.id],
+        ),
+      ).toEqual([{ status: 'pending' }]);
+    } finally {
+      barrier.mockRestore();
+      if (completion.isTransactionActive)
+        await completion.rollbackTransaction();
+      await completion.release();
+    }
+  });
+
   it('delivers a redelivery racing with creation of new settings', async () => {
     await setup(a, '/old');
     const id = await completed(a);
