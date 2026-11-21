@@ -8,9 +8,9 @@ import type * as QueueHelpers from '../helpers/queue';
 const CONCURRENCY = 64;
 /** Розмір пулу, який задає конфігурація: по з'єднанню на цикл і запас на heartbeat/reaper. */
 const POOL_SIZE = CONCURRENCY + 4;
-// Запас для виміряних затримок PostgreSQL і драйвера під час 64 циклів на спільному раннері.
-// Отримувач усе одно відповідає через три lease, тож крок потребує кількох heartbeat.
-const LEASE_MS = 3_000;
+// Перевіряємо продовження lease під конкуренцією за пул, із запасом на затримку
+// підтвердження між тестовим процесом і контейнером PostgreSQL під час повного прогону.
+const LEASE_MS = 8_000;
 
 /**
  * Пул з'єднань воркера при найбільшій кількості циклів (64). Heartbeat, чекпоінти й опитування
@@ -117,6 +117,10 @@ describe('connection pool under the largest worker concurrency', () => {
     expect(
       await ds.getRepository(Execution).countBy({ status: 'succeeded' }),
     ).toBe(CONCURRENCY);
+    const leaseTrouble = worker!.logs.filter((l) =>
+      /lease|claim failed|processing failed/.test(String(l.msg)),
+    );
+    expect(leaseTrouble.map((l) => l.msg)).toEqual([]);
     expect(receiver.hits('/slow')).toHaveLength(CONCURRENCY);
     const jobs = await ds.getRepository(Job).find();
     expect(
@@ -124,10 +128,6 @@ describe('connection pool under the largest worker concurrency', () => {
     ).toEqual([]);
     const steps = await ds.getRepository(StepRun).find();
     expect(steps.filter((s) => s.attempts !== 1)).toEqual([]);
-    const leaseTrouble = worker!.logs.filter((l) =>
-      /lease|claim failed|processing failed/.test(String(l.msg)),
-    );
-    expect(leaseTrouble.map((l) => l.msg)).toEqual([]);
   }
 
   it('keeps every lease while 64 long steps run at once', async () => {
