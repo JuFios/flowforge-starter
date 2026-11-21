@@ -51,24 +51,25 @@ CI перевіряє розподіл секретів за сервісами 
 ### Локальний запуск поза docker
 
 Потрібні Node.js 20.12+ (гілка 20) або 21.7+ (21 і новіші), Docker (для Postgres) та `.env` у корені з розділу вище. Діапазон Node.js — `engines` у `apps/api/package.json`: команди нижче й CLI міграцій читають `.env` через `util.parseEnv`, якого немає в 20.0–20.11 і 21.0–21.6. Якщо compose-стек
-уже запущено, звільніть порти: `docker compose stop api worker frontend`.
+уже запущено, звільніть порти командою `docker compose stop api api-2 worker frontend` у локальному проєкті.
 
 ```bash
 # з кореня репозиторію
 env -i HOME="$HOME" PATH="$PATH" bash -eu <<'LOCAL_API'
 docker compose up -d postgres
 cd apps/api
-cp .env.example .env              # несекретні налаштування; секрети — нижче, окремо для процесу
+test -f .env || (umask 077; cp .env.example .env)
 npm ci
 npm run build
 setting() {
   node -e 'const {parseEnv}=require("node:util"), {readFileSync}=require("node:fs");
     process.stdout.write(parseEnv(readFileSync("../../.env","utf8"))[process.argv[1]] ?? "")' "$1"
 }
+pg_port="$(setting POSTGRES_PORT)"
 # міграції й ролі — власником схеми (лише цим командам, не API й воркеру)
-MIGRATION_DATABASE_URL="postgres://flowforge:$(setting POSTGRES_PASSWORD)@localhost:5432/flowforge" \
+MIGRATION_DATABASE_URL="postgres://flowforge:$(setting POSTGRES_PASSWORD)@localhost:${pg_port:-5432}/flowforge" \
   npm run db:migrate
-MIGRATION_DATABASE_URL="postgres://flowforge:$(setting POSTGRES_PASSWORD)@localhost:5432/flowforge" \
+MIGRATION_DATABASE_URL="postgres://flowforge:$(setting POSTGRES_PASSWORD)@localhost:${pg_port:-5432}/flowforge" \
   API_DB_PASSWORD="$(setting API_DB_PASSWORD)" WORKER_DB_PASSWORD="$(setting WORKER_DB_PASSWORD)" \
   TENANT_MAX_RUNNING="$(setting TENANT_MAX_RUNNING)" TENANT_MAX_QUEUE_SIZE="$(setting TENANT_MAX_QUEUE_SIZE)" \
   TENANT_MAX_WORKFLOWS="$(setting TENANT_MAX_WORKFLOWS)" TENANT_MAX_OUTBOX_EVENTS="$(setting TENANT_MAX_OUTBOX_EVENTS)" \
@@ -76,7 +77,7 @@ MIGRATION_DATABASE_URL="postgres://flowforge:$(setting POSTGRES_PASSWORD)@localh
   TENANT_WEBHOOK_RATE_LIMIT="$(setting TENANT_WEBHOOK_RATE_LIMIT)" TENANT_WEBHOOK_RATE_WINDOW_MS="$(setting TENANT_WEBHOOK_RATE_WINDOW_MS)" \
   npm run db:provision
 # API на :3000 — своєю роллю
-DATABASE_URL="postgres://flowforge_api:$(setting API_DB_PASSWORD)@localhost:5432/flowforge" \
+DATABASE_URL="postgres://flowforge_api:$(setting API_DB_PASSWORD)@localhost:${pg_port:-5432}/flowforge" \
   ADMIN_TOKEN="$(setting ADMIN_TOKEN)" npm run start
 LOCAL_API
 ```
@@ -87,7 +88,8 @@ LOCAL_API
 ```bash
 env -i HOME="$HOME" PATH="$PATH" bash -eu <<'LOCAL_WORKER'
 worker_password="$(node -p 'require("node:util").parseEnv(require("node:fs").readFileSync("../../.env","utf8")).WORKER_DB_PASSWORD')"
-DATABASE_URL="postgres://flowforge_worker:$worker_password@localhost:5432/flowforge" \
+pg_port="$(node -p 'require("node:util").parseEnv(require("node:fs").readFileSync("../../.env","utf8")).POSTGRES_PORT || "5432"')"
+DATABASE_URL="postgres://flowforge_worker:$worker_password@localhost:$pg_port/flowforge" \
   npm run start:worker
 LOCAL_WORKER
 ```
@@ -138,35 +140,14 @@ npm run dev -- -p 3001
 
 ### Приклади запитів
 
-Створити тенанта з кореня репозиторію. Для обох способів запуску токен `ADMIN_TOKEN` береться з кореневого `.env`.
-
-```bash
-ADMIN_TOKEN="$(sed -n 's/^ADMIN_TOKEN=//p' .env)"
-curl -X POST localhost:3000/tenants -H "x-admin-token: $ADMIN_TOKEN" \
-  -H 'content-type: application/json' -d '{"name":"acme"}'
-```
-
-Відповідь містить `apiKey` (показується один раз) і `webhookSecret`. Далі всі запити — із
-заголовком `x-api-key`. Необов'язковий заголовок `x-request-id` задає кореляційний ID
-(інакше він генерується) і повертається у відповіді.
-
-```bash
-API_KEY=ff_...
-curl -X POST localhost:3000/workflows -H "x-api-key: $API_KEY" -H 'content-type: application/json' \
-  -d '{"name":"demo","steps":[{"id":"hello","type":"log","message":"hi {{ input.name }}"}]}'
-
-curl -X POST localhost:3000/workflows/<workflowId>/run -H "x-api-key: $API_KEY" \
-  -H 'x-request-id: demo-1' -H 'content-type: application/json' -d '{"name":"Ada"}'
-
-curl localhost:3000/executions/<executionId> -H "x-api-key: $API_KEY"
-```
+Команди створення тенанта, workflow і першого виконання наведено в [README](../README.md#приклади-запитів). Вони задають `API_URL`, `ADMIN_TOKEN`, `API_KEY` і `workflow_id`, які використовуються нижче. Заголовок `x-request-id` задає кореляційний ID. Якщо заголовок відсутній, API генерує ID і повертає його у відповіді.
 
 Повтор запуску без ризику дубля — заголовок `Idempotency-Key` (до 255 видимих символів ASCII):
 перший запит створює виконання (201), повтор того самого запиту повертає те саме виконання (200),
 той самий ключ з іншим workflow чи входом — 422.
 
 ```bash
-curl -X POST localhost:3000/workflows/<workflowId>/run -H "x-api-key: $API_KEY" \
+curl -fsS --max-time 15 "$API_URL/workflows/$workflow_id/run" -H "x-api-key: $API_KEY" \
   -H 'Idempotency-Key: order-42' -H 'content-type: application/json' -d '{"name":"Ada"}'
 ```
 
@@ -175,7 +156,8 @@ curl -X POST localhost:3000/workflows/<workflowId>/run -H "x-api-key: $API_KEY" 
 не повторюються, а повторений крок `http` надсилає той самий `Idempotency-Key`.
 
 ```bash
-curl -X POST localhost:3000/executions/<executionId>/retry -H "x-api-key: $API_KEY"
+: "${failed_execution_id:?Задайте ID виконання зі статусом failed}"
+curl -fsS --max-time 15 -X POST "$API_URL/executions/$failed_execution_id/retry" -H "x-api-key: $API_KEY"
 ```
 
 Поки виконання стоїть на паузі (`delay`), воно має статус `running`, а час пробудження видно в
@@ -185,11 +167,12 @@ curl -X POST localhost:3000/executions/<executionId>/retry -H "x-api-key: $API_K
 замовчуванням); відповідь показує перевизначення й ефективні ліміти.
 
 ```bash
-curl -X POST localhost:3000/tenants -H "x-admin-token: $ADMIN_TOKEN" -H 'content-type: application/json' \
-  -d '{"name":"acme","limits":{"maxConcurrentExecutions":3,"rateLimit":100}}'
-curl -X PATCH localhost:3000/tenants/<tenantId>/limits -H "x-admin-token: $ADMIN_TOKEN" \
+tenant_id="$(curl -fsS --max-time 15 "$API_URL/tenants" -H "x-admin-token: $ADMIN_TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{"name":"limited-acme","limits":{"maxConcurrentExecutions":3,"rateLimit":100}}' | jq -er .id)"
+curl -fsS --max-time 15 -X PATCH "$API_URL/tenants/$tenant_id/limits" -H "x-admin-token: $ADMIN_TOKEN" \
   -H 'content-type: application/json' -d '{"maxQueueSize":5000,"rateLimit":null}'
-curl localhost:3000/tenants/<tenantId>/limits -H "x-admin-token: $ADMIN_TOKEN"
+curl -fsS --max-time 15 "$API_URL/tenants/$tenant_id/limits" -H "x-admin-token: $ADMIN_TOKEN"
 ```
 
 Кожна відповідь, що пройшла через ліміт частоти, має `X-RateLimit-Limit`, `X-RateLimit-Remaining`
@@ -267,7 +250,7 @@ JSON (об'єкти й масиви) у тілі — до 64 рівнів, гл�
 
 [Swagger UI](http://localhost:3000/docs) описує HTTP API. [Документ OpenAPI](http://localhost:3000/docs-json) генерується із зареєстрованих контролерів. Для запитів тенанта введіть `X-API-Key`, для адміністрування — `X-Admin-Token`. Одноразова відповідь створення тенанта чи ротації містить секрет, який потрібно зберегти при видачі. Списки процесів і виконань повертають `items` та `nextCursor`. Курсор передається в наступний запит із тими самими фільтрами. Деталі виконання сумісні з повним JSON попередньої версії.
 
-Деталі процесу повертають `editRevision` як рядок. Передайте її в тілі PATCH для перевірки актуальності конфігурації. Сесії браузера вимагають цього поля (428), а запит із застарілою ревізією отримує 409 `workflow_edit_conflict`. API-клієнти з ключем можуть виконувати частковий PATCH без ревізії, якщо не використовують `{"keep":true}`. Збережені заголовки дозволено залишати лише з актуальною ревізією та без зміни URL чи ID кроку. Версія кроків зростає лише після зміни визначення, а хід планувальника не змінює ревізію редактора. `nextFireAt` дорівнює `null`, доки планувальник ще не обчислив дату.
+Деталі процесу повертають `editRevision` як рядок. Передайте її в тілі PATCH для перевірки актуальності конфігурації. Сесії браузера вимагають цього поля (428), а запит із застарілою ревізією отримує 409 `workflow_edit_conflict`. API-клієнти з ключем можуть виконувати частковий PATCH без ревізії, якщо не використовують `{"keep":true}`. Збережені заголовки дозволено залишати лише з актуальною ревізією та без зміни URL чи ID кроку. Версія кроків зростає лише після зміни визначення, а хід планувальника не змінює ревізію редактора. `nextFireAt` містить дату, якщо планувальник зберіг момент після `scheduleCursor`. Інакше API повертає `null`. Якщо квота заблокувала перше спрацювання до збереження дати, перевіряйте `scheduleBlockedSince`.
 
 ### Межа довіри браузера
 
@@ -399,7 +382,8 @@ setting() {
   node -e 'const {parseEnv}=require("node:util"), {readFileSync}=require("node:fs");
     process.stdout.write(parseEnv(readFileSync("../../.env","utf8"))[process.argv[1]] ?? "")' "$1"
 }
-export MIGRATION_DATABASE_URL="postgres://flowforge:$(setting POSTGRES_PASSWORD)@localhost:5432/flowforge"
+pg_port="$(setting POSTGRES_PORT)"
+export MIGRATION_DATABASE_URL="postgres://flowforge:$(setting POSTGRES_PASSWORD)@localhost:${pg_port:-5432}/flowforge"
 npm run db:migrate          # застосувати й звірити інваріанти безпеки (одна транзакція)
 # створити/оновити ролі flowforge_api і flowforge_worker та значення лімітів за замовчуванням
 API_DB_PASSWORD="$(setting API_DB_PASSWORD)" WORKER_DB_PASSWORD="$(setting WORKER_DB_PASSWORD)" \
@@ -411,7 +395,8 @@ API_DB_PASSWORD="$(setting API_DB_PASSWORD)" WORKER_DB_PASSWORD="$(setting WORKE
 npm run migration:revert    # відкотити останню
 npm run migration:show      # стан
 # нова міграція з різниці між сутностями і БД (потім додати її в migrations/index.ts):
-npm run build && npm run migration:generate -- src/database/migrations/<Name>
+migration_name=DescribeSchemaChange
+npm run build && npm run migration:generate -- "src/database/migrations/$migration_name"
 ```
 
 Наявні міграції:
@@ -497,16 +482,7 @@ docker compose up --build
 
 ## Тести
 
-```bash
-cd apps/api
-npm test                    # unit (без БД)
-# тестова БД — власником; пароль — POSTGRES_PASSWORD із кореневого .env (без нього — flowforge, як у CI)
-pw="$(node -e 'const {parseEnv}=require("node:util"), {existsSync, readFileSync}=require("node:fs");
-  const f="../../.env"; process.stdout.write((existsSync(f) && parseEnv(readFileSync(f,"utf8")).POSTGRES_PASSWORD) || "")')"
-export TEST_DATABASE_URL="postgres://flowforge:${pw:-flowforge}@localhost:5432/flowforge_test"
-npm run test:integration    # integration на реальному Postgres (спершу збирає dist: тест падіння воркера запускає dist/worker.js)
-npm run test:all            # обидва набори
-```
+Команди встановлення залежностей, підключення до тестової БД та запуску наведено в [README](../README.md#тести).
 
 - `test/unit` — швидкі тести без інфраструктури (`test/jest-unit.json`).
 - `test/integration` — тести на реальному Postgres (`test/jest-integration.json`). Перед
@@ -514,8 +490,8 @@ npm run test:all            # обидва набори
   `public` і будує її міграціями з нуля** — тож кожен прогін заодно перевіряє міграції.
   Запуск дозволений лише на базі з суфіксом `_test`. Файли виконуються послідовно; кожен тест
   очищає таблиці (`test/helpers/db.ts`). Локально достатньо `docker compose up -d postgres` і
-  адреси тестової БД власником (суперкористувачем) — `TEST_DATABASE_URL` з блоку вище (пароль
-  береться з кореневого `.env`, тож блок працює й у новому терміналі).
+  адреси тестової БД власником (суперкористувачем). Команди README беруть пароль і порт для
+  `TEST_DATABASE_URL` із кореневого `.env`.
 - **Ролі в тестах — як у compose.** Глобальний setup після міграцій створює runtime-ролі
   `flowforge_api_test_<суфікс>` і `flowforge_worker_test_<суфікс>` (`provisionLoginRoles`, окремі від
   ролей compose імена, бо ролі спільні для кластера Postgres) з **випадковими на кожен прогін паролями**
@@ -891,13 +867,15 @@ module.exports = { verify, handle };
 
 ```bash
 # Журнал подій тенанта: найновіші першими, курсорна пагінація (limit 1..100), фільтр за станом.
-curl "localhost:3000/tenants/me/notifications/events?status=pending&limit=20" -H "x-api-key: $API_KEY"
+curl -fsS --max-time 15 "$API_URL/tenants/me/notifications/events?status=pending&limit=20" -H "x-api-key: $API_KEY"
+
+: "${event_id:?Задайте ID події з журналу}"
 # Подія з точними байтами й усіма спробами (номер, відправник, ревізія endpoint-а, ключі,
 # результат, HTTP-статус, тривалість).
-curl localhost:3000/tenants/me/notifications/events/<eventId> -H "x-api-key: $API_KEY"
+curl -fsS --max-time 15 "$API_URL/tenants/me/notifications/events/$event_id" -H "x-api-key: $API_KEY"
 # Надіслати негайно (той самий id і байти), без очікування backoff; також для delivered/cancelled.
 # Без налаштувань подія чекає pending і піде після наступного PUT.
-curl -X POST localhost:3000/tenants/me/notifications/events/<eventId>/redeliver -H "x-api-key: $API_KEY"
+curl -fsS --max-time 15 -X POST "$API_URL/tenants/me/notifications/events/$event_id/redeliver" -H "x-api-key: $API_KEY"
 ```
 
 Стани: `pending` (чекає спроби; `nextAttemptAt` — коли), `sending` (спроба триває; lease
