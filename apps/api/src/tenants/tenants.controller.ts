@@ -101,7 +101,8 @@ async function limitsView(
        'maxConcurrentExecutions', t."maxConcurrentExecutions",
        'maxQueueSize', t."maxQueueSize", 'rateLimit', t."rateLimit",
        'webhookRateLimit', t."webhookRateLimit",
-       'maxWorkflows', t."maxWorkflows") AS overrides,
+       'maxWorkflows', t."maxWorkflows",
+       'maxOutboxEvents', t."maxOutboxEvents") AS overrides,
        to_jsonb(l) AS effective
        FROM tenants t CROSS JOIN public.tenant_limits() l WHERE t.id = $1`,
     [id],

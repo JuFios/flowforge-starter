@@ -13,6 +13,8 @@ export const BUILT_IN_LIMIT_DEFAULTS = {
   webhookRateLimit: 600,
   webhookRateWindowMs: 60_000,
   maxWorkflows: 1_000,
+  // Недоставлені події + живі виконання: більше за чергу, щоб повна черга не впиралась у квоту.
+  maxOutboxEvents: 200_000,
 };
 
 /** Межі лімітів (CHECK у БД, валідація адмін-API і db:provision — docs/architecture.md, «Контракт лімітів»). */
@@ -23,6 +25,8 @@ export const LIMIT_BOUNDS = {
   rateWindowMs: [1_000, 3_600_000],
   // Збережені визначення тенанта: кожне до 64 КіБ, тож межа тримає обсяг тенанта в БД скінченним.
   maxWorkflows: [1, 100_000],
+  // Подія з обмеженою історією спроб — до кількох КіБ, тож межа тримає сховище тенанта скінченним.
+  maxOutboxEvents: [1, 10_000_000],
 } as const;
 
 const range = (column: string, [lo, hi]: readonly [number, number]) =>
@@ -51,6 +55,18 @@ export const WORKFLOW_QUOTA_CHECK = {
   expression: range('maxWorkflows', LIMIT_BOUNDS.maxWorkflows),
 };
 
+/** CHECK перевизначення квоти outbox (окремо з тієї самої причини, що й квота workflow). */
+export const OUTBOX_QUOTA_CHECK = {
+  name: 'CHK_tenants_max_outbox_events',
+  expression: range('maxOutboxEvents', LIMIT_BOUNDS.maxOutboxEvents),
+};
+
+/**
+ * Детальних записів спроб на подію: перша й останні; старші видаляються під час нової спроби, а
+ * `attempts` події лишається повним лічильником (docs/operations.md, «Сповіщення»).
+ */
+export const OUTBOX_ATTEMPT_HISTORY = 20;
+
 /** Перевизначення лімітів у тенанта (NULL — значення за замовчуванням). */
 export interface TenantLimitOverrides {
   maxConcurrentExecutions: number | null;
@@ -58,6 +74,7 @@ export interface TenantLimitOverrides {
   rateLimit: number | null;
   webhookRateLimit: number | null;
   maxWorkflows: number | null;
+  maxOutboxEvents: number | null;
 }
 
 /** Межі кожного перевизначення (ті самі, що в CHECK). */
@@ -70,6 +87,7 @@ export const OVERRIDE_BOUNDS: Record<
   rateLimit: LIMIT_BOUNDS.rateLimit,
   webhookRateLimit: LIMIT_BOUNDS.rateLimit,
   maxWorkflows: LIMIT_BOUNDS.maxWorkflows,
+  maxOutboxEvents: LIMIT_BOUNDS.maxOutboxEvents,
 };
 
 /** Ефективні ліміти тенанта (`tenant_limits()`): перевизначення або значення за замовчуванням. */
@@ -81,6 +99,7 @@ export interface EffectiveLimits {
   webhookRateLimit: number;
   webhookRateWindowMs: number;
   maxWorkflows: number;
+  maxOutboxEvents: number;
 }
 
 /** Найдовший ключ відра частоти запитів (`<throttler>:<tenantId або IP>`). */

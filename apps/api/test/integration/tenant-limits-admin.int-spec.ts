@@ -71,6 +71,7 @@ describe('tenant limits admin API', () => {
         rateLimit: 50,
         webhookRateLimit: null,
         maxWorkflows: null,
+        maxOutboxEvents: null,
       },
       effective: {
         maxRunning: 3,
@@ -80,6 +81,7 @@ describe('tenant limits admin API', () => {
         webhookRateLimit: 600,
         webhookRateWindowMs: 60_000,
         maxWorkflows: 1000,
+        maxOutboxEvents: 200_000,
       },
     });
     expect(await usage(body.id)).toEqual({
@@ -185,6 +187,7 @@ describe('tenant limits admin API', () => {
       rateLimit: null,
       webhookRateLimit: 5,
       maxWorkflows: null,
+      maxOutboxEvents: null,
     });
     expect(await usage(id)).toMatchObject({ maxQueueSize: 100_000 });
   });

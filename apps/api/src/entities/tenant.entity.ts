@@ -6,7 +6,11 @@ import {
   Generated,
   PrimaryGeneratedColumn,
 } from 'typeorm';
-import { TENANT_LIMIT_CHECKS, WORKFLOW_QUOTA_CHECK } from '../tenancy/limits';
+import {
+  OUTBOX_QUOTA_CHECK,
+  TENANT_LIMIT_CHECKS,
+  WORKFLOW_QUOTA_CHECK,
+} from '../tenancy/limits';
 
 @Entity('tenants')
 @Check(
@@ -27,6 +31,7 @@ import { TENANT_LIMIT_CHECKS, WORKFLOW_QUOTA_CHECK } from '../tenancy/limits';
   TENANT_LIMIT_CHECKS.CHK_tenants_webhook_rate_limit,
 )
 @Check(WORKFLOW_QUOTA_CHECK.name, WORKFLOW_QUOTA_CHECK.expression)
+@Check(OUTBOX_QUOTA_CHECK.name, OUTBOX_QUOTA_CHECK.expression)
 export class Tenant {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -71,6 +76,10 @@ export class Tenant {
   /** Квота збережених workflow (NULL — `limit_defaults.maxWorkflows`). */
   @Column({ type: 'int', nullable: true })
   maxWorkflows: number | null;
+
+  /** Квота outbox: недоставлені події + живі виконання (NULL — `limit_defaults.maxOutboxEvents`). */
+  @Column({ type: 'int', nullable: true })
+  maxOutboxEvents: number | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;

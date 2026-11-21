@@ -6,6 +6,7 @@ const [QUEUE_MIN, QUEUE_MAX] = OVERRIDE_BOUNDS.maxQueueSize;
 const [RATE_MIN, RATE_MAX] = OVERRIDE_BOUNDS.rateLimit;
 const [WEBHOOK_MIN, WEBHOOK_MAX] = OVERRIDE_BOUNDS.webhookRateLimit;
 const [WORKFLOWS_MIN, WORKFLOWS_MAX] = OVERRIDE_BOUNDS.maxWorkflows;
+const [OUTBOX_MIN, OUTBOX_MAX] = OVERRIDE_BOUNDS.maxOutboxEvents;
 
 /**
  * Перевизначення лімітів тенанта (docs/architecture.md, «Контракт лімітів»). Поле відсутнє — без змін, `null` —
@@ -46,6 +47,16 @@ export class TenantLimitsDto {
   @Min(WORKFLOWS_MIN)
   @Max(WORKFLOWS_MAX)
   maxWorkflows?: number | null;
+
+  /**
+   * Недоставлених подій outbox разом із живими виконаннями (діє на нові постановки й redeliver;
+   * прийняті події лишаються й доставляються).
+   */
+  @IsOptional()
+  @IsInt()
+  @Min(OUTBOX_MIN)
+  @Max(OUTBOX_MAX)
+  maxOutboxEvents?: number | null;
 }
 
 export const LIMIT_FIELDS = [
@@ -54,4 +65,5 @@ export const LIMIT_FIELDS = [
   'rateLimit',
   'webhookRateLimit',
   'maxWorkflows',
+  'maxOutboxEvents',
 ] as const;

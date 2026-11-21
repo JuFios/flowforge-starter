@@ -289,7 +289,7 @@ const descriptions: Record<number, string> = {
   415: 'Непідтримуване кодування тіла',
   422: 'Ключ повторно використано з іншими даними',
   428: 'Браузерний запит має містити актуальну editRevision',
-  429: 'rate_limited повертає Retry-After. queue_full та workflow_limit_reached не мають визначеного часу повтору.',
+  429: 'rate_limited повертає Retry-After. queue_full, outbox_full та workflow_limit_reached не мають визначеного часу повтору.',
   503: 'Залежність недоступна',
 };
 const json = (name: string) => ({ 'application/json': { schema: ref(name) } });

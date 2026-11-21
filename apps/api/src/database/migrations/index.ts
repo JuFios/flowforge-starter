@@ -48,6 +48,7 @@ import { BrowserSessions1796700000000 } from './1796700000000-BrowserSessions';
 import { ExecutionRevision1796800000000 } from './1796800000000-ExecutionRevision';
 import { WorkflowEditRevision1796900000000 } from './1796900000000-WorkflowEditRevision';
 import { OutboxPause1797000000000 } from './1797000000000-OutboxPause';
+import { OutboxQuota1797100000000 } from './1797100000000-OutboxQuota';
 
 export const MIGRATIONS = [
   InitialSchema1794920217603,
@@ -84,4 +85,5 @@ export const MIGRATIONS = [
   ExecutionRevision1796800000000,
   WorkflowEditRevision1796900000000,
   OutboxPause1797000000000,
+  OutboxQuota1797100000000,
 ];

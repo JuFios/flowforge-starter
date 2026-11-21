@@ -723,6 +723,46 @@ describe('data migrations', () => {
     expect(due).toBe(true);
   });
 
+  it('counts undelivered events into the outbox quota and trims old attempt history on upgrade', async () => {
+    await truncateAll(ds);
+    await revertThrough('OutboxQuota');
+    const [{ id: tenantId }] = await ds.query<Array<{ id: string }>>(
+      `INSERT INTO tenants(name,"apiKeyHash","webhookSecret") VALUES ('quota','quota-hash','old') RETURNING id`,
+    );
+    const events = await ds.query<Array<{ id: string; status: string }>>(
+      `INSERT INTO outbox_events("tenantId","executionId",sequence,type,payload,status,attempts,
+                                 "leaseToken","leaseUntil","deliveredAt","cancelledAt")
+       SELECT $1,gen_random_uuid(),1,'execution.succeeded','{}',st,30,
+              CASE WHEN st='sending' THEN gen_random_uuid() END,
+              CASE WHEN st='sending' THEN now()+interval '1 minute' END,
+              CASE WHEN st='delivered' THEN now() END,
+              CASE WHEN st='cancelled' THEN now() END
+         FROM unnest(ARRAY['pending','pending','sending','delivered','cancelled']) st
+       RETURNING id, status`,
+      [tenantId],
+    );
+    const pending = events.find((e) => e.status === 'pending')!;
+    await ds.query(
+      `INSERT INTO outbox_attempts("eventId","tenantId",attempt,"senderId",outcome,"finishedAt")
+       SELECT $1,$2,n,'previous','http_error',now() FROM generate_series(1,30) n`,
+      [pending.id, tenantId],
+    );
+    await ds.runMigrations({ transaction: 'each' });
+    const [{ undelivered }] = await ds.query<Array<{ undelivered: number }>>(
+      `SELECT "outboxUndelivered" AS undelivered FROM tenant_usage WHERE "tenantId"=$1`,
+      [tenantId],
+    );
+    expect(undelivered).toBe(3);
+    const kept = await ds.query<Array<{ attempt: number }>>(
+      'SELECT attempt FROM outbox_attempts WHERE "eventId"=$1 ORDER BY attempt',
+      [pending.id],
+    );
+    expect(kept.map((r) => r.attempt)).toEqual([
+      1,
+      ...Array.from({ length: 19 }, (_, i) => 12 + i),
+    ]);
+  });
+
   it('upgrades in-flight deliveries, hints, short schedules and unfinished executions from PR 5', async () => {
     await truncateAll(ds);
     await revertThrough('SerializeOutbox');

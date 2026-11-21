@@ -182,6 +182,8 @@ export const POSTURE: {
     'tenant_usage_on_job()': { owner: SYSTEM_ROLE, execute: [] },
     'close_cancelled_attempt()': { owner: SYSTEM_ROLE, execute: [] },
     'close_paused_attempt()': { owner: SYSTEM_ROLE, execute: [] },
+    'outbox_usage()': { owner: SYSTEM_ROLE, execute: [] },
+    'outbox_attempt_history()': { owner: SYSTEM_ROLE, execute: [] },
     'execution_terminal_cycle()': { owner: SYSTEM_ROLE, execute: [] },
     'outbox_on_execution()': { owner: SYSTEM_ROLE, execute: [] },
     'claim_outbox_event(text,integer,integer)': {

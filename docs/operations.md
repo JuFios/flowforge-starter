@@ -71,7 +71,7 @@ MIGRATION_DATABASE_URL="postgres://flowforge:$(setting POSTGRES_PASSWORD)@localh
 MIGRATION_DATABASE_URL="postgres://flowforge:$(setting POSTGRES_PASSWORD)@localhost:5432/flowforge" \
   API_DB_PASSWORD="$(setting API_DB_PASSWORD)" WORKER_DB_PASSWORD="$(setting WORKER_DB_PASSWORD)" \
   TENANT_MAX_RUNNING="$(setting TENANT_MAX_RUNNING)" TENANT_MAX_QUEUE_SIZE="$(setting TENANT_MAX_QUEUE_SIZE)" \
-  TENANT_MAX_WORKFLOWS="$(setting TENANT_MAX_WORKFLOWS)" \
+  TENANT_MAX_WORKFLOWS="$(setting TENANT_MAX_WORKFLOWS)" TENANT_MAX_OUTBOX_EVENTS="$(setting TENANT_MAX_OUTBOX_EVENTS)" \
   TENANT_RATE_LIMIT="$(setting TENANT_RATE_LIMIT)" TENANT_RATE_WINDOW_MS="$(setting TENANT_RATE_WINDOW_MS)" \
   TENANT_WEBHOOK_RATE_LIMIT="$(setting TENANT_WEBHOOK_RATE_LIMIT)" TENANT_WEBHOOK_RATE_WINDOW_MS="$(setting TENANT_WEBHOOK_RATE_WINDOW_MS)" \
   npm run db:provision
@@ -353,6 +353,8 @@ WebSocket підтримує зміну API-інстансу й відкритт
 | `WORKER_DB_USER` / `WORKER_DB_PASSWORD` | `flowforge_worker` / — | login-роль воркера; ім'я має відрізнятися від ролі API |
 | `TENANT_MAX_RUNNING` | `10` | ліміт одночасних задач тенанта за замовчуванням, 1..1000 |
 | `TENANT_MAX_QUEUE_SIZE` | `100000` | ліміт незавершених задач тенанта за замовчуванням, 1..10000000 |
+| `TENANT_MAX_WORKFLOWS` | `1000` | квота збережених workflow тенанта за замовчуванням, 1..100000 |
+| `TENANT_MAX_OUTBOX_EVENTS` | `200000` | квота outbox: недоставлені події разом із незавершеними виконаннями тенанта, 1..10000000; заповнена — нові постановки й redeliver дають 429 `outbox_full`, cron відкладає |
 | `TENANT_RATE_LIMIT` / `TENANT_RATE_WINDOW_MS` | `600` / `60000` | запитів тенанта до API за вікно, 1..1000000 / 1000..3600000 мс |
 | `TENANT_WEBHOOK_RATE_LIMIT` / `TENANT_WEBHOOK_RATE_WINDOW_MS` | `600` / `60000` | webhook-ів тенанта за вікно (окрема квота) |
 
@@ -411,7 +413,7 @@ npm run db:migrate          # застосувати й звірити інва�
 # створити/оновити ролі flowforge_api і flowforge_worker та значення лімітів за замовчуванням
 API_DB_PASSWORD="$(setting API_DB_PASSWORD)" WORKER_DB_PASSWORD="$(setting WORKER_DB_PASSWORD)" \
   TENANT_MAX_RUNNING="$(setting TENANT_MAX_RUNNING)" TENANT_MAX_QUEUE_SIZE="$(setting TENANT_MAX_QUEUE_SIZE)" \
-  TENANT_MAX_WORKFLOWS="$(setting TENANT_MAX_WORKFLOWS)" \
+  TENANT_MAX_WORKFLOWS="$(setting TENANT_MAX_WORKFLOWS)" TENANT_MAX_OUTBOX_EVENTS="$(setting TENANT_MAX_OUTBOX_EVENTS)" \
   TENANT_RATE_LIMIT="$(setting TENANT_RATE_LIMIT)" TENANT_RATE_WINDOW_MS="$(setting TENANT_RATE_WINDOW_MS)" \
   TENANT_WEBHOOK_RATE_LIMIT="$(setting TENANT_WEBHOOK_RATE_LIMIT)" TENANT_WEBHOOK_RATE_WINDOW_MS="$(setting TENANT_WEBHOOK_RATE_WINDOW_MS)" \
   npm run db:provision
@@ -933,7 +935,12 @@ API та воркера видно запит чи спрацювання, ви�
 endpoint, який колись відповість 2xx. Видалення чи вимкнення налаштувань — пауза, а не втрата; від
 події відмовляється лише сам тенант (`discard`). Спроб без ліміту, пауза між ними зростає до
 `OUTBOX_BACKOFF_MAX_MS` (1 год), недоставлену подію не видаляє ніщо. Поки endpoint недоступний,
-кількість подій у `outbox_events` росте разом із завершеннями (одна подія ≈ 1 КБ). Доставлені
+події накопичуються до квоти тенанта `maxOutboxEvents` (недоставлені разом із незавершеними
+виконаннями; `TENANT_MAX_OUTBOX_EVENTS`). Далі нові постановки й redeliver цього тенанта
+отримують 429 `outbox_full`, cron відкладає спрацювання, а прийняті події лишаються. Історія
+спроб зберігає першу й останні 19 спроб кожної події, а лічильник `attempts` події лишається
+повним. Найгірший виміряний рядок — близько 1,7 КіБ події з помилкою на 1000 символів і 0,2 КіБ
+спроби, тож сховище тенанта обмежене приблизно `maxOutboxEvents × 4,5 КіБ` з індексами. Доставлені
 видаляються через `OUTBOX_RETENTION_DAYS`. Подія створюється, якщо в момент завершення в тенанта є налаштування
 (увімкнені чи на паузі). Один повільний чи недоступний endpoint займає щонайбільше
 `OUTBOX_TENANT_IN_FLIGHT` спроб одночасно в усьому кластері, решта тенантів отримує сповіщення далі.

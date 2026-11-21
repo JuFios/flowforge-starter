@@ -27,7 +27,10 @@ import {
   getCorrelationId,
   newCorrelationId,
 } from '../observability/correlation';
-import { QueueFullException } from '../limits/limit-exceptions';
+import {
+  OutboxFullException,
+  QueueFullException,
+} from '../limits/limit-exceptions';
 import { LimitsMetrics } from '../limits/limits.metrics';
 import { MetricsService } from '../observability/metrics.service';
 import {
@@ -45,6 +48,9 @@ interface QueueUsage {
   queued: number;
   running: number;
   maxQueueSize: number;
+  /** Недоставлені події outbox тенанта і квота outbox (міграція OutboxQuota). */
+  outboxUndelivered: number;
+  maxOutboxEvents: number;
 }
 
 @Injectable()
@@ -140,16 +146,26 @@ export class ExecutionsService {
    */
   private async lockUsage(em: EntityManager): Promise<QueueUsage> {
     const [usage]: QueueUsage[] = await em.query(
-      'SELECT queued, running, "maxQueueSize" FROM lock_tenant_usage()',
+      'SELECT queued, running, "maxQueueSize", "outboxUndelivered", "maxOutboxEvents" FROM lock_tenant_usage()',
     );
     return usage;
   }
 
-  /** Місце в черзі (docs/architecture.md, «Контракт лімітів»); повна черга — 429 `queue_full`. */
+  /**
+   * Місце для нового циклу виконання (docs/architecture.md, «Контракт лімітів»): у черзі (повна —
+   * 429 `queue_full`) і в квоті outbox, бо кожен цикл завершиться щонайбільше однією подією
+   * (недоставлені + живі виконання ≥ квоти — 429 `outbox_full`).
+   */
   private assertQueueSlot(usage: QueueUsage, trigger: EnqueueTrigger): void {
-    if (usage.queued + usage.running < usage.maxQueueSize) return;
-    this.limits.enqueueRejected.inc({ reason: 'queue_full', trigger });
-    throw new QueueFullException(usage.maxQueueSize);
+    const live = usage.queued + usage.running;
+    if (live >= usage.maxQueueSize) {
+      this.limits.enqueueRejected.inc({ reason: 'queue_full', trigger });
+      throw new QueueFullException(usage.maxQueueSize);
+    }
+    if (usage.outboxUndelivered + live >= usage.maxOutboxEvents) {
+      this.limits.enqueueRejected.inc({ reason: 'outbox_full', trigger });
+      throw new OutboxFullException(usage.maxOutboxEvents);
+    }
   }
 
   /**

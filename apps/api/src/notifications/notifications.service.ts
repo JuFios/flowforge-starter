@@ -9,7 +9,10 @@ import {
   ConflictException,
   Injectable,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
+import { OutboxFullException } from '../limits/limit-exceptions';
+import { LimitsMetrics } from '../limits/limits.metrics';
 import {
   keyViews,
   planRevoke,
@@ -101,7 +104,10 @@ const EVENT_COLUMNS = `id, "executionId", sequence, type, status, attempts,
  */
 @Injectable()
 export class NotificationsService {
-  constructor(private readonly db: TenantDb) {}
+  constructor(
+    private readonly db: TenantDb,
+    @Optional() private readonly limits?: LimitsMetrics,
+  ) {}
 
   async get(tenantId: string): Promise<SettingsView> {
     return this.db.run(tenantId, async (em) =>
@@ -379,6 +385,7 @@ export class NotificationsService {
       if (!event) throw new NotFoundException('Подію не знайдено');
       if (event.status === 'sending')
         throw new ConflictException('Спроба доставки цієї події вже триває');
+      if (event.status !== 'pending') await this.assertOutboxSlot(em);
       const [[updated]]: [EventView[], number] = await em.query(
         `UPDATE outbox_events SET status = 'pending', "nextAttemptAt" = now(), "deliveredAt" = NULL,
                 "cancelledAt" = NULL
@@ -392,6 +399,32 @@ export class NotificationsService {
       );
       return updated;
     });
+  }
+
+  /**
+   * Доставлена чи скасована подія знову стає недоставленою: квота outbox перевіряється так само, як
+   * для нового виконання, під блокуванням рядка обліку тенанта (порядок: налаштування → подія →
+   * облік).
+   */
+  private async assertOutboxSlot(em: EntityManager): Promise<void> {
+    const [usage]: Array<{
+      queued: number;
+      running: number;
+      outboxUndelivered: number;
+      maxOutboxEvents: number;
+    }> = await em.query(
+      'SELECT queued, running, "outboxUndelivered", "maxOutboxEvents" FROM lock_tenant_usage()',
+    );
+    if (
+      usage.outboxUndelivered + usage.queued + usage.running <
+      usage.maxOutboxEvents
+    )
+      return;
+    this.limits?.enqueueRejected.inc({
+      reason: 'outbox_full',
+      trigger: 'redeliver',
+    });
+    throw new OutboxFullException(usage.maxOutboxEvents);
   }
 
   private async settings(
