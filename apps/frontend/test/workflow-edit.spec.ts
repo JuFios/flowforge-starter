@@ -98,3 +98,38 @@ test('keeps a body draft across method changes and sends run input numbers uncha
   expect(executions.ok()).toBe(true);
   expect(await executions.json()).toMatchObject({ items: [] });
 });
+
+test('unlocks the run button after an unanswered request and retries with the same key', async ({
+  context,
+  page,
+  request,
+}) => {
+  const tenant = await newTenant(request);
+  await session(context, tenant.apiKey);
+  await page.clock.install();
+  await page.goto('/workflows/new');
+  await page.getByLabel('Назва процесу').fill('Дедлайн');
+  await page.getByLabel('Повідомлення').fill('крок');
+  await page.getByRole('button', { name: 'Зберегти процес' }).click();
+  await expect(page).toHaveURL(/\/workflows\/[a-f0-9-]+$/);
+  // Запит запуску доходить до проксі, але відповідь не приходить ніколи.
+  const keys: string[] = [];
+  await page.route('**/api/proxy/workflows/*/run', (route) => {
+    keys.push(route.request().headers()['idempotency-key'] ?? '');
+    if (keys.length > 1) return route.continue();
+    return undefined;
+  });
+  const run = page.getByRole('button', { name: 'Запустити' });
+  await run.click();
+  await expect(run).toBeDisabled();
+  await page.clock.fastForward(31_000);
+  await expect(page.getByRole('main').getByRole('alert')).toContainText(
+    'Результат запуску невідомий',
+  );
+  await expect(run).toBeEnabled();
+  await run.click();
+  await expect(page).toHaveURL(/\/executions\/[a-f0-9-]+$/);
+  expect(keys).toHaveLength(2);
+  expect(keys[0]).not.toBe('');
+  expect(keys[1]).toBe(keys[0]);
+});

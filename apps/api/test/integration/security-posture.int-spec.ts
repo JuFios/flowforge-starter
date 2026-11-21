@@ -125,7 +125,7 @@ describe('db:migrate refuses a catalog that FlowForge did not shape', () => {
     [
       'functions',
       'EXECUTE ON FUNCTIONS',
-      /function purge_execution_history\(integer,integer\) grants ff_reporter_test_\w+ EXECUTE/,
+      /function app_current_tenant\(\) grants ff_reporter_test_\w+ EXECUTE/,
     ],
     [
       'tables',

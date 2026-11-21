@@ -19,14 +19,30 @@ export type ClientResult<T> =
       correlationId?: string;
     }
   | { kind: 'session_expired' }
-  | { kind: 'network'; message: string; uncertain: boolean }
+  | {
+      kind: 'network';
+      message: string;
+      uncertain: boolean;
+      /** Дедлайн запиту минув (на відміну від обриву зв'язку). */
+      timedOut?: true;
+    }
   | { kind: 'aborted' };
+
+/**
+ * Дедлайн кожного запиту браузера: від надсилання до кінця читання тіла. Без нього завислий
+ * проксі чи мережа лишали б кнопку заблокованою без повідомлення (ТЗ 4: усі зовнішні виклики мають
+ * таймаути).
+ */
+export const REQUEST_TIMEOUT_MS = 30_000;
 
 export type RequestOptions = (
   { body?: unknown; rawJson?: never } | { body?: never; rawJson: string }
 ) & {
   idempotencyKey?: string;
+  /** Скасування викликачем (вихід зі сторінки, новіший запит): результат `aborted`. */
   signal?: AbortSignal;
+  /** Дедлайн цього запиту, мс (за замовчуванням REQUEST_TIMEOUT_MS). */
+  timeoutMs?: number;
 };
 
 function messagesOf(body: ApiErrorBody | undefined): string[] {
@@ -36,10 +52,59 @@ function messagesOf(body: ApiErrorBody | undefined): string[] {
   return typeof message === 'string' && message ? [message] : [];
 }
 
+/**
+ * Запит із дедлайном, що охоплює і заголовки, і читання тіла. Дедлайн і скасування викликачем
+ * завершують запит одразу, навіть якщо `fetch` чи читання тіла не реагують на сигнал; пізня
+ * відповідь уже нічого не змінює. Минулий дедлайн — `network` з `timedOut`, і для змін стану
+ * (POST/PATCH/DELETE) результат невідомий: запит міг дійти до API.
+ */
 export async function apiRequest<T>(
   method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
   path: string,
   options: RequestOptions = {},
+): Promise<ClientResult<T>> {
+  if (options.signal?.aborted) return { kind: 'aborted' };
+  const controller = new AbortController();
+  let timedOut = false;
+  const onCallerAbort = () => controller.abort();
+  options.signal?.addEventListener('abort', onCallerAbort, { once: true });
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, options.timeoutMs ?? REQUEST_TIMEOUT_MS);
+  const interrupted = new Promise<ClientResult<T>>((resolve) =>
+    controller.signal.addEventListener(
+      'abort',
+      () =>
+        resolve(
+          timedOut
+            ? {
+                kind: 'network',
+                message: 'сервер не відповів вчасно',
+                uncertain: method !== 'GET',
+                timedOut: true,
+              }
+            : { kind: 'aborted' },
+        ),
+      { once: true },
+    ),
+  );
+  try {
+    return await Promise.race([
+      interrupted,
+      send<T>(method, path, options, controller.signal),
+    ]);
+  } finally {
+    clearTimeout(timer);
+    options.signal?.removeEventListener('abort', onCallerAbort);
+  }
+}
+
+async function send<T>(
+  method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
+  path: string,
+  options: RequestOptions,
+  signal: AbortSignal,
 ): Promise<ClientResult<T>> {
   const headers: Record<string, string> = {};
   const bodyText =
@@ -54,12 +119,12 @@ export async function apiRequest<T>(
       method,
       headers,
       body: bodyText,
-      signal: options.signal,
+      signal,
       cache: 'no-store',
       credentials: 'same-origin',
     });
   } catch (err) {
-    if (options.signal?.aborted) return { kind: 'aborted' };
+    if (signal.aborted) return { kind: 'aborted' };
     void err;
     return {
       kind: 'network',
@@ -75,7 +140,7 @@ export async function apiRequest<T>(
   try {
     body = await res.json();
   } catch {
-    if (options.signal?.aborted) return { kind: 'aborted' };
+    if (signal.aborted) return { kind: 'aborted' };
     return {
       kind: 'network',
       message: 'відповідь сервера обірвалася',
@@ -122,6 +187,8 @@ export function describeRejection(
     return `Забагато запитів. Спробуйте через ${result.retryAfterSeconds ?? 'кілька'} с.`;
   if (result.error === 'queue_full')
     return 'Черга тенанта заповнена: дочекайтеся завершення запущених виконань.';
+  if (result.error === 'outbox_full')
+    return 'Квота сповіщень тенанта заповнена: endpoint сповіщень має прийняти недоставлені події.';
   if (result.error === 'workflow_limit_reached') return `${result.message}.`;
   return result.message;
 }

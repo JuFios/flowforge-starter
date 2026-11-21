@@ -102,6 +102,13 @@ export class NotificationsController {
     });
   }
 
+  /** Явна відмова від недоставлених подій, створених до запиту (`pending` → `cancelled`). */
+  @Post('events/discard')
+  @HttpCode(200)
+  discard(@CurrentTenant() tenant: Tenant) {
+    return this.notifications.discard(tenant.id);
+  }
+
   @Post('events/:id/redeliver')
   @HttpCode(202)
   redeliver(

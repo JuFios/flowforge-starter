@@ -51,32 +51,33 @@ CI перевіряє розподіл секретів за сервісами 
 ### Локальний запуск поза docker
 
 Потрібні Node.js 20.12+ (гілка 20) або 21.7+ (21 і новіші), Docker (для Postgres) та `.env` у корені з розділу вище. Діапазон Node.js — `engines` у `apps/api/package.json`: команди нижче й CLI міграцій читають `.env` через `util.parseEnv`, якого немає в 20.0–20.11 і 21.0–21.6. Якщо compose-стек
-уже запущено, звільніть порти: `docker compose stop api worker frontend`.
+уже запущено, звільніть порти командою `docker compose stop api api-2 worker frontend` у локальному проєкті.
 
 ```bash
 # з кореня репозиторію
 env -i HOME="$HOME" PATH="$PATH" bash -eu <<'LOCAL_API'
 docker compose up -d postgres
 cd apps/api
-cp .env.example .env              # несекретні налаштування; секрети — нижче, окремо для процесу
+test -f .env || (umask 077; cp .env.example .env)
 npm ci
 npm run build
 setting() {
   node -e 'const {parseEnv}=require("node:util"), {readFileSync}=require("node:fs");
     process.stdout.write(parseEnv(readFileSync("../../.env","utf8"))[process.argv[1]] ?? "")' "$1"
 }
+pg_port="$(setting POSTGRES_PORT)"
 # міграції й ролі — власником схеми (лише цим командам, не API й воркеру)
-MIGRATION_DATABASE_URL="postgres://flowforge:$(setting POSTGRES_PASSWORD)@localhost:5432/flowforge" \
+MIGRATION_DATABASE_URL="postgres://flowforge:$(setting POSTGRES_PASSWORD)@localhost:${pg_port:-5432}/flowforge" \
   npm run db:migrate
-MIGRATION_DATABASE_URL="postgres://flowforge:$(setting POSTGRES_PASSWORD)@localhost:5432/flowforge" \
+MIGRATION_DATABASE_URL="postgres://flowforge:$(setting POSTGRES_PASSWORD)@localhost:${pg_port:-5432}/flowforge" \
   API_DB_PASSWORD="$(setting API_DB_PASSWORD)" WORKER_DB_PASSWORD="$(setting WORKER_DB_PASSWORD)" \
   TENANT_MAX_RUNNING="$(setting TENANT_MAX_RUNNING)" TENANT_MAX_QUEUE_SIZE="$(setting TENANT_MAX_QUEUE_SIZE)" \
-  TENANT_MAX_WORKFLOWS="$(setting TENANT_MAX_WORKFLOWS)" \
+  TENANT_MAX_WORKFLOWS="$(setting TENANT_MAX_WORKFLOWS)" TENANT_MAX_OUTBOX_EVENTS="$(setting TENANT_MAX_OUTBOX_EVENTS)" \
   TENANT_RATE_LIMIT="$(setting TENANT_RATE_LIMIT)" TENANT_RATE_WINDOW_MS="$(setting TENANT_RATE_WINDOW_MS)" \
   TENANT_WEBHOOK_RATE_LIMIT="$(setting TENANT_WEBHOOK_RATE_LIMIT)" TENANT_WEBHOOK_RATE_WINDOW_MS="$(setting TENANT_WEBHOOK_RATE_WINDOW_MS)" \
   npm run db:provision
 # API на :3000 — своєю роллю
-DATABASE_URL="postgres://flowforge_api:$(setting API_DB_PASSWORD)@localhost:5432/flowforge" \
+DATABASE_URL="postgres://flowforge_api:$(setting API_DB_PASSWORD)@localhost:${pg_port:-5432}/flowforge" \
   ADMIN_TOKEN="$(setting ADMIN_TOKEN)" npm run start
 LOCAL_API
 ```
@@ -87,7 +88,8 @@ LOCAL_API
 ```bash
 env -i HOME="$HOME" PATH="$PATH" bash -eu <<'LOCAL_WORKER'
 worker_password="$(node -p 'require("node:util").parseEnv(require("node:fs").readFileSync("../../.env","utf8")).WORKER_DB_PASSWORD')"
-DATABASE_URL="postgres://flowforge_worker:$worker_password@localhost:5432/flowforge" \
+pg_port="$(node -p 'require("node:util").parseEnv(require("node:fs").readFileSync("../../.env","utf8")).POSTGRES_PORT || "5432"')"
+DATABASE_URL="postgres://flowforge_worker:$worker_password@localhost:$pg_port/flowforge" \
   npm run start:worker
 LOCAL_WORKER
 ```
@@ -138,35 +140,14 @@ npm run dev -- -p 3001
 
 ### Приклади запитів
 
-Створити тенанта з кореня репозиторію. Для обох способів запуску токен `ADMIN_TOKEN` береться з кореневого `.env`.
-
-```bash
-ADMIN_TOKEN="$(sed -n 's/^ADMIN_TOKEN=//p' .env)"
-curl -X POST localhost:3000/tenants -H "x-admin-token: $ADMIN_TOKEN" \
-  -H 'content-type: application/json' -d '{"name":"acme"}'
-```
-
-Відповідь містить `apiKey` (показується один раз) і `webhookSecret`. Далі всі запити — із
-заголовком `x-api-key`. Необов'язковий заголовок `x-request-id` задає кореляційний ID
-(інакше він генерується) і повертається у відповіді.
-
-```bash
-API_KEY=ff_...
-curl -X POST localhost:3000/workflows -H "x-api-key: $API_KEY" -H 'content-type: application/json' \
-  -d '{"name":"demo","steps":[{"id":"hello","type":"log","message":"hi {{ input.name }}"}]}'
-
-curl -X POST localhost:3000/workflows/<workflowId>/run -H "x-api-key: $API_KEY" \
-  -H 'x-request-id: demo-1' -H 'content-type: application/json' -d '{"name":"Ada"}'
-
-curl localhost:3000/executions/<executionId> -H "x-api-key: $API_KEY"
-```
+Команди створення тенанта, workflow і першого виконання наведено в [README](../README.md#приклади-запитів). Вони задають `API_URL`, `ADMIN_TOKEN`, `API_KEY` і `workflow_id`, які використовуються нижче. Заголовок `x-request-id` задає кореляційний ID. Якщо заголовок відсутній, API генерує ID і повертає його у відповіді.
 
 Повтор запуску без ризику дубля — заголовок `Idempotency-Key` (до 255 видимих символів ASCII):
 перший запит створює виконання (201), повтор того самого запиту повертає те саме виконання (200),
 той самий ключ з іншим workflow чи входом — 422.
 
 ```bash
-curl -X POST localhost:3000/workflows/<workflowId>/run -H "x-api-key: $API_KEY" \
+curl -fsS --max-time 15 "$API_URL/workflows/$workflow_id/run" -H "x-api-key: $API_KEY" \
   -H 'Idempotency-Key: order-42' -H 'content-type: application/json' -d '{"name":"Ada"}'
 ```
 
@@ -175,7 +156,8 @@ curl -X POST localhost:3000/workflows/<workflowId>/run -H "x-api-key: $API_KEY" 
 не повторюються, а повторений крок `http` надсилає той самий `Idempotency-Key`.
 
 ```bash
-curl -X POST localhost:3000/executions/<executionId>/retry -H "x-api-key: $API_KEY"
+: "${failed_execution_id:?Задайте ID виконання зі статусом failed}"
+curl -fsS --max-time 15 -X POST "$API_URL/executions/$failed_execution_id/retry" -H "x-api-key: $API_KEY"
 ```
 
 Поки виконання стоїть на паузі (`delay`), воно має статус `running`, а час пробудження видно в
@@ -185,11 +167,12 @@ curl -X POST localhost:3000/executions/<executionId>/retry -H "x-api-key: $API_K
 замовчуванням); відповідь показує перевизначення й ефективні ліміти.
 
 ```bash
-curl -X POST localhost:3000/tenants -H "x-admin-token: $ADMIN_TOKEN" -H 'content-type: application/json' \
-  -d '{"name":"acme","limits":{"maxConcurrentExecutions":3,"rateLimit":100}}'
-curl -X PATCH localhost:3000/tenants/<tenantId>/limits -H "x-admin-token: $ADMIN_TOKEN" \
+tenant_id="$(curl -fsS --max-time 15 "$API_URL/tenants" -H "x-admin-token: $ADMIN_TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{"name":"limited-acme","limits":{"maxConcurrentExecutions":3,"rateLimit":100}}' | jq -er .id)"
+curl -fsS --max-time 15 -X PATCH "$API_URL/tenants/$tenant_id/limits" -H "x-admin-token: $ADMIN_TOKEN" \
   -H 'content-type: application/json' -d '{"maxQueueSize":5000,"rateLimit":null}'
-curl localhost:3000/tenants/<tenantId>/limits -H "x-admin-token: $ADMIN_TOKEN"
+curl -fsS --max-time 15 "$API_URL/tenants/$tenant_id/limits" -H "x-admin-token: $ADMIN_TOKEN"
 ```
 
 Кожна відповідь, що пройшла через ліміт частоти, має `X-RateLimit-Limit`, `X-RateLimit-Remaining`
@@ -267,7 +250,7 @@ JSON (об'єкти й масиви) у тілі — до 64 рівнів, гл�
 
 [Swagger UI](http://localhost:3000/docs) описує HTTP API. [Документ OpenAPI](http://localhost:3000/docs-json) генерується із зареєстрованих контролерів. Для запитів тенанта введіть `X-API-Key`, для адміністрування — `X-Admin-Token`. Одноразова відповідь створення тенанта чи ротації містить секрет, який потрібно зберегти при видачі. Списки процесів і виконань повертають `items` та `nextCursor`. Курсор передається в наступний запит із тими самими фільтрами. Деталі виконання сумісні з повним JSON попередньої версії.
 
-Деталі процесу повертають `editRevision` як рядок. Передайте її в тілі PATCH для перевірки актуальності конфігурації. Сесії браузера вимагають цього поля (428), а запит із застарілою ревізією отримує 409 `workflow_edit_conflict`. API-клієнти з ключем можуть виконувати частковий PATCH без ревізії, якщо не використовують `{"keep":true}`. Збережені заголовки дозволено залишати лише з актуальною ревізією та без зміни URL чи ID кроку. Версія кроків зростає лише після зміни визначення, а хід планувальника не змінює ревізію редактора. `nextFireAt` дорівнює `null`, доки планувальник ще не обчислив дату.
+Деталі процесу повертають `editRevision` як рядок. Передайте її в тілі PATCH для перевірки актуальності конфігурації. Сесії браузера вимагають цього поля (428), а запит із застарілою ревізією отримує 409 `workflow_edit_conflict`. API-клієнти з ключем можуть виконувати частковий PATCH без ревізії, якщо не використовують `{"keep":true}`. Збережені заголовки дозволено залишати лише з актуальною ревізією та без зміни URL чи ID кроку. Версія кроків зростає лише після зміни визначення, а хід планувальника не змінює ревізію редактора. `nextFireAt` містить дату, якщо планувальник зберіг момент після `scheduleCursor`. Інакше API повертає `null`. Якщо квота заблокувала перше спрацювання до збереження дати, перевіряйте `scheduleBlockedSince`.
 
 ### Межа довіри браузера
 
@@ -324,14 +307,14 @@ WebSocket підтримує зміну API-інстансу й відкритт
 | `JOB_RETENTION_DAYS` | `30` | скільки днів зберігати завершені задачі (`done`/`failed`/`dead`) у `jobs`, 1..3650; виконання й кроки не видаляються |
 | `EXECUTION_RETENTION_DAYS` | `0` | скільки днів зберігати історію завершених виконань (з кроками й задачами), 0..3650; `0` — зберігати завжди (за замовчуванням: історію тенанта без явного рішення оператора не видаляємо) |
 | `JOB_CLEANUP_INTERVAL_MS` | `3600000` | як часто кожен воркер видаляє старі завершені задачі (і історію, якщо увімкнено), 1000..2147483647 мс, з відхиленням ±50% |
-| `SCHEDULER_TICK_MS` | `30000` | період тіку планувальника, 100..60000 мс: найбільше запізнення вчасного спрацювання; тік читає лише належні розклади (3.3.8) |
+| `SCHEDULER_TICK_MS` | `30000` | період тіку планувальника, 100..60000 мс: без перешкод вчасний момент обробляється на найближчому тіку; зайнятий рядок, повна черга чи квота outbox і простій відкладають спрацювання (README 3.3.8); тік читає лише належні розклади |
 | `SCHEDULER_MISFIRE_GRACE_MS` | `60000` | момент розкладу, старший за стільки мс на час обробки, — пропущений і йде за `missedRunPolicy` workflow, 1000..2147483647, не менше за `SCHEDULER_TICK_MS` |
 | `OUTBOX_CONCURRENCY` | `4` | циклів доставки сповіщень на воркер, 0..64 (`0` — воркер сповіщень не надсилає) |
 | `OUTBOX_TENANT_IN_FLIGHT` | `2` | одночасних спроб доставки одного тенанта в усьому кластері, 1..64: повільний endpoint не займає всіх циклів |
 | `OUTBOX_POLL_INTERVAL_MS` | `1000` | пауза, коли надсилати нічого, 10..60000 мс, з відхиленням ±50% |
 | `OUTBOX_HTTP_TIMEOUT_MS` | `10000` | таймаут однієї спроби доставки, 100..60000 мс; транспорт застосовує мінімум із цим значенням та `HTTP_STEP_TIMEOUT_MS`; lease спроби — `2 ×` таймаут `+ 5 с` |
 | `OUTBOX_BACKOFF_BASE_MS` / `OUTBOX_BACKOFF_MAX_MS` | `5000` / `3600000` | backoff між спробами (експоненційний, повний jitter, не раніше за `Retry-After`); стеля — найдовша пауза: спроб без ліміту, недоставлена подія не видаляється |
-| `OUTBOX_RETENTION_DAYS` | `7` | скільки днів зберігати доставлені події, 1..3650; недоставлені не видаляються ніколи |
+| `OUTBOX_RETENTION_DAYS` | `7` | скільки днів зберігати доставлені або явно скасовані тенантом події, 1..3650 |
 | `TEST_DATABASE_URL` | `postgres://flowforge:flowforge@localhost:5432/flowforge_test` | лише для інтеграційних тестів |
 
 **Змінні кроку міграцій** (`migrate` у compose; не входять до конфігурації API й воркера, а
@@ -344,6 +327,8 @@ WebSocket підтримує зміну API-інстансу й відкритт
 | `WORKER_DB_USER` / `WORKER_DB_PASSWORD` | `flowforge_worker` / — | login-роль воркера; ім'я має відрізнятися від ролі API |
 | `TENANT_MAX_RUNNING` | `10` | ліміт одночасних задач тенанта за замовчуванням, 1..1000 |
 | `TENANT_MAX_QUEUE_SIZE` | `100000` | ліміт незавершених задач тенанта за замовчуванням, 1..10000000 |
+| `TENANT_MAX_WORKFLOWS` | `1000` | квота збережених workflow тенанта за замовчуванням, 1..100000 |
+| `TENANT_MAX_OUTBOX_EVENTS` | `200000` | квота outbox: недоставлені події разом із незавершеними виконаннями тенанта, 1..10000000; заповнена — нові постановки й redeliver дають 429 `outbox_full`, cron відкладає |
 | `TENANT_RATE_LIMIT` / `TENANT_RATE_WINDOW_MS` | `600` / `60000` | запитів тенанта до API за вікно, 1..1000000 / 1000..3600000 мс |
 | `TENANT_WEBHOOK_RATE_LIMIT` / `TENANT_WEBHOOK_RATE_WINDOW_MS` | `600` / `60000` | webhook-ів тенанта за вікно (окрема квота) |
 
@@ -397,19 +382,21 @@ setting() {
   node -e 'const {parseEnv}=require("node:util"), {readFileSync}=require("node:fs");
     process.stdout.write(parseEnv(readFileSync("../../.env","utf8"))[process.argv[1]] ?? "")' "$1"
 }
-export MIGRATION_DATABASE_URL="postgres://flowforge:$(setting POSTGRES_PASSWORD)@localhost:5432/flowforge"
+pg_port="$(setting POSTGRES_PORT)"
+export MIGRATION_DATABASE_URL="postgres://flowforge:$(setting POSTGRES_PASSWORD)@localhost:${pg_port:-5432}/flowforge"
 npm run db:migrate          # застосувати й звірити інваріанти безпеки (одна транзакція)
 # створити/оновити ролі flowforge_api і flowforge_worker та значення лімітів за замовчуванням
 API_DB_PASSWORD="$(setting API_DB_PASSWORD)" WORKER_DB_PASSWORD="$(setting WORKER_DB_PASSWORD)" \
   TENANT_MAX_RUNNING="$(setting TENANT_MAX_RUNNING)" TENANT_MAX_QUEUE_SIZE="$(setting TENANT_MAX_QUEUE_SIZE)" \
-  TENANT_MAX_WORKFLOWS="$(setting TENANT_MAX_WORKFLOWS)" \
+  TENANT_MAX_WORKFLOWS="$(setting TENANT_MAX_WORKFLOWS)" TENANT_MAX_OUTBOX_EVENTS="$(setting TENANT_MAX_OUTBOX_EVENTS)" \
   TENANT_RATE_LIMIT="$(setting TENANT_RATE_LIMIT)" TENANT_RATE_WINDOW_MS="$(setting TENANT_RATE_WINDOW_MS)" \
   TENANT_WEBHOOK_RATE_LIMIT="$(setting TENANT_WEBHOOK_RATE_LIMIT)" TENANT_WEBHOOK_RATE_WINDOW_MS="$(setting TENANT_WEBHOOK_RATE_WINDOW_MS)" \
   npm run db:provision
 npm run migration:revert    # відкотити останню
 npm run migration:show      # стан
 # нова міграція з різниці між сутностями і БД (потім додати її в migrations/index.ts):
-npm run build && npm run migration:generate -- src/database/migrations/<Name>
+migration_name=DescribeSchemaChange
+npm run build && npm run migration:generate -- "src/database/migrations/$migration_name"
 ```
 
 Наявні міграції:
@@ -495,16 +482,7 @@ docker compose up --build
 
 ## Тести
 
-```bash
-cd apps/api
-npm test                    # unit (без БД)
-# тестова БД — власником; пароль — POSTGRES_PASSWORD із кореневого .env (без нього — flowforge, як у CI)
-pw="$(node -e 'const {parseEnv}=require("node:util"), {existsSync, readFileSync}=require("node:fs");
-  const f="../../.env"; process.stdout.write((existsSync(f) && parseEnv(readFileSync(f,"utf8")).POSTGRES_PASSWORD) || "")')"
-export TEST_DATABASE_URL="postgres://flowforge:${pw:-flowforge}@localhost:5432/flowforge_test"
-npm run test:integration    # integration на реальному Postgres (спершу збирає dist: тест падіння воркера запускає dist/worker.js)
-npm run test:all            # обидва набори
-```
+Команди встановлення залежностей, підключення до тестової БД та запуску наведено в [README](../README.md#тести).
 
 - `test/unit` — швидкі тести без інфраструктури (`test/jest-unit.json`).
 - `test/integration` — тести на реальному Postgres (`test/jest-integration.json`). Перед
@@ -512,8 +490,8 @@ npm run test:all            # обидва набори
   `public` і будує її міграціями з нуля** — тож кожен прогін заодно перевіряє міграції.
   Запуск дозволений лише на базі з суфіксом `_test`. Файли виконуються послідовно; кожен тест
   очищає таблиці (`test/helpers/db.ts`). Локально достатньо `docker compose up -d postgres` і
-  адреси тестової БД власником (суперкористувачем) — `TEST_DATABASE_URL` з блоку вище (пароль
-  береться з кореневого `.env`, тож блок працює й у новому терміналі).
+  адреси тестової БД власником (суперкористувачем). Команди README беруть пароль і порт для
+  `TEST_DATABASE_URL` із кореневого `.env`.
 - **Ролі в тестах — як у compose.** Глобальний setup після міграцій створює runtime-ролі
   `flowforge_api_test_<суфікс>` і `flowforge_worker_test_<суфікс>` (`provisionLoginRoles`, окремі від
   ролей compose імена, бо ролі спільні для кластера Postgres) з **випадковими на кожен прогін паролями**
@@ -730,8 +708,9 @@ curl -X DELETE localhost:3000/tenants/me/notifications -H "x-api-key: $API_KEY"
 |---|---|
 | Створення (`PUT`, налаштувань ще немає) | події з'являються для завершень **після** цього моменту; минулі завершення сповіщень не створюють |
 | Зміна URL (`PUT`) | `revision` +1; кожна наступна спроба, зокрема події, що вже чекають, іде на новий URL. Спроба, яка вже триває, завершується на старий |
-| `enabled: false` | нові завершення подій не створюють; події, що вже чекають, стоять на паузі (не видаляються) і продовжують доставлятися після `enabled: true` |
-| `DELETE` | події, що чекають, стають `cancelled` (лишаються в журналі); спроба, що триває, свого результату вже не запише |
+| `enabled: false` | пауза доставки: нові завершення далі створюють події, вони й ті, що вже чекають, лишаються `pending` і доставляються після `enabled: true` |
+| `DELETE` | відписка: нові завершення подій не створюють. Прийняті події лишаються `pending` і автоматично доставляються, щойно тенант налаштує endpoint знову, з тими самими ID і байтами. Спроба, що триває, повертається в `pending` (outcome `paused`), і її пізня відповідь нічого не змінює |
+| `POST …/events/discard` | явна відмова тенанта від недоставлених подій, створених до запиту: `pending` → `cancelled`, відповідь `{"discarded": n}`. Запит просувається порціями за часом створення та ID. Оновлення чекає на конкурентні записи в межах таймауту БД. Якщо запит завершився помилкою, підтверджені порції лишаються скасованими, решту можна скасувати повторним запитом. Спроби, що тривають, не перериваються. Скасовані події видаляються через `OUTBOX_RETENTION_DAYS` |
 | Ротація ключа | див. нижче; події, що чекають, підписуються ключами, чинними на момент спроби |
 
 Адреса перевіряється двічі: під час збереження (схема, облікові дані, DNS і політика адрес) і під
@@ -862,9 +841,9 @@ module.exports = { verify, handle };
 
 `GET /tenants/me/notifications/events/:id?limit=50` повертає поля події, масив `attempts` та `nextAttemptsCursor`. Ліміт 1–100. Наступний запит додає `cursor` до того самого маршруту. Значення `null` завершує обхід. Перша сторінка фіксує останній номер спроби. Нові номери потраплять до нового обходу, результат активної спроби може оновитися. Курсор прив’язаний до події, доступ до неї перевіряється в контексті тенанта на кожній сторінці.
 
-Без параметрів чинний клієнт отримує всі спроби у попередньому форматі у порядку номера. Довга відповідь передається потоком із протитиском і межею 60 с. Розрив або таймаут перериває потік. Для великих історій сторінки дозволяють продовжити з останньої успішної відповіді. З'єднання БД утримується лише на час читання порції. На цей час FOR KEY SHARE зберігає рядок події разом зі спробами, а очищення пропускає його через SKIP LOCKED. Після COMMIT очищення може видалити доставлену подію за політикою зберігання. Наступний запит тоді повертає 404.
+Без параметрів клієнт отримує всі збережені спроби у попередньому форматі й у порядку номера. Історія зберігає до 20 записів: першу й останні 19 спроб. З'єднання БД утримується лише під час читання порції. На цей час FOR KEY SHARE зберігає рядок події разом зі спробами, а очищення пропускає його через SKIP LOCKED. Після COMMIT очищення може видалити доставлену подію за політикою зберігання. Наступний запит тоді повертає 404.
 
-**Вимір.** Node 20.19.4, PostgreSQL 16. Для кожного розміру та режиму запускався окремий процес API. Клієнт читав байти HTTP. У таблиці приріст максимального RSS процесу проти його прогрітого максимуму в МіБ (1 МіБ = 1 048 576 байтів). Значення пам'яті залежать від платформи та збирача сміття.
+**Історичне вимірювання до обмеження журналу.** Node 20.19.4, PostgreSQL 16. Для кожного розміру та режиму запускався окремий процес API. Клієнт читав байти HTTP. У таблиці приріст максимального RSS процесу проти його прогрітого максимуму в МіБ (1 МіБ = 1 048 576 байтів). Значення пам'яті залежать від платформи та збирача сміття.
 
 | Спроб | Старий GET, байтів / приріст RSS | Потоковий GET, байтів / приріст RSS | Сторінка 50, байтів / приріст RSS |
 |---:|---:|---:|---:|
@@ -872,28 +851,35 @@ module.exports = { verify, handle };
 | 10 000 | 1 819 238 / 4,11 | 1 819 238 / 3,16 | 9 419 / 0,16 |
 | 100 000 | 18 289 239 / 77,31 | 18 289 239 / 24,53 | 9 421 / 0,08 |
 
-Відтворення в `apps/api` на ізольованій `TEST_DATABASE_URL` із суфіксом `_test` — `npm run build && npm run bench:claim -- --runInBand attempt-history`. Прогін також виводить абсолютний пік RSS та приріст спостережуваного heap.
+Поточна перевірка вимірює обсяг збереженої історії для загальних лічильників 100, 10 000 і 100 000 спроб. На PostgreSQL 16 отримано 3 944–4 027 байтів для події з тестовим тілом і 20 спробами. Критерій для цієї фікстури — менш ніж 8 КіБ у кожному режимі. Прогін також виводить пік RSS і приріст heap. Команда в `apps/api` на ізольованій `TEST_DATABASE_URL` із суфіксом `_test` — `npm run build && npm run bench:claim -- --runInBand attempt-history`.
 
 ### Оновлення з першої версії outbox
 
-Зупиніть API та воркери, виконайте штатний `db:migrate` і розгорніть оновлені процеси перед відновленням доставок. Міграція `SerializeOutbox` замінює функцію чинного тригера, встановлює функцію запису результату, перераховує підказки для наявних подій і скасовує недоставлені події без налаштувань. Незавершене execution після оновлення створює подію штатним переходом. Успадковані короткі cron отримують `scheduleError` та `nextFireAt = NULL`, зберігаючи текст і курсор. Для відновлення задайте валідний cron через PATCH.
+Зупиніть API та воркери й виконайте штатний `db:migrate`. Міграція `SerializeOutbox` перераховує підказки й переводить недоставлені події без налаштувань у `cancelled`. `OutboxPause` повертає ці неявно скасовані події в `pending`. Воркери знову почнуть їх доставляти для ввімкнених endpoint-ів, щойно запустяться. Незавершене execution після оновлення створює подію штатним переходом. Успадковані короткі cron отримують `scheduleError` та `nextFireAt = NULL`, зберігаючи текст і курсор. Для відновлення задайте валідний cron через PATCH.
 
-Якщо стара гонка вже відбулася і endpoint після DELETE було створено знову, попередня схема не зберігає покоління конфігурації. Перед відновленням доставки для такого тенанта звірте спірні ID з журналом отримувача. Для скасування всієї спірної черги штатний DELETE скасує недоставлені події, після нового PUT узгоджені події можна повернути через `redeliver`. Запит, який уже пішов до старого endpoint-а, може завершитися на боці отримувача. Скидання токена захищає стан події від його пізньої відповіді.
+Якщо стара гонка вже відбулася і endpoint після видалення було створено знову, попередня схема не зберігає покоління конфігурації. Для такого тенанта після міграції запустіть лише API і виконайте звірку, поки воркери зупинені.
+
+1. Якщо endpoint налаштований, виконайте `DELETE /tenants/me/notifications`. Доставка призупиниться, а активні спроби повернуться в `pending`. Запит, який уже пішов до отримувача, може в нього завершитися. Скидання токена захищає стан події від пізньої відповіді.
+2. Звірте ID із журналом отримувача. Щоб відмовитися від усієї недоставленої черги, виконайте `POST /tenants/me/notifications/events/discard` і перевірте за журналом, що спірні події скасовано.
+3. Поверніть лише узгоджені ID через `redeliver`, створіть налаштування через `PUT /tenants/me/notifications` і запустіть воркери.
 
 ### Для оператора: недоставлені події
 
 ```bash
 # Журнал подій тенанта: найновіші першими, курсорна пагінація (limit 1..100), фільтр за станом.
-curl "localhost:3000/tenants/me/notifications/events?status=pending&limit=20" -H "x-api-key: $API_KEY"
+curl -fsS --max-time 15 "$API_URL/tenants/me/notifications/events?status=pending&limit=20" -H "x-api-key: $API_KEY"
+
+: "${event_id:?Задайте ID події з журналу}"
 # Подія з точними байтами й усіма спробами (номер, відправник, ревізія endpoint-а, ключі,
 # результат, HTTP-статус, тривалість).
-curl localhost:3000/tenants/me/notifications/events/<eventId> -H "x-api-key: $API_KEY"
+curl -fsS --max-time 15 "$API_URL/tenants/me/notifications/events/$event_id" -H "x-api-key: $API_KEY"
 # Надіслати негайно (той самий id і байти), без очікування backoff; також для delivered/cancelled.
-curl -X POST localhost:3000/tenants/me/notifications/events/<eventId>/redeliver -H "x-api-key: $API_KEY"
+# Без налаштувань подія чекає pending і піде після наступного PUT.
+curl -fsS --max-time 15 -X POST "$API_URL/tenants/me/notifications/events/$event_id/redeliver" -H "x-api-key: $API_KEY"
 ```
 
 Стани: `pending` (чекає спроби; `nextAttemptAt` — коли), `sending` (спроба триває; lease
-`2 × OUTBOX_HTTP_TIMEOUT_MS + 5 с`), `delivered`, `cancelled`. `lastError` — клас останньої невдачі:
+`2 × OUTBOX_HTTP_TIMEOUT_MS + 5 с`), `delivered`, `cancelled` (лише явна відмова тенанта, `cancelledAt`). `lastError` — клас останньої невдачі:
 `http_error`, `redirect`, `timeout`, `network`, `denied`, `paused`, `aborted`. Через усі тенанти —
 власником схеми (повз RLS):
 
@@ -915,12 +901,18 @@ SELECT e.id, e."executionId", e.sequence, e."correlationId", x.status, x.trigger
 — з `eventId`, `attempt`, `outcome`, `httpStatus` у контексті `correlationId` події: за ним у логах
 API та воркера видно запит чи спрацювання, виконання, кроки й усі спроби доставки.
 
-**Межі гарантії.** Подія доставляється щонайменше один раз, якщо налаштування не видалено, і
-endpoint колись відповість 2xx: спроб без ліміту, пауза між ними зростає до
+**Межі гарантії.** Прийнята подія доставляється щонайменше один раз, щойно в тенанта є увімкнений
+endpoint, який колись відповість 2xx. Видалення чи вимкнення налаштувань — пауза, а не втрата; від
+події відмовляється лише сам тенант (`discard`). Спроб без ліміту, пауза між ними зростає до
 `OUTBOX_BACKOFF_MAX_MS` (1 год), недоставлену подію не видаляє ніщо. Поки endpoint недоступний,
-кількість подій у `outbox_events` росте разом із завершеннями (одна подія ≈ 1 КБ). Доставлені
-видаляються через `OUTBOX_RETENTION_DAYS`. Подія створюється лише тоді, коли сповіщення ввімкнені в
-момент завершення. Один повільний чи недоступний endpoint займає щонайбільше
+події накопичуються до квоти тенанта `maxOutboxEvents` (недоставлені разом із незавершеними
+виконаннями; `TENANT_MAX_OUTBOX_EVENTS`). Далі нові постановки й redeliver цього тенанта
+отримують 429 `outbox_full`, cron відкладає спрацювання, а прийняті події лишаються. Історія
+спроб зберігає першу й останні 19 спроб кожної події, а лічильник `attempts` події лишається
+повним. Найгірший виміряний рядок — близько 1,7 КіБ події з помилкою на 1000 символів і 0,2 КіБ
+спроби, тож одна недоставлена подія з повною історією займає близько 5,7 КіБ без індексів. Доставлені
+видаляються через `OUTBOX_RETENTION_DAYS`. Подія створюється, якщо в момент завершення в тенанта є налаштування
+(увімкнені чи на паузі). Один повільний чи недоступний endpoint займає щонайбільше
 `OUTBOX_TENANT_IN_FLIGHT` спроб одночасно в усьому кластері, решта тенантів отримує сповіщення далі.
 
 
@@ -973,8 +965,9 @@ docker compose -f docker-compose.yml -f docker-compose.chaos.yml up -d --build -
 ```
 
 Скрипт `apps/api/scripts/chaos-restart-postgres.ts` ставить те саме навантаження (200 виконань
-`log → http (sink) → delay 2 с → log`) і двічі робить `docker compose restart postgres`, чекаючи,
-поки БД знову стане healthy. Перевіряє все те саме, що й сценарій із вбивством воркерів, і ще:
+`log → http (sink) → delay 2 с → log`). Він двічі чекає, поки запис успішного HTTP-чекпоінта
+заблокується, зупиняє Postgres через SIGKILL і запускає той самий контейнер. Кожен раунд
+чекає, поки БД знову стане healthy. Перевіряє все те саме, що й сценарій із вбивством воркерів, і ще:
 жоден процес воркера чи API не перезапустився (`StartedAt` і `RestartCount` контейнерів ті самі),
 після відновлення всі вони знову healthy. У кожному раунді перевіряється відновлення перерваної роботи його окремої групи задач. Лічильники помилок захоплення, продовження lease та запису результатів допомагають пояснити наслідки збою. Той самий сценарій виконується в CI.
 
@@ -1028,7 +1021,9 @@ docker compose -f docker-compose.yml -f docker-compose.chaos.yml up -d --build -
 2. «A сам» — 20 000 виконань тенанта A ставляться в чергу одразу (SQL власником схеми); пропускна
    здатність A за 20 с. Ліміти A (черга 30 000, одночасних 16) вищі за кількість слотів, тож
    справедливість не тримається на лімітах.
-3. «B під backlog-ом A» — ті самі 30 виконань B, поки черга A глибока.
+3. «B під backlog-ом A» — ті самі 30 виконань B, поки черга A глибока, а endpoint сповіщень A
+   повертає 503. Скрипт перевіряє за журналом спроб, що відмова доставки відбулась під час цієї
+   фази.
 
 Метрики — за годинником БД: очікування B — від створення виконання до початку першого кроку,
 повна тривалість — до завершення; p95 захоплення — з гістограми воркерів

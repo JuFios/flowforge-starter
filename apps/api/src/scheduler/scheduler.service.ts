@@ -10,7 +10,10 @@ import { EntityManager } from 'typeorm';
 import { EnvironmentVariables } from '../config/env.validation';
 import { MissedRunPolicy, Workflow } from '../entities';
 import { ExecutionsService } from '../executions/executions.service';
-import { QueueFullException } from '../limits/limit-exceptions';
+import {
+  OutboxFullException,
+  QueueFullException,
+} from '../limits/limit-exceptions';
 import { runWithCorrelationId } from '../observability/correlation';
 import { toSafeError } from '../observability/safe-error';
 import { SCHEDULE_PAGE, SystemDb } from '../tenancy/system-db';
@@ -419,7 +422,11 @@ export class SchedulerService
             correlationId,
           );
         } catch (err) {
-          if (err instanceof QueueFullException)
+          // Повна черга чи квота outbox відкладає спрацювання до звільнення місця (3.3.8).
+          if (
+            err instanceof QueueFullException ||
+            err instanceof OutboxFullException
+          )
             throw new BlockedSchedule(row.revision);
           // У контексті спрацювання (кореляційний ID моменту), з workflowId і моментом. Помилка
           // з'єднання перериває тік, і її логує сам тік.

@@ -12,8 +12,10 @@ import {
   truncateAll,
 } from '../helpers/db';
 import { NotificationsService } from '../../src/notifications/notifications.service';
+import { TenantDb } from '../../src/tenancy/tenant-db';
 import { fakeTenantDb } from '../helpers/fake-tenant-db';
 import { waitForBlocked } from '../helpers/transaction-barrier';
+import { waitFor } from '../helpers/wait-for';
 
 import { verifyNotification } from '../helpers/notifications';
 import { api, Receiver } from '../helpers/queue';
@@ -132,19 +134,24 @@ describe('notification settings', () => {
         await waiting;
         await holder.release();
       }
+      // Завершення після видалення — без налаштувань подія не приймається; прийнята до видалення
+      // подія чекає й доходить до наступного endpoint-а тенанта без ручного redeliver.
+      const accepted: Array<{ id: string }> = await ds.query(
+        'SELECT id FROM outbox_events WHERE "executionId"=$1',
+        [execution.id],
+      );
+      expect(accepted).toHaveLength(order === 'delete first' ? 0 : 1);
       await setup(a, '/new');
       const fresh = await completed(a);
-      expect(await sender.deliverNext()).toBe(true);
+      while (await sender.deliverNext());
       expect(
-        receiver.hits('/new').map((req) => req.headers['x-flowforge-event-id']),
-      ).toEqual([fresh]);
-      expect(await sender.deliverNext()).toBe(false);
-      expect(
-        await ds.query(
-          'SELECT status FROM outbox_events WHERE "executionId"=$1',
-          [execution.id],
-        ),
-      ).toEqual(order === 'delete first' ? [] : [{ status: 'cancelled' }]);
+        receiver
+          .hits('/new')
+          .map((req) => req.headers['x-flowforge-event-id'])
+          .sort(),
+      ).toEqual([...accepted.map((e) => e.id), fresh].sort());
+      expect(receiver.hits('/old')).toEqual([]);
+      for (const e of accepted) expect(await status(e.id)).toBe('delivered');
     },
   );
 
@@ -161,18 +168,21 @@ describe('notification settings', () => {
           revision: number;
           keys: Array<{ id: string }>;
         }>(a, 'PUT', '/tenants/me/notifications', { url: receiver.url(path) });
+      let next: ReturnType<typeof put> | undefined;
       try {
-        // SHARE пропускає пошук FOR NO KEY UPDATE, утримуючи обидві вставки до COMMIT.
-        await holder.query('LOCK TABLE notification_settings IN SHARE MODE');
-        const results = Promise.all([put('/first'), put(secondPath)]);
-        await waitForBlocked(ds, holder, 2);
+        // Перше налаштування тримає запобіжний рядок тенанта до COMMIT.
+        const settings = new NotificationsService(fakeTenantDb(holder.manager));
+        const first = await settings.put(a.tenant.id, {
+          url: receiver.url('/first'),
+        });
+        next = put(secondPath);
+        await waitForBlocked(ds, holder);
         await holder.commitTransaction();
-        const responses = await results;
-        expect(responses.map((r) => r.status)).toEqual([200, 200]);
-        const creator = responses.filter((r) => r.body.secret);
-        expect(creator).toHaveLength(1);
-        expect(responses[0].body.keys).toEqual(responses[1].body.keys);
-        const last = responses.find((r) => !r.body.secret)!;
+        const last = await next;
+        expect(last.status).toBe(200);
+        expect(first.secret).toEqual(expect.any(String));
+        expect(last.body.secret).toBeUndefined();
+        expect(last.body.keys).toEqual(first.keys);
         expect(
           await ds.query(
             'SELECT url, revision FROM notification_settings WHERE "tenantId"=$1',
@@ -183,6 +193,7 @@ describe('notification settings', () => {
         ]);
       } finally {
         if (holder.isTransactionActive) await holder.rollbackTransaction();
+        await next?.catch(() => undefined);
         await holder.release();
       }
     },
@@ -317,58 +328,264 @@ describe('notification settings', () => {
     expect(attempt.revision).toBe(2);
   });
 
-  it('closes the unfinished attempt when a tenant cancels a claimed event', async () => {
-    await setup(a);
+  it('pauses a claimed event when the settings are deleted and delivers it after the next setup', async () => {
+    await setup(a, '/old');
     const id = await completed(a);
-    await ds.query("SELECT * FROM claim_outbox_event('lost', 30000, 1)");
+    const [claimed]: Array<{ leaseToken: string }> = await ds.query(
+      `SELECT "leaseToken" FROM claim_outbox_event('lost', 30000, 1)`,
+    );
     expect(await status(id)).toBe('sending');
     expect((await call(a, 'DELETE', '/tenants/me/notifications')).status).toBe(
       204,
     );
+    expect(await status(id)).toBe('pending');
     expect(
       await ds.query(
         'SELECT outcome, "finishedAt" IS NOT NULL AS finished FROM outbox_attempts WHERE "eventId"=$1',
         [id],
       ),
-    ).toEqual([{ outcome: 'cancelled', finished: true }]);
+    ).toEqual([{ outcome: 'paused', finished: true }]);
+    // Пізній результат спроби, що тривала, нічого не змінює: fencing-токен скинуто.
+    const [late]: Array<{ applied: boolean }> = await ds.query(
+      `SELECT finish_outbox_event($1, $2, 0, 'delivered', 200) AS applied`,
+      [id, claimed.leaseToken],
+    );
+    expect(late.applied).toBe(false);
+    expect(await sender.deliverNext()).toBe(false);
+    const [before]: Array<{ payload: string }> = await ds.query(
+      'SELECT payload FROM outbox_events WHERE id=$1',
+      [id],
+    );
+    await setup(a, '/new');
+    expect(await sender.deliverNext()).toBe(true);
+    const [hit] = receiver.hits('/new');
+    expect(hit.headers['x-flowforge-event-id']).toBe(id);
+    expect(hit.raw.toString()).toBe(before.payload);
+    expect(await status(id)).toBe('delivered');
   });
 
-  it('pauses pending events while disabled and cancels them when the settings are deleted', async () => {
+  it('keeps accepting events while paused and delivers them once enabled', async () => {
     await setup(a);
     await call(a, 'PUT', '/tenants/me/notifications', {
       url: receiver.url('/notify'),
       enabled: false,
     });
-    // Вимкнено до завершення: події немає. Увімкнено після — подія є й чекає, поки знову вимкнуть.
+    // Пауза зупиняє доставку, а не приймання: завершення під час паузи теж дає подію.
+    const during = await completed(a);
+    expect(await sender.deliverNext()).toBe(false);
+    expect(await status(during)).toBe('pending');
+    expect(receiver.requests).toEqual([]);
     await call(a, 'PUT', '/tenants/me/notifications', {
       url: receiver.url('/notify'),
       enabled: true,
     });
-    const event = await completed(a);
-    await call(a, 'PUT', '/tenants/me/notifications', {
-      url: receiver.url('/notify'),
-      enabled: false,
-    });
-    expect(await sender.deliverNext()).toBe(false);
-    expect(await status(event)).toBe('pending');
+    expect(await sender.deliverNext()).toBe(true);
+    expect(await status(during)).toBe('delivered');
+  });
+
+  it('cancels undelivered events only on the explicit request of the tenant', async () => {
+    await setup(a);
+    await setup(b);
+    const first = await completed(a);
+    const second = await completed(a);
+    const other = await completed(b);
     expect((await call(a, 'DELETE', '/tenants/me/notifications')).status).toBe(
       204,
     );
-    expect(await status(event)).toBe('cancelled');
-    expect(receiver.requests).toEqual([]);
-    // Подія лишається в журналі й доставляється повторно після нового налаштування.
+    expect(await status(first)).toBe('pending');
+    const res = await call<{ discarded: number }>(
+      a,
+      'POST',
+      '/tenants/me/notifications/events/discard',
+    );
+    expect(res).toEqual({ status: 200, body: { discarded: 2 } });
+    expect([await status(first), await status(second)]).toEqual([
+      'cancelled',
+      'cancelled',
+    ]);
+    // Відмова тенанта A не зачіпає подій тенанта B.
+    expect(await status(other)).toBe('pending');
+    await call(b, 'DELETE', '/tenants/me/notifications');
+    // Після нового налаштування відмовлені події не надсилаються; redeliver повертає одну з них.
     await setup(a);
+    expect(await sender.deliverNext()).toBe(false);
     expect(
       (
         await call(
           a,
           'POST',
-          `/tenants/me/notifications/events/${event}/redeliver`,
+          `/tenants/me/notifications/events/${first}/redeliver`,
         )
       ).status,
     ).toBe(202);
     expect(await sender.deliverNext()).toBe(true);
-    expect(await status(event)).toBe('delivered');
+    expect(await status(first)).toBe('delivered');
+    expect(await status(second)).toBe('cancelled');
+    expect(receiver.requests).toHaveLength(1);
+  });
+
+  it('preserves an event requeued after it passed an earlier discard batch', async () => {
+    const tenantId = a.tenant.id;
+    const [{ id }] = await ds.query<Array<{ id: string }>>(
+      `WITH seeded AS (
+         INSERT INTO outbox_events ("tenantId", "executionId", sequence, type, payload, "createdAt")
+         SELECT $1, gen_random_uuid(), 1, 'execution.succeeded', '{}',
+                TIMESTAMPTZ '2020-01-01 00:00:00.000001+00'
+                  + LEAST(n, 1) * interval '1 microsecond'
+           FROM generate_series(0, 1000) n
+         RETURNING id, "createdAt"
+       ) SELECT id FROM seeded ORDER BY "createdAt", id LIMIT 1`,
+      [tenantId],
+    );
+    const db = apiApp.app.get(TenantDb);
+    const notifications = apiApp.app.get(NotificationsService);
+    const run = db.run.bind(db);
+    let transactions = 0;
+    const barrier = jest
+      .spyOn(db, 'run')
+      .mockImplementation(async (context, fn) => {
+        const result = await run(context, fn);
+        // Перший виклик фіксує час, другий комітить першу порцію.
+        if (++transactions === 2) await notifications.redeliver(tenantId, id);
+        return result;
+      });
+    try {
+      expect(await notifications.discard(tenantId)).toEqual({
+        discarded: 1001,
+      });
+      expect(await status(id)).toBe('pending');
+    } finally {
+      barrier.mockRestore();
+    }
+  });
+
+  it('delivers a redelivery racing with creation of new settings', async () => {
+    await setup(a, '/old');
+    const id = await completed(a);
+    expect(await sender.deliverNext()).toBe(true);
+    expect((await call(a, 'DELETE', '/tenants/me/notifications')).status).toBe(
+      204,
+    );
+
+    const holder = ds.createQueryRunner();
+    await holder.connect();
+    await holder.startTransaction();
+    let replay: Promise<{ status: number }> | undefined;
+    try {
+      const settings = new NotificationsService(fakeTenantDb(holder.manager));
+      await settings.put(a.tenant.id, { url: receiver.url('/new') });
+      const [{ pid }] = (await holder.query(
+        'SELECT pg_backend_pid() AS pid',
+      )) as Array<{ pid: number }>;
+      let settled = false;
+      replay = call(
+        a,
+        'POST',
+        `/tenants/me/notifications/events/${id}/redeliver`,
+      );
+      void replay.then(
+        () => {
+          settled = true;
+        },
+        () => {
+          settled = true;
+        },
+      );
+      await waitFor(
+        'redelivery to complete or wait for recreation',
+        async () => {
+          if (settled) return true;
+          const [{ blocked }] = await ds.query<Array<{ blocked: boolean }>>(
+            'SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))) AS blocked',
+            [pid],
+          );
+          return blocked;
+        },
+      );
+      await holder.commitTransaction();
+      expect((await replay).status).toBe(202);
+    } finally {
+      if (holder.isTransactionActive) await holder.rollbackTransaction();
+      await replay;
+      await holder.release();
+    }
+    expect(await sender.deliverNext()).toBe(true);
+    expect(await status(id)).toBe('delivered');
+    expect(receiver.hits('/new')).toHaveLength(1);
+  });
+
+  it('delivers a paused attempt when settings are recreated concurrently with removal', async () => {
+    await setup(a, '/old');
+    const id = await completed(a);
+    await ds.query(`SELECT id FROM claim_outbox_event('lost', 30000, 1)`);
+    expect(await status(id)).toBe('sending');
+
+    const holder = ds.createQueryRunner();
+    await holder.connect();
+    await holder.startTransaction();
+    let put: Promise<{ status: number }> | undefined;
+    try {
+      const settings = new NotificationsService(fakeTenantDb(holder.manager));
+      await settings.remove(a.tenant.id);
+      put = call(a, 'PUT', '/tenants/me/notifications', {
+        url: receiver.url('/new'),
+      });
+      await waitForBlocked(ds, holder);
+      await holder.commitTransaction();
+      expect((await put).status).toBe(200);
+    } finally {
+      if (holder.isTransactionActive) await holder.rollbackTransaction();
+      await put;
+      await holder.release();
+    }
+    expect(await sender.deliverNext()).toBe(true);
+    expect(await status(id)).toBe('delivered');
+    expect(receiver.hits('/new')).toHaveLength(1);
+  });
+
+  it('discards a pending event while its details are being read', async () => {
+    await setup(a);
+    const id = await completed(a);
+    const reader = ds.createQueryRunner();
+    await reader.connect();
+    await reader.startTransaction();
+    try {
+      const settings = new NotificationsService(fakeTenantDb(reader.manager));
+      await settings.eventPage(a.tenant.id, id, 10);
+      const response = await call<{ discarded: number }>(
+        a,
+        'POST',
+        '/tenants/me/notifications/events/discard',
+      );
+      expect(response).toEqual({ status: 200, body: { discarded: 1 } });
+      expect(await status(id)).toBe('cancelled');
+    } finally {
+      await reader.rollbackTransaction();
+      await reader.release();
+    }
+  });
+
+  it('accepts a redelivery without settings and sends it after the next setup', async () => {
+    await setup(a);
+    const id = await completed(a);
+    expect(await sender.deliverNext()).toBe(true);
+    expect((await call(a, 'DELETE', '/tenants/me/notifications')).status).toBe(
+      204,
+    );
+    expect(
+      (
+        await call(
+          a,
+          'POST',
+          `/tenants/me/notifications/events/${id}/redeliver`,
+        )
+      ).status,
+    ).toBe(202);
+    expect(await status(id)).toBe('pending');
+    expect(await sender.deliverNext()).toBe(false);
+    await setup(a);
+    expect(await sender.deliverNext()).toBe(true);
+    expect(receiver.requests).toHaveLength(2);
   });
 
   it('lists only the own events with their attempts and validates the page parameters', async () => {
@@ -502,17 +719,24 @@ describe('notification settings', () => {
       attempts: Array<{ attempt: number }>;
       nextAttemptsCursor: string | null;
     };
-    await addAttempts(1, 101);
-    const first = await call<Page>(a, 'GET', path + '?limit=100');
-    expect(first.body.attempts).toHaveLength(100);
+    // Історія спроб обмежена (OUTBOX_ATTEMPT_HISTORY = 20): перша й останні 19.
+    await addAttempts(1, 30);
+    const first = await call<Page>(a, 'GET', path + '?limit=10');
+    expect(first.body.attempts.map((r) => r.attempt)).toEqual([
+      1,
+      ...Array.from({ length: 9 }, (_, j) => j + 12),
+    ]);
     expect(first.body.nextAttemptsCursor).toEqual(expect.any(String));
-    await addAttempts(102, 102);
+    // Нова спроба після першої сторінки не зсуває сторінки, зафіксовані курсором.
+    await addAttempts(31, 31);
     const tail = await call<Page>(
       a,
       'GET',
-      path + '?cursor=' + first.body.nextAttemptsCursor,
+      path + '?limit=10&cursor=' + first.body.nextAttemptsCursor,
     );
-    expect(tail.body.attempts.map((r) => r.attempt)).toEqual([101]);
+    expect(tail.body.attempts.map((r) => r.attempt)).toEqual(
+      Array.from({ length: 10 }, (_, j) => j + 21),
+    );
     expect(tail.body.nextAttemptsCursor).toBeNull();
     expect((await call(a, 'GET', path + '?limit=101')).status).toBe(400);
     expect(
@@ -530,9 +754,10 @@ describe('notification settings', () => {
       ).status,
     ).toBe(400);
     const legacy = await call<Page>(a, 'GET', path);
-    expect(legacy.body.attempts.map((r) => r.attempt)).toEqual(
-      Array.from({ length: 102 }, (_, j) => j + 1),
-    );
+    expect(legacy.body.attempts.map((r) => r.attempt)).toEqual([
+      1,
+      ...Array.from({ length: 19 }, (_, j) => j + 13),
+    ]);
     expect(legacy.body).not.toHaveProperty('nextAttemptsCursor');
   });
 

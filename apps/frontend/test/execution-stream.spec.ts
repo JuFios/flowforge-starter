@@ -5,7 +5,6 @@ import {
   ExecutionStream,
   newer,
   POLL_INTERVAL_MS,
-  REALTIME_REQUEST_TIMEOUT_MS,
   WATCHDOG_MS,
   type SocketLike,
   type StreamDeps,
@@ -220,38 +219,39 @@ test('refreshes the live workflow name at the same revision without rolling back
   h.stream.stop();
 });
 
-test('times out a stalled ticket and fallback poll, and discards their late responses', async () => {
+test('retries a ticket and fallback poll after the HTTP adapter reports a deadline', async () => {
   let releaseTicket: (result: TicketResult) => void = () => undefined;
   let releasePoll: (result: SummaryResult) => void = () => undefined;
-  const stuckTicket = new Promise<TicketResult>((resolve) => {
+  const firstTicket = new Promise<TicketResult>((resolve) => {
     releaseTicket = resolve;
   });
-  const stuckPoll = new Promise<SummaryResult>((resolve) => {
+  const firstPoll = new Promise<SummaryResult>((resolve) => {
     releasePoll = resolve;
   });
   let ticketCalls = 0;
   let pollCalls = 0;
   const h = harness({
     tickets: async () =>
-      ++ticketCalls === 1 ? stuckTicket : { ok: false, reason: 'retry' },
+      ++ticketCalls === 1 ? firstTicket : { ok: false, reason: 'retry' },
     summaries: async () =>
-      ++pollCalls === 1 ? stuckPoll : { ok: true, summary: summary('7') },
+      ++pollCalls === 1 ? firstPoll : { ok: true, summary: summary('7') },
   });
 
   h.stream.start();
-  await h.advance(REALTIME_REQUEST_TIMEOUT_MS - 1);
+  await h.advance(30_000);
   expect(h.aborts[0].aborted).toBe(false);
-  await h.advance(1);
-  expect(h.aborts[0].aborted).toBe(true);
+  expect(h.tickets).toBe(1);
+  releaseTicket({ ok: false, reason: 'retry' });
+  await h.flush();
   await h.advance(2_000);
   expect(h.states.at(-1)).toBe('polling');
   expect(h.summaryCalls).toBe(1);
-  releaseTicket({ ok: true, ticket: 'late' });
-  await h.advance(REALTIME_REQUEST_TIMEOUT_MS + POLL_INTERVAL_MS);
-  expect(h.summaryCalls).toBe(2);
-  expect(h.stream.snapshot()?.revision).toBe('7');
-  releasePoll({ ok: true, summary: summary('99') });
+  await h.advance(30_000);
+  expect(h.summaryCalls).toBe(1);
+  releasePoll({ ok: false, reason: 'retry' });
   await h.flush();
+  await h.advance(POLL_INTERVAL_MS);
+  expect(h.summaryCalls).toBe(2);
   expect(h.stream.snapshot()?.revision).toBe('7');
   expect(h.sockets).toHaveLength(0);
   h.stream.stop();

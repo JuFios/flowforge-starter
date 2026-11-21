@@ -7,7 +7,8 @@
  *  1. «B сам»: 30 виконань тенанта B (`http → sink`) через API, по одному кожні 200 мс;
  *  2. «A сам»: 20 000 виконань тенанта A ставляться в чергу одразу (SQL власником схеми — швидко),
  *     пропускна здатність A за 20 с;
- *  3. «B під backlog-ом A»: ті самі 30 виконань B, поки черга A глибока.
+ *  3. «B під backlog-ом A»: ті самі 30 виконань B, поки черга A глибока й endpoint сповіщень A
+ *     відповідає 503.
  * Після прогону невиконаний backlog A прибирається.
  *
  * Метрики — за годинником БД: очікування B — від створення виконання до початку першого кроку;
@@ -58,6 +59,7 @@ const B_EVERY_MS = 200;
 const A_ALONE_MS = 20_000;
 const B_PHASE_LIMIT_MS = BASELINE ? 20 * 60_000 : 120_000;
 const SINK_URL = 'http://sink:8080/effect';
+const UNAVAILABLE_URL = 'http://sink:8080/unavailable';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const log = (msg: string) =>
@@ -397,6 +399,7 @@ interface Run {
   loaded: BPhase;
   aPerSecond: number;
   aDuringB: number;
+  outboxFailuresDuringB?: number;
   claimP95Ms?: number;
 }
 
@@ -411,6 +414,10 @@ export function problems(run: Run): string[] {
   }
   if (!(run.aDuringB > 0) || !(run.aPerSecond > 0))
     p.push('A must complete work in both phases');
+  if (!(Number(run.outboxFailuresDuringB) > 0))
+    p.push(
+      'A must record HTTP 503 from its notification endpoint during the loaded phase',
+    );
   if ((loaded.aLeftAtEnd ?? 0) <= A_JOBS / 2)
     p.push(`A had ${loaded.aLeftAtEnd} of ${A_JOBS} queued when B finished`);
   const waitBound = Math.min(3 * alone.waitP95 + 1, 5);
@@ -448,7 +455,7 @@ async function main(): Promise<void> {
       const stamp = Date.now();
       const b = await tenant(`load-b-${stamp}`);
       const a = await tenant(`load-a-${stamp}`);
-      if (!BASELINE)
+      if (!BASELINE) {
         // Ліміти A вище за кількість слотів і backlog: справедливість — не через ліміти.
         await call(
           'PATCH',
@@ -456,8 +463,17 @@ async function main(): Promise<void> {
           {
             'x-admin-token': rootEnv('ADMIN_TOKEN'),
           },
-          { maxQueueSize: 30_000, maxConcurrentExecutions: 16 },
+          {
+            maxQueueSize: 30_000,
+            maxConcurrentExecutions: 16,
+            maxOutboxEvents: 30_000,
+          },
         );
+        await call('PUT', '/tenants/me/notifications', a.auth, {
+          url: UNAVAILABLE_URL,
+          enabled: true,
+        });
+      }
 
       log(`run ${run}: B alone`);
       try {
@@ -475,12 +491,29 @@ async function main(): Promise<void> {
             ? new Map<string, Buckets>()
             : claimBuckets();
           const aBeforeB = await aSucceeded(db, a);
+          const [{ started }]: Array<{ started: string }> = await db.query(
+            'SELECT clock_timestamp()::text AS started',
+          );
           const loaded = await runB(db, b, a);
           const aDuringB = (await aSucceeded(db, a)) - aBeforeB;
+          const failures: Array<{ count: number }> = BASELINE
+            ? []
+            : await db.query(
+                `SELECT count(*)::int AS count FROM outbox_attempts
+                  WHERE "tenantId"=$1 AND "httpStatus"=503 AND "startedAt">=$2`,
+                [a.id, started],
+              );
           const claimP95Ms = BASELINE
             ? undefined
             : workerClaimP95(claimsBefore, claimBuckets());
-          return { alone, loaded, aPerSecond, aDuringB, claimP95Ms };
+          return {
+            alone,
+            loaded,
+            aPerSecond,
+            aDuringB,
+            outboxFailuresDuringB: failures[0]?.count,
+            claimP95Ms,
+          };
         });
         runs.push(result);
       } finally {
@@ -497,12 +530,12 @@ async function main(): Promise<void> {
     `\nfairness load (${BASELINE ? 'baseline' : 'this version'}; sink 300 ms, A ${A_JOBS} queued, B ${B_RUNS} runs every ${B_EVERY_MS} ms):`,
   );
   console.log(
-    '| run | B alone p95 wait | B alone p95 duration | A alone jobs/s | B under A: succeeded | B phase | p95 wait | p95 duration | A queued at the end | claim p95 |',
+    '| run | B alone p95 wait | B alone p95 duration | A alone jobs/s | B under A: succeeded | B phase | p95 wait | p95 duration | A queued at the end | A notification attempts with 503 | claim p95 |',
   );
-  console.log('|---|---|---|---|---|---|---|---|---|---|');
+  console.log('|---|---|---|---|---|---|---|---|---|---|---|');
   for (const [i, r] of runs.entries())
     console.log(
-      `| ${i + 1} | ${fmt(r.alone.waitP95)} | ${fmt(r.alone.durationP95)} | ${r.aPerSecond.toFixed(1)} | ${r.loaded.succeeded}/${B_RUNS} | ${fmt(r.loaded.seconds)} | ${fmt(r.loaded.waitP95)} | ${fmt(r.loaded.durationP95)} | ${r.loaded.aLeftAtEnd ?? '—'} | ${fmt(r.claimP95Ms, 'ms')} |`,
+      `| ${i + 1} | ${fmt(r.alone.waitP95)} | ${fmt(r.alone.durationP95)} | ${r.aPerSecond.toFixed(1)} | ${r.loaded.succeeded}/${B_RUNS} | ${fmt(r.loaded.seconds)} | ${fmt(r.loaded.waitP95)} | ${fmt(r.loaded.durationP95)} | ${r.loaded.aLeftAtEnd ?? '—'} | ${r.outboxFailuresDuringB ?? '—'} | ${fmt(r.claimP95Ms, 'ms')} |`,
     );
   if (BASELINE) return;
   const failed = runs.flatMap((r, i) =>

@@ -36,6 +36,7 @@ export interface SocketLike {
 }
 
 export interface StreamDeps {
+  /** HTTP-адаптер обмежує тривалість запитів і реагує на скасування від потоку. */
   issueTicket(signal: AbortSignal): Promise<TicketResult>;
   fetchSummary(signal: AbortSignal): Promise<SummaryResult>;
   openSocket(ticket: string): SocketLike;
@@ -53,7 +54,6 @@ export interface StreamEvents {
 export const BACKOFF_MIN_MS = 500;
 export const BACKOFF_MAX_MS = 30_000;
 export const WATCHDOG_MS = 45_000;
-export const REALTIME_REQUEST_TIMEOUT_MS = 30_000;
 export const POLL_INTERVAL_MS = 5_000;
 export const POLL_AFTER_FAILURES = 3;
 /** Найбільше повідомлення, яке клієнт розбирає (знімок без виходів кроків значно менший). */
@@ -185,9 +185,9 @@ export class ExecutionStream {
     this.ticketAbort?.abort();
     const abort = new AbortController();
     this.ticketAbort = abort;
-    const ticket = await this.request(abort, (signal) =>
-      this.deps.issueTicket(signal),
-    );
+    const ticket = await this.deps
+      .issueTicket(abort.signal)
+      .catch(() => undefined);
     if (gen !== this.generation || this.stopped) return;
     this.ticketAbort = undefined;
     if (!ticket) return this.scheduleReconnect();
@@ -274,9 +274,9 @@ export class ExecutionStream {
       this.pollAbort?.abort();
       const abort = new AbortController();
       this.pollAbort = abort;
-      const result = await this.request(abort, (signal) =>
-        this.deps.fetchSummary(signal),
-      );
+      const result = await this.deps
+        .fetchSummary(abort.signal)
+        .catch(() => undefined);
       if (this.pollAbort !== abort) return;
       this.pollAbort = undefined;
       if (result?.ok) this.apply(result.summary, true);
@@ -291,33 +291,6 @@ export class ExecutionStream {
       );
     };
     this.pollTimer = this.deps.setTimeout(() => void tick(), 0);
-  }
-
-  /** Дедлайн браузера діє і при розриві до фронтенду. Пізня відповідь не застосовується. */
-  private async request<T>(
-    abort: AbortController,
-    send: (signal: AbortSignal) => Promise<T>,
-  ): Promise<T | undefined> {
-    const timer = this.deps.setTimeout(
-      () => abort.abort(),
-      REALTIME_REQUEST_TIMEOUT_MS,
-    );
-    let onAbort: () => void = () => undefined;
-    const interrupted = new Promise<undefined>((resolve) => {
-      onAbort = () => {
-        this.deps.clearTimeout(timer);
-        resolve(undefined);
-      };
-    });
-    abort.signal.addEventListener('abort', onAbort, { once: true });
-    try {
-      return await Promise.race([interrupted, send(abort.signal)]);
-    } catch {
-      return undefined;
-    } finally {
-      abort.signal.removeEventListener('abort', onAbort);
-      this.deps.clearTimeout(timer);
-    }
   }
 
   private stopPolling(): void {

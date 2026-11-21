@@ -196,6 +196,7 @@ export class WorkflowsService {
         input.editRevision !== wf.editRevision
       )
         throw new ConflictException({
+          statusCode: 409,
           error: 'workflow_edit_conflict',
           message: 'Процес уже змінено. Завантажте актуальну версію.',
         });

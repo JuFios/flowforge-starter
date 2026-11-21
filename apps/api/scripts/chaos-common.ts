@@ -58,6 +58,7 @@ export function docker(args: string[]): string {
   return execFileSync('docker', args, {
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
+    timeout: 30_000,
   }).trim();
 }
 

@@ -1,6 +1,7 @@
 import {
   cursorAtSql,
   decodeKeysetCursor,
+  KeysetPosition,
   Page,
   toPage,
 } from '../common/keyset-cursor';
@@ -9,7 +10,10 @@ import {
   ConflictException,
   Injectable,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
+import { OutboxFullException } from '../limits/limit-exceptions';
+import { LimitsMetrics } from '../limits/limits.metrics';
 import {
   assertCanRotate,
   keyViews,
@@ -83,6 +87,9 @@ function attemptCursor(id: string, raw: string): AttemptCursor {
   return { after, through };
 }
 
+/** Розмір порції явної відмови від подій (`discard`). */
+const DISCARD_BATCH = 1000;
+
 const EVENT_COLUMNS = `id, "executionId", sequence, type, status, attempts,
   CASE WHEN status = 'pending' THEN "nextAttemptAt" END AS "nextAttemptAt",
   "lastError", "lastStatus", "correlationId", "createdAt", "deliveredAt"`;
@@ -95,11 +102,14 @@ const newSecret = () => randomBytes(32).toString('hex');
  * явним предикатом `tenantId`. Секрети підпису повертаються лише в момент створення (першого
  * налаштування чи ротації) і більше ніде: не в читанні, не в помилках, не в логах.
  *
- * Порядок блокувань: рядок налаштувань → події (так само, як у захопленні спроби).
+ * Порядок блокувань: за потреби рядок тенанта → налаштування → подія → облік.
  */
 @Injectable()
 export class NotificationsService {
-  constructor(private readonly db: TenantDb) {}
+  constructor(
+    private readonly db: TenantDb,
+    @Optional() private readonly limits?: LimitsMetrics,
+  ) {}
 
   async get(tenantId: string): Promise<SettingsView> {
     return this.db.run(tenantId, async (em) =>
@@ -117,14 +127,20 @@ export class NotificationsService {
   ): Promise<SettingsView & { secret?: string }> {
     await this.checkUrl(input.url);
     return this.db.run(tenantId, async (em) => {
+      await this.lockSettingsLifecycle(em, tenantId);
       const secret = newSecret();
       const keyId = randomUUID();
       const [row]: SettingsRow[] = await em.query(
-        `INSERT INTO notification_settings AS s ("tenantId", url, enabled, "secretKeyId", secret)
-         VALUES ($1,$2,COALESCE($3,true),$4,$5)
+        `INSERT INTO notification_settings AS s ("tenantId", url, enabled, "secretKeyId", secret, "dueAt")
+         VALUES ($1,$2,COALESCE($3,true),$4,$5,
+           -- Події, що чекали без налаштувань, — до відправника з найранішого моменту повтору.
+           (SELECT min("nextAttemptAt") FROM outbox_events
+             WHERE "tenantId" = $1 AND status = 'pending'))
          ON CONFLICT ("tenantId") DO UPDATE SET
            url=EXCLUDED.url, enabled=COALESCE($3,s.enabled),
            revision=s.revision + (s.url <> EXCLUDED.url OR ($3 IS TRUE AND NOT s.enabled))::integer,
+           "dueAt"=CASE WHEN $3 IS TRUE AND NOT s.enabled
+             THEN LEAST(s."dueAt", EXCLUDED."dueAt") ELSE s."dueAt" END,
            "updatedAt"=now()
          RETURNING url, enabled, revision, "secretKeyId", "nextSecretKeyId"`,
         [tenantId, input.url, input.enabled ?? null, keyId, secret],
@@ -134,22 +150,80 @@ export class NotificationsService {
   }
 
   /**
-   * Видаляє налаштування; недоставлені події стають `cancelled` (лишаються в журналі). Спроба, що
-   * зараз триває, після цього нічого не змінить: її fencing-токен скинуто.
+   * Видаляє налаштування: нових подій для тенанта більше немає, а вже прийняті чекають `pending`,
+   * доки тенант не налаштує endpoint знову (тоді доставка поновлюється з тими самими ID і байтами).
+   * Спроба, що зараз триває, повертається в `pending` і закривається як `paused`: її fencing-токен
+   * скинуто, тож пізня відповідь отримувача нічого не змінить. Відмова від подій — лише явна
+   * (`discard`).
    */
   async remove(tenantId: string): Promise<void> {
     await this.db.run(tenantId, async (em) => {
+      await this.lockSettingsLifecycle(em, tenantId);
       await this.settings(em, tenantId, true);
-      await em.query(
-        `UPDATE outbox_events SET status = 'cancelled', "leaseToken" = NULL, "leaseUntil" = NULL
-          WHERE "tenantId" = $1 AND status IN ('pending', 'sending')`,
-        [tenantId],
-      );
+      // Тригер close_paused_attempt розпізнає паузу за відсутністю налаштувань.
       await em.query(
         'DELETE FROM notification_settings WHERE "tenantId" = $1',
         [tenantId],
       );
+      await em.query(
+        `UPDATE outbox_events SET status = 'pending', "leaseToken" = NULL, "leaseUntil" = NULL,
+                "nextAttemptAt" = now()
+          WHERE "tenantId" = $1 AND status = 'sending'`,
+        [tenantId],
+      );
     });
+  }
+
+  /**
+   * Явна відмова тенанта від недоставлених подій, створених до цього запиту: `pending` →
+   * `cancelled`. Спроби, що зараз тривають, не перериваються. Порціями по окремих транзакціях, щоб
+   * великий беклог не тримав блокування й не впирався в statement_timeout. Курсор іде лише вперед:
+   * якщо тенант знову поставив оброблену подію на доставку, поточний запит її не скасовує повторно.
+   * Блокування читача журналу сумісне з оновленням стану. Після конкурентного запису БД перевіряє
+   * стан події повторно, а час очікування обмежує statement_timeout.
+   */
+  async discard(tenantId: string): Promise<{ discarded: number }> {
+    // Межа «до цього запиту» — за годинником БД і з його точністю до мікросекунд.
+    const [{ cutoff }] = await this.db.run(tenantId, (em) =>
+      em.query<Array<{ cutoff: string }>>(
+        `SELECT ${cursorAtSql('now()')} AS cutoff`,
+      ),
+    );
+    let discarded = 0;
+    let after: KeysetPosition | undefined;
+    for (;;) {
+      const [batch] = await this.db.run(tenantId, (em) =>
+        em.query<Array<KeysetPosition & { count: number }>>(
+          `WITH batch AS (
+             SELECT id FROM outbox_events
+              WHERE "tenantId" = $1 AND status = 'pending' AND "createdAt" <= $2
+                AND ("createdAt", id) > (
+                  COALESCE($3::timestamptz, '-infinity'::timestamptz),
+                  COALESCE($4::uuid, '00000000-0000-0000-0000-000000000000'::uuid)
+                )
+              ORDER BY "createdAt", id LIMIT $5 FOR NO KEY UPDATE
+           ), updated AS (
+             UPDATE outbox_events e SET status = 'cancelled', "cancelledAt" = now()
+              FROM batch b WHERE e."tenantId" = $1 AND e.id = b.id
+             RETURNING e."createdAt", e.id
+           )
+           SELECT id, ${cursorAtSql('"createdAt"')} AS "createdAt",
+                  (count(*) OVER ())::int AS count
+             FROM updated ORDER BY updated."createdAt" DESC, id DESC LIMIT 1`,
+          [
+            tenantId,
+            cutoff,
+            after?.createdAt ?? null,
+            after?.id ?? null,
+            DISCARD_BATCH,
+          ],
+        ),
+      );
+      if (!batch) return { discarded };
+      discarded += batch.count;
+      if (batch.count < DISCARD_BATCH) return { discarded };
+      after = batch;
+    }
   }
 
   /** Ротація: новий ключ `next` (секрет — лише в цій відповіді); підписи — обома, доки не відкличуть. */
@@ -262,11 +336,16 @@ export class NotificationsService {
 
   /**
    * Надіслати подію ще раз негайно (той самий ID і байти): для недоставленої — без очікування
-   * backoff, для доставленої чи скасованої — повторна доставка. Спроба, що триває, — 409.
+   * backoff, для доставленої чи скасованої — повторна доставка в межах квоти outbox. Спроба, що
+   * триває, — 409. Без налаштувань подія чекає `pending` і піде, щойно тенант налаштує endpoint.
    */
   async redeliver(tenantId: string, id: string): Promise<EventView> {
     return this.db.run(tenantId, async (em) => {
-      await this.settings(em, tenantId, true);
+      await this.lockSettingsLifecycle(em, tenantId);
+      await em.query(
+        'SELECT 1 FROM notification_settings WHERE "tenantId" = $1 FOR NO KEY UPDATE',
+        [tenantId],
+      );
       const [event]: Array<{ status: EventStatus }> = await em.query(
         'SELECT status FROM outbox_events WHERE id = $1 AND "tenantId" = $2 FOR UPDATE',
         [id, tenantId],
@@ -274,8 +353,10 @@ export class NotificationsService {
       if (!event) throw new NotFoundException('Подію не знайдено');
       if (event.status === 'sending')
         throw new ConflictException('Спроба доставки цієї події вже триває');
+      if (event.status !== 'pending') await this.assertOutboxSlot(em);
       const [[updated]]: [EventView[], number] = await em.query(
-        `UPDATE outbox_events SET status = 'pending', "nextAttemptAt" = now(), "deliveredAt" = NULL
+        `UPDATE outbox_events SET status = 'pending', "nextAttemptAt" = now(), "deliveredAt" = NULL,
+                "cancelledAt" = NULL
           WHERE id = $1 AND "tenantId" = $2 RETURNING ${EVENT_COLUMNS}`,
         [id, tenantId],
       );
@@ -286,6 +367,41 @@ export class NotificationsService {
       );
       return updated;
     });
+  }
+
+  /** Серіалізує читання підказки доставки з відновленням подій навіть без рядка налаштувань. */
+  private async lockSettingsLifecycle(
+    em: EntityManager,
+    tenantId: string,
+  ): Promise<void> {
+    await em.query('SELECT id FROM tenants WHERE id=$1 FOR NO KEY UPDATE', [
+      tenantId,
+    ]);
+  }
+
+  /**
+   * Доставлена чи скасована подія знову стає недоставленою: квота outbox перевіряється так само, як
+   * для нового виконання, під блокуванням рядка обліку тенанта після блокування події.
+   */
+  private async assertOutboxSlot(em: EntityManager): Promise<void> {
+    const [usage]: Array<{
+      queued: number;
+      running: number;
+      outboxUndelivered: number;
+      maxOutboxEvents: number;
+    }> = await em.query(
+      'SELECT queued, running, "outboxUndelivered", "maxOutboxEvents" FROM lock_tenant_usage()',
+    );
+    if (
+      usage.outboxUndelivered + usage.queued + usage.running <
+      usage.maxOutboxEvents
+    )
+      return;
+    this.limits?.enqueueRejected.inc({
+      reason: 'outbox_full',
+      trigger: 'redeliver',
+    });
+    throw new OutboxFullException(usage.maxOutboxEvents);
   }
 
   private async settings(
