@@ -232,9 +232,17 @@ const contracts: Record<string, Contract> = {
     errors: [409],
   },
   ['delete ' + notes]: {
-    title: 'Видалити налаштування сповіщень',
+    title:
+      'Видалити налаштування сповіщень. Недоставлені події чекають наступного налаштування',
     auth: key,
     code: 204,
+    errors: [404],
+  },
+  ['post ' + notes + '/events/discard']: {
+    title: 'Відмовитися від недоставлених подій, створених до запиту',
+    auth: key,
+    code: 200,
+    result: 'Discarded',
   },
   ['post ' + notes + '/secrets']: {
     title: 'Додати наступний ключ підпису сповіщень із секретом клієнта',

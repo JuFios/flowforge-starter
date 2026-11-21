@@ -148,19 +148,24 @@ describe('notification settings', () => {
         await waiting;
         await holder.release();
       }
+      // Завершення після видалення — без налаштувань подія не приймається; прийнята до видалення
+      // подія чекає й доходить до наступного endpoint-а тенанта без ручного redeliver.
+      const accepted: Array<{ id: string }> = await ds.query(
+        'SELECT id FROM outbox_events WHERE "executionId"=$1',
+        [execution.id],
+      );
+      expect(accepted).toHaveLength(order === 'delete first' ? 0 : 1);
       await setup(a, '/new');
       const fresh = await completed(a);
-      expect(await sender.deliverNext()).toBe(true);
+      while (await sender.deliverNext());
       expect(
-        receiver.hits('/new').map((req) => req.headers['x-flowforge-event-id']),
-      ).toEqual([fresh]);
-      expect(await sender.deliverNext()).toBe(false);
-      expect(
-        await ds.query(
-          'SELECT status FROM outbox_events WHERE "executionId"=$1',
-          [execution.id],
-        ),
-      ).toEqual(order === 'delete first' ? [] : [{ status: 'cancelled' }]);
+        receiver
+          .hits('/new')
+          .map((req) => req.headers['x-flowforge-event-id'])
+          .sort(),
+      ).toEqual([...accepted.map((e) => e.id), fresh].sort());
+      expect(receiver.hits('/old')).toEqual([]);
+      for (const e of accepted) expect(await status(e.id)).toBe('delivered');
     },
   );
 
@@ -396,58 +401,123 @@ describe('notification settings', () => {
     expect(attempt.revision).toBe(2);
   });
 
-  it('closes the unfinished attempt when a tenant cancels a claimed event', async () => {
-    await setup(a);
+  it('pauses a claimed event when the settings are deleted and delivers it after the next setup', async () => {
+    await setup(a, '/old');
     const id = await completed(a);
-    await ds.query("SELECT * FROM claim_outbox_event('lost', 30000, 1)");
+    const [claimed]: Array<{ leaseToken: string }> = await ds.query(
+      `SELECT "leaseToken" FROM claim_outbox_event('lost', 30000, 1)`,
+    );
     expect(await status(id)).toBe('sending');
     expect((await call(a, 'DELETE', '/tenants/me/notifications')).status).toBe(
       204,
     );
+    expect(await status(id)).toBe('pending');
     expect(
       await ds.query(
         'SELECT outcome, "finishedAt" IS NOT NULL AS finished FROM outbox_attempts WHERE "eventId"=$1',
         [id],
       ),
-    ).toEqual([{ outcome: 'cancelled', finished: true }]);
+    ).toEqual([{ outcome: 'paused', finished: true }]);
+    // Пізній результат спроби, що тривала, нічого не змінює: fencing-токен скинуто.
+    const [late]: Array<{ applied: boolean }> = await ds.query(
+      `SELECT finish_outbox_event($1, $2, 0, 'delivered', 200) AS applied`,
+      [id, claimed.leaseToken],
+    );
+    expect(late.applied).toBe(false);
+    expect(await sender.deliverNext()).toBe(false);
+    const [before]: Array<{ payload: string }> = await ds.query(
+      'SELECT payload FROM outbox_events WHERE id=$1',
+      [id],
+    );
+    await setup(a, '/new');
+    expect(await sender.deliverNext()).toBe(true);
+    const [hit] = receiver.hits('/new');
+    expect(hit.headers['x-flowforge-event-id']).toBe(id);
+    expect(hit.raw.toString()).toBe(before.payload);
+    expect(await status(id)).toBe('delivered');
   });
 
-  it('pauses pending events while disabled and cancels them when the settings are deleted', async () => {
+  it('keeps accepting events while paused and delivers them once enabled', async () => {
     await setup(a);
     await call(a, 'PUT', '/tenants/me/notifications', {
       url: receiver.url('/notify'),
       enabled: false,
     });
-    // Вимкнено до завершення: події немає. Увімкнено після — подія є й чекає, поки знову вимкнуть.
+    // Пауза зупиняє доставку, а не приймання: завершення під час паузи теж дає подію.
+    const during = await completed(a);
+    expect(await sender.deliverNext()).toBe(false);
+    expect(await status(during)).toBe('pending');
+    expect(receiver.requests).toEqual([]);
     await call(a, 'PUT', '/tenants/me/notifications', {
       url: receiver.url('/notify'),
       enabled: true,
     });
-    const event = await completed(a);
-    await call(a, 'PUT', '/tenants/me/notifications', {
-      url: receiver.url('/notify'),
-      enabled: false,
-    });
-    expect(await sender.deliverNext()).toBe(false);
-    expect(await status(event)).toBe('pending');
+    expect(await sender.deliverNext()).toBe(true);
+    expect(await status(during)).toBe('delivered');
+  });
+
+  it('cancels undelivered events only on the explicit request of the tenant', async () => {
+    await setup(a);
+    await setup(b);
+    const first = await completed(a);
+    const second = await completed(a);
+    const other = await completed(b);
     expect((await call(a, 'DELETE', '/tenants/me/notifications')).status).toBe(
       204,
     );
-    expect(await status(event)).toBe('cancelled');
-    expect(receiver.requests).toEqual([]);
-    // Подія лишається в журналі й доставляється повторно після нового налаштування.
+    expect(await status(first)).toBe('pending');
+    const res = await call<{ discarded: number }>(
+      a,
+      'POST',
+      '/tenants/me/notifications/events/discard',
+    );
+    expect(res).toEqual({ status: 200, body: { discarded: 2 } });
+    expect([await status(first), await status(second)]).toEqual([
+      'cancelled',
+      'cancelled',
+    ]);
+    // Відмова тенанта A не зачіпає подій тенанта B.
+    expect(await status(other)).toBe('pending');
+    await call(b, 'DELETE', '/tenants/me/notifications');
+    // Після нового налаштування відмовлені події не надсилаються; redeliver повертає одну з них.
     await setup(a);
+    expect(await sender.deliverNext()).toBe(false);
     expect(
       (
         await call(
           a,
           'POST',
-          `/tenants/me/notifications/events/${event}/redeliver`,
+          `/tenants/me/notifications/events/${first}/redeliver`,
         )
       ).status,
     ).toBe(202);
     expect(await sender.deliverNext()).toBe(true);
-    expect(await status(event)).toBe('delivered');
+    expect(await status(first)).toBe('delivered');
+    expect(await status(second)).toBe('cancelled');
+    expect(receiver.requests).toHaveLength(1);
+  });
+
+  it('accepts a redelivery without settings and sends it after the next setup', async () => {
+    await setup(a);
+    const id = await completed(a);
+    expect(await sender.deliverNext()).toBe(true);
+    expect((await call(a, 'DELETE', '/tenants/me/notifications')).status).toBe(
+      204,
+    );
+    expect(
+      (
+        await call(
+          a,
+          'POST',
+          `/tenants/me/notifications/events/${id}/redeliver`,
+        )
+      ).status,
+    ).toBe(202);
+    expect(await status(id)).toBe('pending');
+    expect(await sender.deliverNext()).toBe(false);
+    await setup(a);
+    expect(await sender.deliverNext()).toBe(true);
+    expect(receiver.requests).toHaveLength(2);
   });
 
   it('lists only the own events with their attempts and validates the page parameters', async () => {

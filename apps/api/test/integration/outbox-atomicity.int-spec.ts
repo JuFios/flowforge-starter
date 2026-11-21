@@ -265,7 +265,7 @@ describe('outbox events are written with the terminal transition', () => {
     expect((await events(id)).map((r) => r.sequence)).toEqual([1]);
   });
 
-  it('creates no event while notifications are disabled or for completions before they existed', async () => {
+  it('creates no event before notifications exist and holds events while they are paused', async () => {
     worker = await startWorker();
     const before = await (async () => {
       await call('DELETE', '/tenants/me/notifications');
@@ -279,9 +279,10 @@ describe('outbox events are written with the terminal transition', () => {
       receiver.url('/notify'),
       false,
     );
-    const disabled = await run([{ id: 'say', type: 'log', message: 'hi' }]);
-    await finished(disabled);
+    const paused = await run([{ id: 'say', type: 'log', message: 'hi' }]);
+    await finished(paused);
     expect(await events(before)).toEqual([]);
-    expect(await events(disabled)).toEqual([]);
+    // Пауза (enabled=false) зупиняє доставку, але подія завершення приймається й чекає.
+    expect((await events(paused)).map((r) => r.sequence)).toEqual([1]);
   });
 });

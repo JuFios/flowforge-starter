@@ -113,7 +113,7 @@ describe('notification delivery', () => {
     await ds.destroy();
   });
 
-  it('keeps a cancelled event fenced when the old receiver responds after a new PUT', async () => {
+  it('fences a paused attempt when the old receiver responds after a new PUT and delivers the event again', async () => {
     const old = await complete();
     const worker = await sender();
     let release!: () => void;
@@ -137,8 +137,16 @@ describe('notification delivery', () => {
       release();
       await delivery;
     }
-    expect((await event(old.id)).status).toBe('cancelled');
-    expect(await worker.deliverNext()).toBe(false);
+    // Пізня 503 старого отримувача не змінює подію; вона доходить до нового endpoint-а з тим самим ID.
+    expect((await event(old.id)).status).toBe('pending');
+    receiver.respond = (_req, res) => {
+      res.writeHead(200).end();
+    };
+    expect(await worker.deliverNext()).toBe(true);
+    expect((await event(old.id)).status).toBe('delivered');
+    expect(
+      receiver.hits('/new').map((r) => r.headers['x-flowforge-event-id']),
+    ).toEqual([old.id]);
   });
 
   it('reclaims a failed delivery at backoff before the previous lease expires', async () => {

@@ -688,6 +688,41 @@ describe('data migrations', () => {
     }
   });
 
+  it('restores implicitly cancelled events on upgrade and delivers them to the existing endpoint', async () => {
+    await truncateAll(ds);
+    await revertThrough('OutboxPause');
+    const [{ id: tenantId }] = await ds.query<Array<{ id: string }>>(
+      `INSERT INTO tenants(name,"apiKeyHash","webhookSecret") VALUES ('paused','paused-hash','old') RETURNING id`,
+    );
+    await ds.query(
+      `INSERT INTO notification_settings("tenantId",url,secret,"dueAt") VALUES ($1,'https://hooks.example.com',$2,NULL)`,
+      [tenantId, 'f'.repeat(64)],
+    );
+    // Скасовано видаленням налаштувань у попередній версії: явної відмови тенанта не було.
+    await ds.query(
+      `INSERT INTO outbox_events("tenantId","executionId",sequence,type,payload,status)
+       SELECT $1,gen_random_uuid(),1,'execution.succeeded','{"n":' || n || '}',
+              CASE WHEN n < 3 THEN 'cancelled' ELSE 'delivered' END
+         FROM generate_series(1,3) n`,
+      [tenantId],
+    );
+    await ds.runMigrations({ transaction: 'each' });
+    expect(
+      await ds.query(
+        `SELECT status, payload, "cancelledAt" FROM outbox_events ORDER BY payload`,
+      ),
+    ).toEqual([
+      { status: 'pending', payload: '{"n":1}', cancelledAt: null },
+      { status: 'pending', payload: '{"n":2}', cancelledAt: null },
+      { status: 'delivered', payload: '{"n":3}', cancelledAt: null },
+    ]);
+    const [{ due }] = await ds.query<Array<{ due: boolean }>>(
+      `SELECT "dueAt" <= now() AS due FROM notification_settings WHERE "tenantId"=$1`,
+      [tenantId],
+    );
+    expect(due).toBe(true);
+  });
+
   it('upgrades in-flight deliveries, hints, short schedules and unfinished executions from PR 5', async () => {
     await truncateAll(ds);
     await revertThrough('SerializeOutbox');

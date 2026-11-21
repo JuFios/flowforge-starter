@@ -319,6 +319,7 @@ export const schemas: Record<string, SchemaObject> = {
   SigningKeys: array(keyView),
   NewKey: object({ id: uuid, role: choice(['next']) }),
   NewSecret: closed({ secret: signingSecret }),
+  Discarded: object({ discarded: integer }),
   Settings: object(settings),
   SettingsInput: closed(
     { url: text(MAX_URL_LENGTH), enabled: bool, secret: signingSecret },
