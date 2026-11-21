@@ -56,6 +56,8 @@ interface Contract {
   errors?: number[];
   /** Опис відповіді 200 на ідемпотентний повтор того самого запиту (успіх — 201). */
   replay?: string;
+  /** Параметр шляху не дає 404 (повтор відкликання відсутнього ключа — 204). */
+  noNotFound?: true;
 }
 const contracts: Record<string, Contract> = {
   'get /health': { title: 'Перевірити процес', auth: [], result: 'Health' },
@@ -131,7 +133,8 @@ const contracts: Record<string, Contract> = {
     result: 'Execution',
     body: 'RunInput',
     params: [param('Idempotency-Key', 'header', { ...str, maxLength: 255 })],
-    errors: [422],
+    // 409 — ключ щойно звільнило очищення історії виконань між пошуком і вставкою.
+    errors: [409, 422],
     replay: 'Ідемпотентний повтор того самого запиту',
   },
   'get /executions': {
@@ -196,7 +199,7 @@ const contracts: Record<string, Contract> = {
         true,
       ),
     ],
-    errors: [409, 422],
+    errors: [409],
   },
   ['get ' + keys]: {
     title: 'Переглянути ID ключів вхідних webhook',
@@ -212,10 +215,12 @@ const contracts: Record<string, Contract> = {
     replay: 'Повтор із тим самим секретом: той самий ключ',
   },
   ['delete ' + keys + '/{keyId}']: {
-    title: 'Відкликати ключ вхідних webhook',
+    title:
+      'Відкликати ключ вхідних webhook. Повтор для відсутнього ключа — 204',
     auth: key,
     code: 204,
     errors: [409],
+    noNotFound: true,
   },
   ['get ' + notes]: {
     title: 'Прочитати підписку на сповіщення',
@@ -287,9 +292,10 @@ const descriptions: Record<number, string> = {
   409: 'Конфлікт поточного стану',
   413: 'Перевищено межу тіла',
   415: 'Непідтримуване кодування тіла',
+  500: 'Внутрішня помилка; тіло без внутрішніх деталей, з correlationId',
   422: 'Ключ повторно використано з іншими даними',
   428: 'Браузерний запит має містити актуальну editRevision',
-  429: 'rate_limited повертає Retry-After. queue_full, outbox_full та workflow_limit_reached не мають визначеного часу повтору.',
+  429: 'rate_limited повертає Retry-After. queue_full, outbox_full, workflow_limit_reached і ticket_limit не мають визначеного часу повтору.',
   503: 'Залежність недоступна',
 };
 const json = (name: string) => ({ 'application/json': { schema: ref(name) } });
@@ -351,21 +357,28 @@ export function buildDocument(app: INestApplication) {
       const headers: NonNullable<ResponseObject['headers']> = {
         'X-Request-Id': { schema: str, description: 'Ідентифікатор кореляції' },
       };
+      // Заголовки ліміту частоти гарантовано несе відповідь, що пройшла ліміт; помилки розбору тіла
+      // (400, 413, 415) і відмови автентифікації виникають раніше й можуть їх не мати.
+      const limited: NonNullable<ResponseObject['headers']> = { ...headers };
       if (c.auth.length)
         for (const name of ['Limit', 'Remaining', 'Reset'])
-          headers['X-RateLimit-' + name] = {
+          limited['X-RateLimit-' + name] = {
             schema: integer,
             description: 'Вікно частоти запитів',
           };
-      success.headers = headers;
+      success.headers = limited;
       op.responses = { [c.code ?? (method === 'post' ? 201 : 200)]: success };
       if (c.replay) op.responses[200] = { ...success, description: c.replay };
+      // Тіло розбирає глобальний парсер до маршруту: будь-який запит зі змінами стану може його
+      // нести, тож 400 (некоректний JSON чи неточне число), 413 і 415 можливі для кожного з них.
+      const carriesBody = method !== 'get';
       const errors = new Set([
         ...(c.errors ?? []),
         ...(c.auth.length ? [c.auth === admin ? 403 : 401, 429] : []),
-        ...(params.length ? [404] : []),
-        ...(params.length || c.body || c.params ? [400] : []),
-        ...(c.body ? [413, 415] : []),
+        ...(params.length && !c.noNotFound ? [404] : []),
+        ...(params.length || c.body || c.params || carriesBody ? [400] : []),
+        ...(c.body || carriesBody ? [413, 415] : []),
+        500,
       ]);
       for (const code of errors)
         op.responses[code] = {

@@ -21,6 +21,8 @@ export const integer: SchemaObject = { type: 'integer' };
 const bool: SchemaObject = { type: 'boolean' };
 export const uuid: SchemaObject = { type: 'string', format: 'uuid' };
 const date: SchemaObject = { type: 'string', format: 'date-time' };
+/** Довільне значення JSON, зокрема `null` (вихід ще не обчислено або крок повернув null). */
+const anyJson: SchemaObject = { nullable: true };
 export const nullable = (schema: SchemaObject): SchemaObject => ({
   ...schema,
   nullable: true,
@@ -159,7 +161,7 @@ const execution = {
   tenantId: uuid,
   workflowVersionId: nullable(uuid),
   input: { type: 'object', additionalProperties: true },
-  output: {},
+  output: anyJson,
   idempotencyKey: nullable(str),
 };
 const step = {
@@ -290,12 +292,12 @@ export const schemas: Record<string, SchemaObject> = {
         executionId: uuid,
         tenantId: uuid,
         idempotencyKey: str,
-        output: {},
+        output: anyJson,
       }),
     ),
   }),
-  StepDetail: object({ ...stepSummary, output: {} }),
-  Output: object({ output: {} }),
+  StepDetail: object({ ...stepSummary, output: anyJson }),
+  Output: object({ output: anyJson }),
   ExecutionId: object({ executionId: uuid }),
   RunInput: {
     type: 'object',

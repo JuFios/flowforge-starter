@@ -98,7 +98,7 @@ curl localhost:3000/executions/<executionId> -H "x-api-key: $API_KEY"
 | GET/PUT/DELETE, POST | `/tenants/me/notifications…`, `/tenants/me/webhook-secrets…` | сповіщення, журнал подій, ротація ключів (секрет у тілі запиту, у відповіді — лише ID) |
 | GET | `/health`, `/ready` | liveness і доступність БД |
 
-Відповіді лімітів: `429 rate_limited` з `Retry-After`; `429 queue_full`, `429 outbox_full` і `429 workflow_limit_reached` без нього (місце звільняє завершення задач, доставка чи явна відмова від недоставлених сповіщень, видалення workflow). Під лімітом частоти кожна відповідь несе `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`.
+Відповіді лімітів: `429 rate_limited` з `Retry-After`; `429 queue_full`, `429 outbox_full` і `429 workflow_limit_reached` без нього (місце звільняє завершення задач, доставка чи явна відмова від недоставлених сповіщень, видалення workflow). Відповідь, що пройшла ліміт частоти, несе `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`; помилки розбору тіла (400, 413, 415) виникають раніше й цих заголовків можуть не мати. Відповідність OpenAPI фактичним статусам, тілам і заголовкам кожного маршруту перевіряє `openapi-http.int-spec.ts`.
 
 ## Інтерфейс тенанта
 
