@@ -12,6 +12,7 @@ import {
   truncateAll,
 } from '../helpers/db';
 import { NotificationsService } from '../../src/notifications/notifications.service';
+import { TenantDb } from '../../src/tenancy/tenant-db';
 import { fakeTenantDb } from '../helpers/fake-tenant-db';
 import { waitForBlocked } from '../helpers/transaction-barrier';
 
@@ -416,6 +417,41 @@ describe('notification settings', () => {
     expect(await status(first)).toBe('delivered');
     expect(await status(second)).toBe('cancelled');
     expect(receiver.requests).toHaveLength(1);
+  });
+
+  it('preserves an event requeued after it passed an earlier discard batch', async () => {
+    const tenantId = a.tenant.id;
+    const [{ id }] = await ds.query<Array<{ id: string }>>(
+      `WITH seeded AS (
+         INSERT INTO outbox_events ("tenantId", "executionId", sequence, type, payload, "createdAt")
+         SELECT $1, gen_random_uuid(), 1, 'execution.succeeded', '{}',
+                TIMESTAMPTZ '2020-01-01 00:00:00.000001+00'
+                  + LEAST(n, 1) * interval '1 microsecond'
+           FROM generate_series(0, 1000) n
+         RETURNING id, "createdAt"
+       ) SELECT id FROM seeded ORDER BY "createdAt", id LIMIT 1`,
+      [tenantId],
+    );
+    const db = apiApp.app.get(TenantDb);
+    const notifications = apiApp.app.get(NotificationsService);
+    const run = db.run.bind(db);
+    let transactions = 0;
+    const barrier = jest
+      .spyOn(db, 'run')
+      .mockImplementation(async (context, fn) => {
+        const result = await run(context, fn);
+        // Перший виклик фіксує час, другий комітить першу порцію.
+        if (++transactions === 2) await notifications.redeliver(tenantId, id);
+        return result;
+      });
+    try {
+      expect(await notifications.discard(tenantId)).toEqual({
+        discarded: 1001,
+      });
+      expect(await status(id)).toBe('pending');
+    } finally {
+      barrier.mockRestore();
+    }
   });
 
   it('accepts a redelivery without settings and sends it after the next setup', async () => {
