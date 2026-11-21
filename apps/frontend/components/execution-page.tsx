@@ -4,7 +4,6 @@ import { useEffect, useState, useRef } from 'react';
 import { apiRequest, goToLogin, describeRejection } from '@/lib/client-api';
 import {
   ExecutionStream,
-  REALTIME_REQUEST_TIMEOUT_MS,
   StreamState,
   SocketLike,
 } from '@/lib/execution-stream';
@@ -84,23 +83,16 @@ export function ExecutionPage({ id }: { id: string }) {
       },
     );
     const initial = new AbortController();
-    const initialTimeout = window.setTimeout(
-      () => initial.abort(),
-      REALTIME_REQUEST_TIMEOUT_MS,
-    );
     void apiRequest<ExecutionSummary>('GET', base + '/summary', {
       signal: initial.signal,
-    })
-      .then((r) => {
-        if (!initial.signal.aborted && r.kind === 'ok') stream.seed(r.data);
-      })
-      .finally(() => window.clearTimeout(initialTimeout));
+    }).then((r) => {
+      if (!initial.signal.aborted && r.kind === 'ok') stream.seed(r.data);
+    });
     const online = () => stream.nudge();
     window.addEventListener('online', online);
     stream.start();
     return () => {
       window.removeEventListener('online', online);
-      window.clearTimeout(initialTimeout);
       initial.abort();
       stream.stop();
       abort.current?.abort();
