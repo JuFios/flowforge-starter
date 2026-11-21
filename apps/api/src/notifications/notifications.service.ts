@@ -1,6 +1,7 @@
 import {
   cursorAtSql,
   decodeKeysetCursor,
+  KeysetPosition,
   Page,
   toPage,
 } from '../common/keyset-cursor';
@@ -174,27 +175,50 @@ export class NotificationsService {
   /**
    * Явна відмова тенанта від недоставлених подій, створених до цього запиту: `pending` →
    * `cancelled`. Спроби, що зараз тривають, не перериваються. Порціями по окремих транзакціях, щоб
-   * великий беклог не тримав блокування й не впирався в statement_timeout.
+   * великий беклог не тримав блокування й не впирався в statement_timeout. Курсор іде лише вперед:
+   * якщо тенант знову поставив оброблену подію на доставку, поточний запит її не скасовує повторно.
    */
   async discard(tenantId: string): Promise<{ discarded: number }> {
-    // Межа «до цього запиту» — за годинником БД, що пише createdAt, а не процесу API.
+    // Межа «до цього запиту» — за годинником БД і з його точністю до мікросекунд.
     const [{ cutoff }] = await this.db.run(tenantId, (em) =>
-      em.query<Array<{ cutoff: Date }>>('SELECT now() AS cutoff'),
+      em.query<Array<{ cutoff: string }>>(
+        `SELECT ${cursorAtSql('now()')} AS cutoff`,
+      ),
     );
     let discarded = 0;
+    let after: KeysetPosition | undefined;
     for (;;) {
-      const count = await this.db.run(tenantId, async (em) => {
-        const [, affected]: [unknown, number] = await em.query(
-          `UPDATE outbox_events SET status = 'cancelled', "cancelledAt" = now()
-            WHERE id IN (SELECT id FROM outbox_events
-                          WHERE "tenantId" = $1 AND status = 'pending' AND "createdAt" <= $2
-                          ORDER BY "createdAt" LIMIT $3 FOR UPDATE SKIP LOCKED)`,
-          [tenantId, cutoff, DISCARD_BATCH],
-        );
-        return affected;
-      });
-      discarded += count;
-      if (count < DISCARD_BATCH) return { discarded };
+      const [batch] = await this.db.run(tenantId, (em) =>
+        em.query<Array<KeysetPosition & { count: number }>>(
+          `WITH batch AS (
+             SELECT id FROM outbox_events
+              WHERE "tenantId" = $1 AND status = 'pending' AND "createdAt" <= $2
+                AND ("createdAt", id) > (
+                  COALESCE($3::timestamptz, '-infinity'::timestamptz),
+                  COALESCE($4::uuid, '00000000-0000-0000-0000-000000000000'::uuid)
+                )
+              ORDER BY "createdAt", id LIMIT $5 FOR UPDATE SKIP LOCKED
+           ), updated AS (
+             UPDATE outbox_events e SET status = 'cancelled', "cancelledAt" = now()
+              FROM batch b WHERE e."tenantId" = $1 AND e.id = b.id
+             RETURNING e."createdAt", e.id
+           )
+           SELECT id, ${cursorAtSql('"createdAt"')} AS "createdAt",
+                  (count(*) OVER ())::int AS count
+             FROM updated ORDER BY updated."createdAt" DESC, id DESC LIMIT 1`,
+          [
+            tenantId,
+            cutoff,
+            after?.createdAt ?? null,
+            after?.id ?? null,
+            DISCARD_BATCH,
+          ],
+        ),
+      );
+      if (!batch) return { discarded };
+      discarded += batch.count;
+      if (batch.count < DISCARD_BATCH) return { discarded };
+      after = batch;
     }
   }
 
