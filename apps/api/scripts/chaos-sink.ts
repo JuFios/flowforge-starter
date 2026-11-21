@@ -9,6 +9,7 @@
  *   POST /notifications — прийняти сповіщення FlowForge; перша доставка кожної події «губить»
  *                    підтвердження (з'єднання обривається після прийому тіла)
  *   GET  /notifications — усі прийняті доставки: заголовки й сирі байти тіла (base64)
+ *   POST /unavailable — 503 для вимірювання роботи черги під час відмови доставки
  */
 import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
@@ -37,6 +38,11 @@ const header = (value: string | string[] | undefined) =>
 
 createServer((req, res) => {
   const path = (req.url ?? '').split('?')[0];
+  if (req.method === 'POST' && path === '/unavailable') {
+    req.resume();
+    req.on('end', () => res.writeHead(503).end());
+    return;
+  }
   if (req.method === 'GET' && path === '/header-digest') {
     const value = header(req.headers['x-test-marker']);
     res.writeHead(200, { 'content-type': 'application/json' });
