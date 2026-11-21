@@ -1,4 +1,6 @@
 import { ConflictException } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
+import { safeEqual } from './safe-equal';
 
 /**
  * Пара ключів підпису з ротацією без простою (вхідні webhook-и 3.3.7, вихідні сповіщення 3.3.9):
@@ -21,9 +23,34 @@ export function keyViews(pair: SigningKeyPair): SigningKeyView[] {
   return views;
 }
 
-/** Ротація можлива лише з одним активним ключем. */
-export function assertCanRotate(pair: SigningKeyPair): void {
-  if (pair.next) throw new ConflictException('Уже є два активні ключі');
+/** Результат ротації: ID ключа `next`; `created: false` — повтор уже прийнятої ротації. */
+export interface RotationResult {
+  id: string;
+  role: 'next';
+  created: boolean;
+}
+
+interface StoredKey {
+  id: string;
+  secret: string;
+}
+
+/**
+ * Ротація з секретом, який передав клієнт (ТЗ 4: сервер секретів не видає). Той самий секрет, що
+ * вже стоїть у `next`, — повтор після втраченої відповіді: повертаємо той самий ID. Інакше ротація
+ * можлива лише з одним активним ключем, і новий секрет має відрізнятися від чинного.
+ */
+export function planRotate(
+  current: StoredKey,
+  next: StoredKey | null,
+  secret: string,
+): RotationResult {
+  if (next && safeEqual(secret, next.secret))
+    return { id: next.id, role: 'next', created: false };
+  if (next) throw new ConflictException('Уже є два активні ключі');
+  if (safeEqual(secret, current.secret))
+    throw new ConflictException('Новий секрет має відрізнятися від чинного');
+  return { id: randomUUID(), role: 'next', created: true };
 }
 
 /**

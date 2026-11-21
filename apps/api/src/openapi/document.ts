@@ -54,6 +54,8 @@ interface Contract {
   body?: string;
   params?: ParameterObject[];
   errors?: number[];
+  /** Опис відповіді 200 на ідемпотентний повтор того самого запиту (успіх — 201). */
+  replay?: string;
 }
 const contracts: Record<string, Contract> = {
   'get /health': { title: 'Перевірити процес', auth: [], result: 'Health' },
@@ -64,10 +66,13 @@ const contracts: Record<string, Contract> = {
     errors: [503],
   },
   'post /tenants': {
-    title: 'Створити тенанта й одноразово отримати обидва секрети',
+    title:
+      'Створити тенанта з API-ключем і секретом webhook, які згенерував оператор',
     auth: admin,
-    result: 'TenantCredentials',
+    result: 'Tenant',
     body: 'CreateTenant',
+    errors: [409],
+    replay: 'Повтор того самого запиту: чинний тенант',
   },
   'get /tenants/{id}/limits': {
     title: 'Прочитати чинні ліміти та перевизначення',
@@ -127,6 +132,7 @@ const contracts: Record<string, Contract> = {
     body: 'RunInput',
     params: [param('Idempotency-Key', 'header', { ...str, maxLength: 255 })],
     errors: [422],
+    replay: 'Ідемпотентний повтор того самого запиту',
   },
   'get /executions': {
     title: 'Переглянути сторінку виконань без вхідних і вихідних даних',
@@ -198,10 +204,12 @@ const contracts: Record<string, Contract> = {
     result: 'SigningKeys',
   },
   ['post ' + keys]: {
-    title: 'Видати наступний секрет вхідних webhook один раз',
+    title: 'Додати наступний ключ вхідних webhook із секретом клієнта',
     auth: key,
     result: 'NewKey',
+    body: 'NewSecret',
     errors: [409],
+    replay: 'Повтор із тим самим секретом: той самий ключ',
   },
   ['delete ' + keys + '/{keyId}']: {
     title: 'Відкликати ключ вхідних webhook',
@@ -216,10 +224,12 @@ const contracts: Record<string, Contract> = {
     errors: [404],
   },
   ['put ' + notes]: {
-    title: 'Зберегти підписку. Перша відповідь містить секрет',
+    title:
+      'Зберегти підписку. Перше налаштування приймає секрет підпису клієнта',
     auth: key,
-    result: 'SettingsResult',
+    result: 'Settings',
     body: 'SettingsInput',
+    errors: [409],
   },
   ['delete ' + notes]: {
     title: 'Видалити налаштування сповіщень',
@@ -227,10 +237,12 @@ const contracts: Record<string, Contract> = {
     code: 204,
   },
   ['post ' + notes + '/secrets']: {
-    title: 'Видати наступний секрет підпису сповіщень один раз',
+    title: 'Додати наступний ключ підпису сповіщень із секретом клієнта',
     auth: key,
     result: 'NewKey',
+    body: 'NewSecret',
     errors: [404, 409],
+    replay: 'Повтор із тим самим секретом: той самий ключ',
   },
   ['delete ' + notes + '/secrets/{keyId}']: {
     title: 'Відкликати ключ підпису сповіщень',
@@ -339,11 +351,7 @@ export function buildDocument(app: INestApplication) {
           };
       success.headers = headers;
       op.responses = { [c.code ?? (method === 'post' ? 201 : 200)]: success };
-      if (path === '/workflows/{id}/run')
-        op.responses[200] = {
-          ...success,
-          description: 'Ідемпотентний повтор того самого запиту',
-        };
+      if (c.replay) op.responses[200] = { ...success, description: c.replay };
       const errors = new Set([
         ...(c.errors ?? []),
         ...(c.auth.length ? [c.auth === admin ? 403 : 401, 429] : []),

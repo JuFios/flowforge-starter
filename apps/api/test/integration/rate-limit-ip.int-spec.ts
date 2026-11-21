@@ -3,6 +3,7 @@ import { DataSource } from 'typeorm';
 import type { RunningApp } from '../helpers/app';
 import { createTenant, openTestDataSource, truncateAll } from '../helpers/db';
 import { TEST_ADMIN_TOKEN } from '../helpers/test-env';
+import { newCredentials } from '../helpers/credentials';
 
 /**
  * Ліміти за IP-адресою клієнта: кожен запит до `/tenants…` (перебір адмін-токена) і невдалі
@@ -68,7 +69,7 @@ describe('limits by client IP', () => {
         'content-type': 'application/json',
         ...headers,
       },
-      body: JSON.stringify({ name: 'by-ip' }),
+      body: JSON.stringify({ name: 'by-ip', ...newCredentials() }),
     });
 
   it('counts every admin request from an IP before checking the token', async () => {

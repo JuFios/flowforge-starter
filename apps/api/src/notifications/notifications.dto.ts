@@ -9,6 +9,7 @@ import {
   Max,
   Min,
 } from 'class-validator';
+import { IsSigningSecret } from '../common/key-material';
 import { IsStorableText } from '../common/storable-text';
 import { MAX_URL_LENGTH } from '../workflows/definition';
 
@@ -23,6 +24,14 @@ export class NotificationSettingsDto {
   @IsOptional()
   @IsBoolean()
   enabled?: boolean;
+
+  /**
+   * Секрет підпису, згенерований тенантом: обов'язковий у першому налаштуванні; в оновленні —
+   * лише той самий (повтор), новий ключ додає ротація. У відповідях не повертається (ТЗ 4).
+   */
+  @IsOptional()
+  @IsSigningSecret()
+  secret?: string;
 }
 
 export const EVENT_STATUSES = [

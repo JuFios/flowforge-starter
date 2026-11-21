@@ -18,6 +18,7 @@ import { waitForBlocked } from '../helpers/transaction-barrier';
 import { verifyNotification } from '../helpers/notifications';
 import { api, Receiver } from '../helpers/queue';
 import { testApiDatabaseUrl } from '../helpers/test-env';
+import { newSecret } from '../helpers/credentials';
 
 /**
  * Налаштування сповіщень тенанта (ТЗ 3.3.9, 4): секрет показується один раз, ротація без простою,
@@ -62,21 +63,36 @@ describe('notification settings', () => {
     body?: unknown,
   ) => api<T>(apiApp.baseUrl, tenant.apiKey, method, path, body);
 
+  /** Перше налаштування: секрет генерує тенант (ТЗ 4), відповідь його не містить. */
   async function setup(tenant: TestTenant, path = '/notify') {
+    const secret = newSecret();
     const res = await fetch(`${apiApp.baseUrl}/tenants/me/notifications`, {
       method: 'PUT',
       headers: {
         'x-api-key': tenant.apiKey,
         'content-type': 'application/json',
       },
-      body: JSON.stringify({ url: receiver.url(path) }),
+      body: JSON.stringify({ url: receiver.url(path), secret }),
     });
     expect(res.status).toBe(200);
     expect(res.headers.get('cache-control')).toBe('no-store');
-    return (await res.json()) as {
-      secret: string;
+    const body = (await res.json()) as {
       keys: Array<{ id: string; role: string }>;
     };
+    expect(body).not.toHaveProperty('secret');
+    return { secret, keys: body.keys };
+  }
+
+  /** Ротація з новим секретом тенанта; повертає ID і сам секрет (з запиту, не з відповіді). */
+  async function rotate(tenant: TestTenant) {
+    const secret = newSecret();
+    const res = await call<{ id: string; role: string }>(
+      tenant,
+      'POST',
+      '/tenants/me/notifications/secrets',
+      { secret },
+    );
+    return { status: res.status, body: { ...res.body, secret } };
   }
 
   /** Завершене виконання тенанта → подія в outbox. */
@@ -154,33 +170,37 @@ describe('notification settings', () => {
       const holder = ds.createQueryRunner();
       await holder.connect();
       await holder.startTransaction();
-      const put = (path: string) =>
+      const secret = newSecret();
+      const put = (path: string, value: string) =>
         call<{
-          secret?: string;
           url: string;
           revision: number;
           keys: Array<{ id: string }>;
-        }>(a, 'PUT', '/tenants/me/notifications', { url: receiver.url(path) });
+        }>(a, 'PUT', '/tenants/me/notifications', {
+          url: receiver.url(path),
+          secret: value,
+        });
       try {
         // SHARE пропускає пошук FOR NO KEY UPDATE, утримуючи обидві вставки до COMMIT.
         await holder.query('LOCK TABLE notification_settings IN SHARE MODE');
-        const results = Promise.all([put('/first'), put(secondPath)]);
+        // Той самий секрет — повтор першого налаштування: обидва запити успішні, рядок один.
+        const results = Promise.all([
+          put('/first', secret),
+          put(secondPath, secret),
+        ]);
         await waitForBlocked(ds, holder, 2);
         await holder.commitTransaction();
         const responses = await results;
         expect(responses.map((r) => r.status)).toEqual([200, 200]);
-        const creator = responses.filter((r) => r.body.secret);
-        expect(creator).toHaveLength(1);
         expect(responses[0].body.keys).toEqual(responses[1].body.keys);
-        const last = responses.find((r) => !r.body.secret)!;
-        expect(
+        const rows: Array<{ url: string; revision: number; secret: string }> =
           await ds.query(
-            'SELECT url, revision FROM notification_settings WHERE "tenantId"=$1',
+            'SELECT url, revision, secret FROM notification_settings WHERE "tenantId"=$1',
             [a.tenant.id],
-          ),
-        ).toEqual([
-          { url: last.body.url, revision: secondPath === '/first' ? 1 : 2 },
-        ]);
+          );
+        expect(rows).toHaveLength(1);
+        expect(rows[0].secret).toBe(secret);
+        expect(rows[0].revision).toBe(secondPath === '/first' ? 1 : 2);
       } finally {
         if (holder.isTransactionActive) await holder.rollbackTransaction();
         await holder.release();
@@ -188,9 +208,39 @@ describe('notification settings', () => {
     },
   );
 
-  it('shows the signing secret once and never again', async () => {
+  it('rejects a concurrent first configuration with a different secret', async () => {
+    const holder = ds.createQueryRunner();
+    await holder.connect();
+    await holder.startTransaction();
+    try {
+      await holder.query('LOCK TABLE notification_settings IN SHARE MODE');
+      const results = Promise.all(
+        [newSecret(), newSecret()].map((secret) =>
+          call(a, 'PUT', '/tenants/me/notifications', {
+            url: receiver.url('/notify'),
+            secret,
+          }),
+        ),
+      );
+      await waitForBlocked(ds, holder, 2);
+      await holder.commitTransaction();
+      expect((await results).map((r) => r.status).sort()).toEqual([200, 409]);
+    } finally {
+      if (holder.isTransactionActive) await holder.rollbackTransaction();
+      await holder.release();
+    }
+  });
+
+  it('never returns the signing secret and accepts it only from the tenant', async () => {
+    // Перше налаштування без секрету неможливе: сервер секретів не генерує.
+    expect(
+      (
+        await call(b, 'PUT', '/tenants/me/notifications', {
+          url: receiver.url('/notify'),
+        })
+      ).status,
+    ).toBe(400);
     const created = await setup(a);
-    expect(created.secret).toMatch(/^[0-9a-f]{64}$/);
     expect(created.keys).toEqual([
       { id: expect.any(String) as unknown, role: 'current' },
     ]);
@@ -207,9 +257,44 @@ describe('notification settings', () => {
     });
     expect(updated.body).not.toHaveProperty('secret');
     expect(updated.body).toMatchObject({ revision: 2 });
-    expect(JSON.stringify([read.body, updated.body])).not.toContain(
-      created.secret,
-    );
+    // Повтор першого налаштування (втрачена відповідь) — звичайне оновлення.
+    const replay = await call(a, 'PUT', '/tenants/me/notifications', {
+      url: receiver.url('/other'),
+      secret: created.secret,
+    });
+    expect(replay.status).toBe(200);
+    // Інший секрет — лише ротацією.
+    expect(
+      (
+        await call(a, 'PUT', '/tenants/me/notifications', {
+          url: receiver.url('/other'),
+          secret: newSecret(),
+        })
+      ).status,
+    ).toBe(409);
+    expect(
+      JSON.stringify([read.body, updated.body, replay.body]),
+    ).not.toContain(created.secret);
+  });
+
+  it('replays a lost rotation response and refuses weak or reused secrets', async () => {
+    const created = await setup(a);
+    const post = (secret: string) =>
+      call(a, 'POST', '/tenants/me/notifications/secrets', { secret });
+    for (const weak of ['short', 'z'.repeat(64), 'xy'.repeat(32)])
+      expect((await post(weak)).status).toBe(400);
+    expect((await post(created.secret)).status).toBe(409);
+    const secret = newSecret();
+    const first = await post(secret);
+    expect(first.status).toBe(201);
+    expect(first.body).toEqual({
+      id: expect.any(String) as unknown,
+      role: 'next',
+    });
+    const replay = await post(secret);
+    expect(replay.status).toBe(200);
+    expect(replay.body).toEqual(first.body);
+    expect((await post(newSecret())).status).toBe(409);
   });
 
   it.each([
@@ -238,15 +323,9 @@ describe('notification settings', () => {
 
   it('rotates without downtime: both keys sign pending events until the old one is revoked', async () => {
     const created = await setup(a);
-    const rotated = await call<{ id: string; secret: string }>(
-      a,
-      'POST',
-      '/tenants/me/notifications/secrets',
-    );
+    const rotated = await rotate(a);
     expect(rotated.status).toBe(201);
-    expect(
-      (await call(a, 'POST', '/tenants/me/notifications/secrets')).status,
-    ).toBe(409);
+    expect((await rotate(a)).status).toBe(409);
     await completed(a);
     await sender.deliverNext();
     const [during] = receiver.hits('/notify');
@@ -630,11 +709,7 @@ describe('notification settings', () => {
 
   it('keeps secrets out of logs, errors and metrics', async () => {
     const created = await setup(a);
-    const rotated = await call<{ secret: string }>(
-      a,
-      'POST',
-      '/tenants/me/notifications/secrets',
-    );
+    const rotated = await rotate(a);
     await completed(a);
     receiver.respond = (_req, res) => {
       res.writeHead(500).end();

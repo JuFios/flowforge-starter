@@ -11,6 +11,10 @@ import {
 } from '../workflows/definition';
 import { LIMIT_BOUNDS, OVERRIDE_BOUNDS } from '../tenancy/limits';
 import { EVENT_STATUSES } from '../notifications/notifications.dto';
+import {
+  API_KEY_PATTERN,
+  SIGNING_SECRET_PATTERN,
+} from '../common/key-material';
 
 export const str: SchemaObject = { type: 'string' };
 export const integer: SchemaObject = { type: 'integer' };
@@ -190,6 +194,21 @@ const limits = object({
     webhookRateWindowMs: bounds(LIMIT_BOUNDS.rateWindowMs),
   }),
 });
+/** Облікові дані, які генерує клієнт (ТЗ 4: у відповідях їх немає). */
+const apiKeyInput: SchemaObject = {
+  type: 'string',
+  pattern: API_KEY_PATTERN.source,
+  description:
+    'API-ключ, згенерований оператором (наприклад, `openssl rand -hex 32`). Зберігається лише його хеш.',
+  writeOnly: true,
+};
+const signingSecret: SchemaObject = {
+  type: 'string',
+  pattern: SIGNING_SECRET_PATTERN.source,
+  description:
+    'Секрет підпису HMAC, згенерований клієнтом (наприклад, `openssl rand -hex 32`). Сервер його не повертає.',
+  writeOnly: true,
+};
 const keyView = object({ id: uuid, role: choice(['current', 'next']) });
 const settings = {
   url: str,
@@ -286,24 +305,25 @@ export const schemas: Record<string, SchemaObject> = {
   Limits: limits,
   LimitsPatch: closed(overrides, []),
   CreateTenant: closed(
-    { name: { ...text(200), minLength: 2 }, limits: ref('LimitsPatch') },
-    ['name'],
+    {
+      name: { ...text(200), minLength: 2 },
+      apiKey: apiKeyInput,
+      webhookSecret: signingSecret,
+      limits: ref('LimitsPatch'),
+    },
+    ['name', 'apiKey', 'webhookSecret'],
   ),
-  TenantCredentials: object({
-    id: uuid,
-    name: str,
-    apiKey: str,
-    webhookSecret: str,
-    webhookKeyId: uuid,
-    limits,
-  }),
+  Tenant: object({ id: uuid, name: str, webhookKeyId: uuid, limits }),
   Session: object({ token: str, expiresAt: date }),
   Ticket: object({ ticket: str, expiresAt: date }),
   SigningKeys: array(keyView),
-  NewKey: object({ id: uuid, secret: str }),
+  NewKey: object({ id: uuid, role: choice(['next']) }),
+  NewSecret: closed({ secret: signingSecret }),
   Settings: object(settings),
-  SettingsResult: object({ ...settings, secret: str }, Object.keys(settings)),
-  SettingsInput: closed({ url: text(MAX_URL_LENGTH), enabled: bool }, ['url']),
+  SettingsInput: closed(
+    { url: text(MAX_URL_LENGTH), enabled: bool, secret: signingSecret },
+    ['url'],
+  ),
   Event: object(event),
   EventPage: page('Event'),
   EventDetail: object(

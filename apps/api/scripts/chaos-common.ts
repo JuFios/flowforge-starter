@@ -8,6 +8,7 @@
  * SINK_STATS_URL (http://localhost:8080/stats), ADMIN_TOKEN (інакше — з .env у корені репозиторію).
  */
 import { execFileSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseEnv } from 'node:util';
@@ -104,11 +105,16 @@ export async function enqueueRound(
     Math.floor((EXECUTIONS * (round + 1)) / rounds) -
     Math.floor((EXECUTIONS * round) / rounds);
   if (!count) throw new Error('each fault round requires its own workload');
-  const { apiKey } = await call<{ apiKey: string }>(
+  const apiKey = newKeyMaterial('ff_');
+  await call(
     'POST',
     '/tenants',
     { 'x-admin-token': adminToken() },
-    { name: `chaos-${Date.now()}` },
+    {
+      name: `chaos-${Date.now()}`,
+      apiKey,
+      webhookSecret: newKeyMaterial(),
+    },
   );
   const auth = { 'x-api-key': apiKey };
   const wf = await call<{ id: string }>('POST', '/workflows', auth, {
@@ -399,4 +405,12 @@ export function finish(report: string[], problems: string[], ok: string): void {
     return;
   }
   log(`OK: ${ok}`);
+}
+
+/**
+ * Облікові дані генерує клієнт (ТЗ 4: API їх не повертає): 32 випадкові байти в hex, як
+ * `openssl rand -hex 32` у README.
+ */
+export function newKeyMaterial(prefix = ''): string {
+  return prefix + randomBytes(32).toString('hex');
 }

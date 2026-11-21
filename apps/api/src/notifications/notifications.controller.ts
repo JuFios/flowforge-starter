@@ -10,11 +10,14 @@ import {
   Post,
   Put,
   Query,
+  Res,
   StreamableFile,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import { Readable, addAbortSignal } from 'node:stream';
 import { ApiKeyGuard } from '../auth/api-key.guard';
 import { CurrentTenant } from '../auth/current-tenant.decorator';
+import { SigningSecretDto } from '../common/key-material';
 import { Tenant } from '../entities';
 import { RateLimit } from '../limits/rate-limit.guard';
 import {
@@ -35,7 +38,7 @@ export class NotificationsController {
     return this.notifications.get(tenant.id);
   }
 
-  /** Перше налаштування відповідає й секретом підпису — єдиний раз. */
+  /** Перше налаштування приймає секрет підпису тенанта; відповідь секрету не містить. */
   @Put()
   @Header('Cache-Control', 'no-store')
   put(@CurrentTenant() tenant: Tenant, @Body() body: NotificationSettingsDto) {
@@ -48,10 +51,20 @@ export class NotificationsController {
     await this.notifications.remove(tenant.id);
   }
 
+  /** Новий ключ `next` із секретом тенанта (201); повтор того самого секрету — 200 з тим самим ID. */
   @Post('secrets')
   @Header('Cache-Control', 'no-store')
-  rotate(@CurrentTenant() tenant: Tenant) {
-    return this.notifications.rotate(tenant.id);
+  async rotate(
+    @CurrentTenant() tenant: Tenant,
+    @Body() body: SigningSecretDto,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const { id, role, created } = await this.notifications.rotate(
+      tenant.id,
+      body.secret,
+    );
+    if (!created) res.status(200);
+    return { id, role };
   }
 
   @Delete('secrets/:keyId')

@@ -17,6 +17,7 @@ import {
 } from '../helpers/db';
 import { startWorker, waitFor } from '../helpers/queue';
 import { signedHeaders } from '../helpers/webhook';
+import { newSecret } from '../helpers/credentials';
 
 describe('webhook upgrade, concurrent acceptance and revocation', () => {
   let db: DataSource;
@@ -43,7 +44,11 @@ describe('webhook upgrade, concurrent acceptance and revocation', () => {
     const manage = (key: string, method: string, suffix = '') =>
       fetch(b.baseUrl + '/tenants/me/webhook-secrets' + suffix, {
         method,
-        headers: { 'x-api-key': key },
+        headers: { 'x-api-key': key, 'content-type': 'application/json' },
+        body:
+          method === 'POST'
+            ? JSON.stringify({ secret: newSecret() })
+            : undefined,
       });
     expect((await manage('', 'POST')).status).toBe(401);
     const original = (await (await manage(owner.apiKey, 'GET')).json()) as {
@@ -148,10 +153,16 @@ describe('webhook upgrade, concurrent acceptance and revocation', () => {
     services.push(a);
     const b = await startApp(undefined, { captureLogs: true });
     services.push(b);
-    const keys = (s: RunningApp, method: string, suffix = '') =>
+    const keys = (
+      s: RunningApp,
+      method: string,
+      suffix = '',
+      secret?: string,
+    ) =>
       fetch(s.baseUrl + '/tenants/me/webhook-secrets' + suffix, {
         method,
-        headers: { 'x-api-key': apiKey },
+        headers: { 'x-api-key': apiKey, 'content-type': 'application/json' },
+        body: secret === undefined ? undefined : JSON.stringify({ secret }),
       });
     const send = (
       s: RunningApp,
@@ -172,11 +183,20 @@ describe('webhook upgrade, concurrent acceptance and revocation', () => {
         202,
       );
     const original = (await (await keys(a, 'GET')).json()) as { id: string }[];
-    const rotations = await Promise.all([keys(a, 'POST'), keys(b, 'POST')]);
+    // Ключ генерує власник (ТЗ 4); з двох паралельних ротацій приймається одна.
+    const candidates = [newSecret(), newSecret()];
+    const rotations = await Promise.all([
+      keys(a, 'POST', '', candidates[0]),
+      keys(b, 'POST', '', candidates[1]),
+    ]);
     expect(rotations.map((r) => r.status).sort()).toEqual([201, 409]);
-    const response = rotations.find((r) => r.status === 201)!;
+    const won = rotations.findIndex((r) => r.status === 201);
+    const response = rotations[won];
     expect(response.headers.get('cache-control')).toBe('no-store');
-    const fresh = (await response.json()) as { id: string; secret: string };
+    const fresh = {
+      ...((await response.json()) as { id: string }),
+      secret: candidates[won],
+    };
     const blocker = db.createQueryRunner();
     await blocker.connect();
     await blocker.startTransaction();

@@ -31,6 +31,7 @@
  * (інакше — з .env у корені репозиторію).
  */
 import { execFileSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseEnv } from 'node:util';
@@ -118,15 +119,20 @@ interface Tenant {
   workflow: string;
 }
 
+/** Облікові дані генерує клієнт (ТЗ 4: API їх не повертає). */
+function newKeyMaterial(prefix = ''): string {
+  return prefix + randomBytes(32).toString('hex');
+}
+
 async function tenant(name: string): Promise<Tenant> {
   const admin = { 'x-admin-token': rootEnv('ADMIN_TOKEN') };
-  const created = await call<{ id: string; apiKey: string }>(
-    'POST',
-    '/tenants',
-    admin,
-    { name },
-  );
-  const auth = { 'x-api-key': created.apiKey };
+  const apiKey = newKeyMaterial('ff_');
+  const created = await call<{ id: string }>('POST', '/tenants', admin, {
+    name,
+    apiKey,
+    webhookSecret: newKeyMaterial(),
+  });
+  const auth = { 'x-api-key': apiKey };
   const wf = await call<{ id: string }>('POST', '/workflows', auth, {
     name: `${name}-load`,
     steps: [{ id: 'call', type: 'http', method: 'POST', url: SINK_URL }],

@@ -13,6 +13,7 @@ import {
 } from '../helpers/db';
 import { TEST_ADMIN_TOKEN } from '../helpers/test-env';
 import { api, Receiver, startWorker, waitFor } from '../helpers/queue';
+import { newCredentials } from '../helpers/credentials';
 
 /** U+FFFD — символ заміни Unicode. */
 const REPLACEMENT = '�';
@@ -264,7 +265,7 @@ describe('strings Postgres cannot store', () => {
           'content-type': 'application/json',
           'x-admin-token': TEST_ADMIN_TOKEN,
         },
-        body: JSON.stringify({ name: 'acme\u0000' }),
+        body: JSON.stringify({ name: 'acme\u0000', ...newCredentials() }),
       });
       expect(res.status).toBe(400);
     });

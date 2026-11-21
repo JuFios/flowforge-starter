@@ -19,7 +19,12 @@ describe('request logging', () => {
     server = createServer((req, res) => {
       middleware(req, res);
       req.log.info(
-        { tenant: { apiKey: 'ff_inner_secret', webhookSecret: 'whsec_inner' } },
+        {
+          tenant: { apiKey: 'ff_inner_secret', webhookSecret: 'whsec_inner' },
+          err: {
+            body: { nextSecret: 'deep_next_secret', secret: 'deep_secret' },
+          },
+        },
         'handler log',
       );
       res.setHeader('set-cookie', 'ff_api_key=cookie_secret');
@@ -61,6 +66,8 @@ describe('request logging', () => {
       'cookie_secret',
       'ff_inner_secret',
       'whsec_inner',
+      'deep_next_secret',
+      'deep_secret',
     ]) {
       expect(output).not.toContain(secret);
     }

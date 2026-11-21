@@ -142,13 +142,22 @@ npm run dev -- -p 3001
 
 ```bash
 ADMIN_TOKEN="$(sed -n 's/^ADMIN_TOKEN=//p' .env)"
-curl -X POST localhost:3000/tenants -H "x-admin-token: $ADMIN_TOKEN" \
-  -H 'content-type: application/json' -d '{"name":"acme"}'
+API_KEY="ff_$(openssl rand -hex 32)" WEBHOOK_SECRET="$(openssl rand -hex 32)"
+printf '{"name":"acme","apiKey":"%s","webhookSecret":"%s"}' "$API_KEY" "$WEBHOOK_SECRET" |
+  curl -X POST localhost:3000/tenants -H "x-admin-token: $ADMIN_TOKEN" \
+    -H 'content-type: application/json' --data-binary @-
 ```
 
-Відповідь містить `apiKey` (показується один раз) і `webhookSecret`. Далі всі запити — із
-заголовком `x-api-key`. Необов'язковий заголовок `x-request-id` задає кореляційний ID
-(інакше він генерується) і повертається у відповіді.
+#### Облікові дані тенанта
+
+API-ключ і секрети підпису генерує клієнт: оператор для тенанта, а тенант для ротації й сповіщень. Сервер їх лише приймає і в жодній відповіді, помилці чи журналі не повертає (ТЗ, розд. 4).
+
+- **Як генерувати.** Значення беруть із криптографічно стійкого джерела, наприклад `openssl rand -hex 32` чи сховища секретів, і передають через stdin (`--data-binary @-`). Аргументи процесу видно іншим користувачам хоста, тож туди значення не кладуть.
+- **API-ключ.** 43–256 символів `[A-Za-z0-9_-]`. Секрет підпису — 32–256 друкованих ASCII без пробілів. Обидва мають щонайменше 8 різних символів. Сервер зберігає тільки sha256 API-ключа. Секрети підпису зберігаються як є, бо HMAC потребує самого значення (docs/architecture.md, 3.3.9).
+- **`POST /tenants`.** Відповідь: `{"id","name","webhookKeyId","limits"}` (201). Повтор того самого тіла після втраченої відповіді повертає того самого тенанта (200). Той самий API-ключ з іншою назвою чи іншим секретом дає 409.
+- **Ротація** (`POST …/webhook-secrets`, `POST …/notifications/secrets`) приймає `{"secret":"…"}` і повертає `{"id","role":"next"}` (201). Повтор із тим самим секретом повертає той самий ID (200). Новий секрет, поки є `next`, або секрет, що дорівнює чинному, дає 409.
+
+Далі всі запити йдуть із заголовком `x-api-key`. Необов'язковий заголовок `x-request-id` задає кореляційний ID (інакше він генерується) і повертається у відповіді.
 
 ```bash
 API_KEY=ff_...
@@ -211,15 +220,15 @@ X-RateLimit-Remaining: 412
 
 | Метод | Шлях | Опис |
 |---|---|---|
-| POST | `/tenants` | створення тенанта (`x-admin-token`; необов'язково `limits`) |
+| POST | `/tenants` | створення тенанта з обліковими даними оператора (`x-admin-token`; необов'язково `limits`) |
 | GET/PATCH | `/tenants/:id/limits` | ліміти тенанта: перевизначення й ефективні значення (`x-admin-token`) |
 | POST/GET/PATCH/DELETE | `/workflows[/:id]` | керування workflow |
 | POST | `/workflows/:id/run` | запуск вручну (тіло — input; необов'язковий заголовок `Idempotency-Key`) |
 | GET | `/executions`, `/executions/:id` | виконання та їхні кроки |
 | POST | `/executions/:id/retry` | повтор виконання `failed` з першого незавершеного кроку (202; не `failed` — 409, чуже — 404) |
 | POST | `/hooks/:workflowId` | вхідний webhook v1, timestamp, ID доставки й HMAC (3.3.7) |
-| GET/PUT/DELETE | `/tenants/me/notifications` | налаштування сповіщень: endpoint, `enabled`, ключі (секрет — лише у відповіді на створення) |
-| POST / DELETE | `/tenants/me/notifications/secrets[/:keyId]` | ротація й відкликання ключа підпису сповіщень |
+| GET/PUT/DELETE | `/tenants/me/notifications` | налаштування сповіщень: endpoint, `enabled`, ключі (секрет тенанта — у тілі першого PUT, у відповідях його немає) |
+| POST / DELETE | `/tenants/me/notifications/secrets[/:keyId]` | ротація (секрет тенанта в тілі) й відкликання ключа підпису сповіщень |
 | GET | `/tenants/me/notifications/events[/:id]` | журнал подій (курсор, `status`, `limit` 1..100) і подія зі спробами |
 | POST | `/tenants/me/notifications/events/:id/redeliver` | надіслати подію негайно ще раз (202; спроба триває — 409) |
 | GET | `/health` | liveness: процес живий |
@@ -714,11 +723,13 @@ npm run lint           # ESLint, 0 попереджень
 ### Налаштування
 
 ```bash
-# Endpoint (лише https://, публічний хост, без облікових даних у URL). Перша відповідь — єдина,
-# де видно секрет підпису: збережіть його одразу.
-curl -X PUT localhost:3000/tenants/me/notifications -H "x-api-key: $API_KEY" \
-  -H 'content-type: application/json' -d '{"url":"https://hooks.example.com/flowforge"}'
-# {"url":"…","enabled":true,"revision":1,"keys":[{"id":"…","role":"current"}],"secret":"<64 hex>"}
+# Endpoint (лише https://, публічний хост, без облікових даних у URL). Секрет підпису генерує
+# тенант і передає в першому налаштуванні; отримувач перевіряє підписи цим самим значенням.
+NOTIFY_SECRET="$(openssl rand -hex 32)"
+printf '{"url":"https://hooks.example.com/flowforge","secret":"%s"}' "$NOTIFY_SECRET" |
+  curl -X PUT localhost:3000/tenants/me/notifications -H "x-api-key: $API_KEY" \
+    -H 'content-type: application/json' --data-binary @-
+# {"url":"…","enabled":true,"revision":1,"keys":[{"id":"…","role":"current"}]}
 
 curl localhost:3000/tenants/me/notifications -H "x-api-key: $API_KEY"        # без секретів
 curl -X PUT localhost:3000/tenants/me/notifications -H "x-api-key: $API_KEY" \
@@ -849,8 +860,9 @@ module.exports = { verify, handle };
 
 ### Ротація секрету без простою
 
-1. `POST /tenants/me/notifications/secrets` — новий ключ `next`; секрет — лише в цій відповіді
-   (`{"id":"…","secret":"…"}`, `Cache-Control: no-store`). Відтепер кожна спроба має два підписи.
+1. `POST /tenants/me/notifications/secrets` з `{"secret":"<новий секрет тенанта>"}` — новий ключ
+   `next` (`{"id":"…","role":"next"}`; повтор із тим самим секретом — той самий ID, 200). Відтепер
+   кожна спроба має два підписи.
 2. Отримувач додає новий секрет до списку (`verify(…, [old, new])`) і розгортається.
 3. `DELETE /tenants/me/notifications/secrets/<id старого ключа>` — підписи лише новим. Останній
    ключ не відкликається (409); друга ротація, поки є `next`, — 409.

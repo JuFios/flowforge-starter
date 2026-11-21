@@ -11,12 +11,14 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import {
-  assertCanRotate,
   keyViews,
   planRevoke,
+  planRotate,
+  RotationResult,
   SigningKeyView,
 } from '../common/signing-keys';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { safeEqual } from '../common/safe-equal';
+import { randomUUID } from 'node:crypto';
 import type { EntityManager } from 'typeorm';
 import { assertNotificationUrl } from '../engine/outbound-http';
 import { StepError } from '../engine/step-error';
@@ -87,13 +89,10 @@ const EVENT_COLUMNS = `id, "executionId", sequence, type, status, attempts,
   CASE WHEN status = 'pending' THEN "nextAttemptAt" END AS "nextAttemptAt",
   "lastError", "lastStatus", "correlationId", "createdAt", "deliveredAt"`;
 
-/** Секрет підпису: 32 випадкові байти, hex (показується лише раз). */
-const newSecret = () => randomBytes(32).toString('hex');
-
 /**
  * Налаштування сповіщень і журнал подій тенанта (README 3.3.9). Усе — у транзакції тенанта (RLS) з
- * явним предикатом `tenantId`. Секрети підпису повертаються лише в момент створення (першого
- * налаштування чи ротації) і більше ніде: не в читанні, не в помилках, не в логах.
+ * явним предикатом `tenantId`. Секрети підпису генерує тенант і передає в тілі першого налаштування
+ * чи ротації; сервер їх не повертає ніде: ні у відповідях, ні в помилках, ні в логах (ТЗ 4).
  *
  * Порядок блокувань: рядок налаштувань → події (так само, як у захопленні спроби).
  */
@@ -109,28 +108,68 @@ export class NotificationsService {
 
   /**
    * Створює або змінює налаштування. URL перевіряється до транзакції (DNS — поза з'єднанням із
-   * БД). Перше налаштування повертає ключ підпису разом із секретом — єдиний раз.
+   * БД). Перше налаштування вимагає секрет підпису від тенанта; повтор із тим самим секретом —
+   * звичайне оновлення (втрачена відповідь), інший секрет — 409 (новий ключ — лише ротацією).
    */
   async put(
     tenantId: string,
     input: NotificationSettingsDto,
-  ): Promise<SettingsView & { secret?: string }> {
+  ): Promise<SettingsView> {
     await this.checkUrl(input.url);
     return this.db.run(tenantId, async (em) => {
-      const secret = newSecret();
-      const keyId = randomUUID();
-      const [row]: SettingsRow[] = await em.query(
-        `INSERT INTO notification_settings AS s ("tenantId", url, enabled, "secretKeyId", secret)
-         VALUES ($1,$2,COALESCE($3,true),$4,$5)
-         ON CONFLICT ("tenantId") DO UPDATE SET
-           url=EXCLUDED.url, enabled=COALESCE($3,s.enabled),
-           revision=s.revision + (s.url <> EXCLUDED.url OR ($3 IS TRUE AND NOT s.enabled))::integer,
-           "updatedAt"=now()
+      let current = await this.currentSecret(em, tenantId);
+      if (current === undefined) {
+        if (input.secret === undefined)
+          throw new BadRequestException([
+            'secret is required to create notification settings',
+          ]);
+        const [inserted]: SettingsRow[] = await em.query(
+          `INSERT INTO notification_settings ("tenantId", url, enabled, "secretKeyId", secret)
+           VALUES ($1,$2,COALESCE($3,true),$4,$5)
+           ON CONFLICT ("tenantId") DO NOTHING
+           RETURNING url, enabled, revision, "secretKeyId", "nextSecretKeyId"`,
+          [
+            tenantId,
+            input.url,
+            input.enabled ?? null,
+            randomUUID(),
+            input.secret,
+          ],
+        );
+        if (inserted) return view(inserted);
+        // Паралельне перше налаштування встигло першим: далі — як оновлення його рядка.
+        current = await this.currentSecret(em, tenantId);
+        if (current === undefined)
+          throw new ConflictException('Налаштування щойно видалено');
+      }
+      if (input.secret !== undefined && !safeEqual(input.secret, current))
+        throw new ConflictException(
+          'Секрет уже налаштовано; новий ключ додає ротація',
+        );
+      // UPDATE … RETURNING у TypeORM повертає пару [рядки, кількість].
+      const [[row]]: [SettingsRow[], number] = await em.query(
+        `UPDATE notification_settings AS s SET
+           url = $2, enabled = COALESCE($3, s.enabled),
+           revision = s.revision + (s.url <> $2 OR ($3 IS TRUE AND NOT s.enabled))::integer,
+           "updatedAt" = now()
+         WHERE "tenantId" = $1
          RETURNING url, enabled, revision, "secretKeyId", "nextSecretKeyId"`,
-        [tenantId, input.url, input.enabled ?? null, keyId, secret],
+        [tenantId, input.url, input.enabled ?? null],
       );
-      return row.secretKeyId === keyId ? { ...view(row), secret } : view(row);
+      return view(row);
     });
+  }
+
+  /** Чинний секрет під блокуванням рядка налаштувань або undefined, якщо їх немає. */
+  private async currentSecret(
+    em: EntityManager,
+    tenantId: string,
+  ): Promise<string | undefined> {
+    const [row]: Array<{ secret: string }> = await em.query(
+      'SELECT secret FROM notification_settings WHERE "tenantId" = $1 FOR NO KEY UPDATE',
+      [tenantId],
+    );
+    return row?.secret;
   }
 
   /**
@@ -152,18 +191,37 @@ export class NotificationsService {
     });
   }
 
-  /** Ротація: новий ключ `next` (секрет — лише в цій відповіді); підписи — обома, доки не відкличуть. */
-  async rotate(tenantId: string): Promise<{ id: string; secret: string }> {
+  /**
+   * Ротація: новий ключ `next` із секретом тенанта; підписи — обома, доки не відкличуть. Повтор із
+   * тим самим секретом повертає той самий ID (`created: false`).
+   */
+  async rotate(tenantId: string, secret: string): Promise<RotationResult> {
     return this.db.run(tenantId, async (em) => {
-      assertCanRotate(pair(await this.settings(em, tenantId, true)));
-      const id = randomUUID(),
-        secret = newSecret();
-      await em.query(
-        `UPDATE notification_settings SET "nextSecretKeyId" = $2, "nextSecret" = $3, "updatedAt" = now()
-          WHERE "tenantId" = $1`,
-        [tenantId, id, secret],
+      const [row]: Array<{
+        secretKeyId: string;
+        secret: string;
+        nextSecretKeyId: string | null;
+        nextSecret: string | null;
+      }> = await em.query(
+        `SELECT "secretKeyId", secret, "nextSecretKeyId", "nextSecret"
+           FROM notification_settings WHERE "tenantId" = $1 FOR NO KEY UPDATE`,
+        [tenantId],
       );
-      return { id, secret };
+      if (!row) throw new NotFoundException('Сповіщення не налаштовано');
+      const plan = planRotate(
+        { id: row.secretKeyId, secret: row.secret },
+        row.nextSecretKeyId && row.nextSecret
+          ? { id: row.nextSecretKeyId, secret: row.nextSecret }
+          : null,
+        secret,
+      );
+      if (plan.created)
+        await em.query(
+          `UPDATE notification_settings SET "nextSecretKeyId" = $2, "nextSecret" = $3, "updatedAt" = now()
+            WHERE "tenantId" = $1`,
+          [tenantId, plan.id, secret],
+        );
+      return plan;
     });
   }
 

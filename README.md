@@ -64,14 +64,15 @@ docker compose up --build
 
 ```bash
 ADMIN_TOKEN="$(sed -n 's/^ADMIN_TOKEN=//p' .env)"
-curl -X POST localhost:3000/tenants -H "x-admin-token: $ADMIN_TOKEN" \
-  -H 'content-type: application/json' -d '{"name":"acme"}'
+API_KEY="ff_$(openssl rand -hex 32)" WEBHOOK_SECRET="$(openssl rand -hex 32)"
+printf '{"name":"acme","apiKey":"%s","webhookSecret":"%s"}' "$API_KEY" "$WEBHOOK_SECRET" |
+  curl -X POST localhost:3000/tenants -H "x-admin-token: $ADMIN_TOKEN" \
+    -H 'content-type: application/json' --data-binary @-
 ```
 
-Відповідь містить `apiKey` (показується один раз) і `webhookSecret`. Далі — заголовок `x-api-key`; необов'язковий `x-request-id` задає кореляційний ID.
+Облікові дані генерує оператор, а API лише приймає їх: відповідь містить `id`, `webhookKeyId` і ліміти, але жодного секрету (ТЗ, розд. 4). Сервер зберігає тільки sha256 API-ключа. Значення передаються через stdin, тож не потрапляють в аргументи процесу. Повтор того самого запиту після втраченої відповіді повертає того самого тенанта (200). Далі використовується заголовок `x-api-key`; необов'язковий `x-request-id` задає кореляційний ID.
 
 ```bash
-API_KEY=ff_...
 curl -X POST localhost:3000/workflows -H "x-api-key: $API_KEY" -H 'content-type: application/json' \
   -d '{"name":"demo","steps":[{"id":"hello","type":"log","message":"hi {{ input.name }}"}]}'
 curl -X POST localhost:3000/workflows/<workflowId>/run -H "x-api-key: $API_KEY" \
@@ -84,7 +85,7 @@ curl localhost:3000/executions/<executionId> -H "x-api-key: $API_KEY"
 
 | Метод | Шлях | Опис |
 |---|---|---|
-| POST | `/tenants` | створення тенанта (`x-admin-token`, необов'язково `limits`) |
+| POST | `/tenants` | створення тенанта з API-ключем і секретом webhook від оператора (`x-admin-token`, необов'язково `limits`) |
 | GET/PATCH | `/tenants/:id/limits` | ліміти тенанта: перевизначення й ефективні значення |
 | GET/POST | `/workflows` | сторінка `{items, nextCursor}` (`limit` 1..100) і створення |
 | GET/PATCH/DELETE | `/workflows/:id` | значення заголовків — `{"stored":true}`; у PATCH `{"keep":true}` лишає збережене |
@@ -94,7 +95,7 @@ curl localhost:3000/executions/<executionId> -H "x-api-key: $API_KEY"
 | POST | `/executions/:id/retry`, `/executions/:id/realtime-tickets` | повтор `failed`; одноразовий тикет WebSocket |
 | POST/DELETE | `/sessions`, `/sessions/current` | сесія браузера в обмін на ключ і її відкликання |
 | POST | `/hooks/:workflowId` | вхідний webhook (підпис v1 з часом і ID доставки) |
-| GET/PUT/DELETE, POST | `/tenants/me/notifications…`, `/tenants/me/webhook-secrets…` | сповіщення, журнал подій, ротація ключів |
+| GET/PUT/DELETE, POST | `/tenants/me/notifications…`, `/tenants/me/webhook-secrets…` | сповіщення, журнал подій, ротація ключів (секрет у тілі запиту, у відповіді — лише ID) |
 | GET | `/health`, `/ready` | liveness і доступність БД |
 
 Відповіді лімітів: `429 rate_limited` з `Retry-After`; `429 queue_full` і `429 workflow_limit_reached` без нього (місце звільняє завершення задач чи видалення workflow). Під лімітом частоти кожна відповідь несе `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`.
@@ -369,6 +370,7 @@ CI (`.github/workflows/ci.yml`) запускає форматування, лі�
 | `test/integration/connection-pool.int-spec.ts` | lease 3 с, HTTP-крок триває 9 с, штучна затримка SQL й перевірки повторів збережені | при lease 1,5 с виміряні затримки підтвердження heartbeat на спільному раннері перевищували захисний бюджет; крок і далі вимагає кількох продовжень |
 | `test/integration/execution-realtime.int-spec.ts` | тест перериває свій LISTEN за PID і перевіряє зʼєднання в сусідній БД | перевірка відновлення не повинна залежати від інших баз одного кластера |
 | `apps/frontend/test/tenant-journey.spec.ts` | після відновлення API тест чекає на `/ready` | наступний браузерний сценарій має працювати з відновленим API |
+| `role-operations`, `webhook-keys`, `webhook-upgrade`, `notification-settings`, `tenant-limits-admin`, `workflow-quota`, `rate-limit-ip`, `unstorable-text`, хелпер `configureNotifications`, `apps/frontend/test/fixtures.ts` | API-ключ і секрети генерує тест і передає в тілі запиту; перевірка «секрет показується один раз» замінена перевірками «секрет не повертається», повтору з тим самим значенням (200) і відмови для іншого (409) | ТЗ, розд. 4: секрети не потрапляють у відповіді API. Нові `secret-exposure` і контрактні випадки доводять інваріант для всіх маршрутів видачі, ротації, читання й помилок |
 
 ## Архітектурні рішення
 
@@ -423,7 +425,7 @@ TypeORM-міграції замість `synchronize`; `@nestjs/config` з ва�
 ### 3.3.7 Вхідні webhook-и
 
 - **Варіанти:** HMAC над тілом; канонізований JSON; підписаний JWT.
-- **Обрано:** HMAC-SHA256 над `v1\n<workflow>\n<час>\n<ID доставки>\n` і сирими байтами тіла, `timingSafeEqual`, вікно ±300 с, квитанція доставки в транзакції постановки, два активні ключі для ротації без простою.
+- **Обрано:** HMAC-SHA256 над `v1\n<workflow>\n<час>\n<ID доставки>\n` і сирими байтами тіла, `timingSafeEqual`, вікно ±300 с, квитанція доставки в транзакції постановки, два активні ключі для ротації без простою. Секрети генерує власник і передає в тілі запиту; API повертає лише ID ключа (ТЗ, розд. 4).
 - **Чому:** відправник підписує ті самі байти, що надсилає; повтор і підміна тіла виявляються.
 - **Обмеження:** годинник відправника має бути в межах вікна.
 

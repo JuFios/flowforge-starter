@@ -16,7 +16,7 @@ import { callApi, UpstreamUnavailableError } from '@/lib/upstream';
 export const dynamic = 'force-dynamic';
 
 const NO_STORE = 'private, no-store';
-/** Видані ключі — `ff_` + 48 hex; довше значення не може бути ключем (MAX_API_KEY_LENGTH в API). */
+/** Ключі тенантів — до 256 символів (MAX_API_KEY_LENGTH в API); довше значення не може бути ключем. */
 const MAX_KEY_LENGTH = 256;
 
 function json(
@@ -109,7 +109,7 @@ export async function POST(req: NextRequest): Promise<Response> {
   )
     return json(400, {
       error: 'invalid_request',
-      message: 'введіть API-ключ тенанта (ff_…)',
+      message: 'введіть API-ключ тенанта',
     });
 
   const previous = validSessionToken(

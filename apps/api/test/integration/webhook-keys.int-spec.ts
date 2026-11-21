@@ -3,6 +3,11 @@ import { TenantDb } from '../../src/tenancy/tenant-db';
 import { WebhookKeysService } from '../../src/webhooks/webhook-keys.service';
 import { RunningApp, startApp } from '../helpers/app';
 import { createWorkflow, openTestDataSource, truncateAll } from '../helpers/db';
+import {
+  createTenantViaApi,
+  newSecret,
+  tenantBody,
+} from '../helpers/credentials';
 import { TEST_ADMIN_TOKEN } from '../helpers/test-env';
 
 /** Керування ключами підпису (README 3.3.7, «Ротація без простою»). */
@@ -20,26 +25,15 @@ describe('webhook key management', () => {
     await ds.destroy();
   });
 
-  async function newTenant() {
-    const res = await fetch(running.baseUrl + '/tenants', {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'x-admin-token': TEST_ADMIN_TOKEN,
-      },
-      body: JSON.stringify({ name: 'keys' }),
-    });
-    expect(res.status).toBe(201);
-    return (await res.json()) as {
-      id: string;
-      apiKey: string;
-      webhookKeyId: string;
-    };
-  }
-  const keys = (apiKey: string, method = 'GET', suffix = '') =>
+  const newTenant = () => createTenantViaApi(running.baseUrl, 'keys');
+  const keys = (apiKey: string, method = 'GET', suffix = '', secret?: string) =>
     fetch(running.baseUrl + '/tenants/me/webhook-secrets' + suffix, {
       method,
-      headers: { 'x-api-key': apiKey },
+      headers: { 'x-api-key': apiKey, 'content-type': 'application/json' },
+      body:
+        method === 'POST'
+          ? JSON.stringify({ secret: secret ?? newSecret() })
+          : undefined,
     });
 
   it('names the current and the next key so a lost rotation can be undone', async () => {
@@ -83,7 +77,7 @@ describe('webhook key management', () => {
     let locked!: () => void;
     const rowLocked = new Promise<void>((resolve) => (locked = resolve));
     const rotation = running.app.get(TenantDb).run(tenant.id, async (em) => {
-      await service.rotateIn(em, tenant.id);
+      await service.rotateIn(em, tenant.id, newSecret());
       locked();
       await held;
     });
@@ -108,5 +102,77 @@ describe('webhook key management', () => {
       release();
       await rotation;
     }
+  });
+
+  it('accepts only client-generated keys and replays a lost rotation response', async () => {
+    const tenant = await newTenant();
+    // Слабкі значення відхиляються без відлуння в повідомленні.
+    for (const secret of [
+      'short',
+      'a'.repeat(64),
+      'ab'.repeat(32),
+      ' '.repeat(40),
+    ]) {
+      const res = await keys(tenant.apiKey, 'POST', '', secret);
+      expect(res.status).toBe(400);
+      expect(await res.text()).not.toContain(secret.trim() || '    ');
+    }
+    // Той самий секрет, що й чинний, ключем не стає.
+    expect(
+      (await keys(tenant.apiKey, 'POST', '', tenant.webhookSecret)).status,
+    ).toBe(409);
+    const secret = newSecret();
+    const first = await keys(tenant.apiKey, 'POST', '', secret);
+    expect(first.status).toBe(201);
+    const created = (await first.json()) as Record<string, unknown>;
+    expect(created).toEqual({
+      id: expect.any(String) as unknown,
+      role: 'next',
+    });
+    // Відповідь втрачено — повтор із тим самим секретом повертає той самий ключ.
+    const replay = await keys(tenant.apiKey, 'POST', '', secret);
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toEqual(created);
+    expect((await keys(tenant.apiKey, 'POST', '', newSecret())).status).toBe(
+      409,
+    );
+  });
+
+  it('creates a tenant from operator credentials and replays the same request', async () => {
+    const body = tenantBody('replayed');
+    const post = (payload: unknown) =>
+      fetch(running.baseUrl + '/tenants', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-admin-token': TEST_ADMIN_TOKEN,
+        },
+        body: JSON.stringify(payload),
+      });
+    const results = await Promise.all([post(body), post(body)]);
+    expect(results.map((r) => r.status).sort()).toEqual([200, 201]);
+    const [a, b] = (await Promise.all(results.map((r) => r.json()))) as Array<
+      Record<string, unknown>
+    >;
+    expect(a).toEqual(b);
+    expect(Object.keys(a).sort()).toEqual([
+      'id',
+      'limits',
+      'name',
+      'webhookKeyId',
+    ]);
+    expect((await post({ ...body, name: 'other' })).status).toBe(409);
+    expect((await post({ ...body, webhookSecret: newSecret() })).status).toBe(
+      409,
+    );
+    for (const apiKey of ['ff_short', 'x'.repeat(64), 'ff_' + 'ab'.repeat(30)])
+      expect((await post({ ...tenantBody('weak'), apiKey })).status).toBe(400);
+    expect((await post({ name: 'missing' })).status).toBe(400);
+    const [{ count }]: Array<{ count: string }> = await ds.query(
+      'SELECT count(*) FROM tenants',
+    );
+    expect(Number(count)).toBe(1);
+    // Ключ із тіла запиту автентифікує тенанта.
+    expect((await keys(body.apiKey)).status).toBe(200);
   });
 });

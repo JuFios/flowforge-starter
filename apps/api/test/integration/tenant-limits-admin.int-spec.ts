@@ -7,6 +7,7 @@ import { RunningApp, startApp } from '../helpers/app';
 import { openTestDataSource, truncateAll } from '../helpers/db';
 import { TEST_ADMIN_TOKEN } from '../helpers/test-env';
 import { provisionTestDatabase } from '../helpers/test-provision';
+import { newCredentials } from '../helpers/credentials';
 
 /**
  * Адмін-API лімітів тенанта: перевизначення під час створення й пізніше (`null` — значення за
@@ -57,6 +58,7 @@ describe('tenant limits admin API', () => {
 
   it('creates a tenant with overrides and reports overrides and effective limits', async () => {
     const res = await admin('POST', '/tenants', {
+      ...newCredentials(),
       name: 'limited',
       limits: { maxConcurrentExecutions: 3, rateLimit: 50 },
     });
@@ -91,7 +93,10 @@ describe('tenant limits admin API', () => {
 
   it('rejects an empty array in place of a PATCH limits object', async () => {
     const { id } = (await (
-      await admin('POST', '/tenants', { name: 'patch-array' })
+      await admin('POST', '/tenants', {
+        ...newCredentials(),
+        name: 'patch-array',
+      })
     ).json()) as { id: string };
     expect((await admin('PATCH', `/tenants/${id}/limits`, [])).status).toBe(
       400,
@@ -102,6 +107,7 @@ describe('tenant limits admin API', () => {
     expect(
       (
         await admin('POST', '/tenants', {
+          ...newCredentials(),
           name: 'invalid',
           limits: { constructor: 1 },
         })
@@ -111,6 +117,7 @@ describe('tenant limits admin API', () => {
 
   it('rejects an array of limits without creating a tenant', async () => {
     const res = await admin('POST', '/tenants', {
+      ...newCredentials(),
       name: 'invalid',
       limits: [{ maxQueueSize: 1 }],
     });
@@ -121,6 +128,7 @@ describe('tenant limits admin API', () => {
   it('reads overrides and effective quotas from the same statement snapshot', async () => {
     const { id } = (await (
       await admin('POST', '/tenants', {
+        ...newCredentials(),
         name: 'snapshot',
         limits: { maxQueueSize: 2 },
       })
@@ -157,7 +165,10 @@ describe('tenant limits admin API', () => {
 
   it('changes and resets overrides, leaving the omitted ones as they are', async () => {
     const { id } = (await (
-      await admin('POST', '/tenants', { name: 'patch' })
+      await admin('POST', '/tenants', {
+        ...newCredentials(),
+        name: 'patch',
+      })
     ).json()) as { id: string };
     let res = await admin('PATCH', `/tenants/${id}/limits`, {
       maxQueueSize: 7,
@@ -187,19 +198,31 @@ describe('tenant limits admin API', () => {
     { unknownLimit: 1 },
   ])('rejects %p with 400', async (limits) => {
     const { id } = (await (
-      await admin('POST', '/tenants', { name: 'bounds' })
+      await admin('POST', '/tenants', {
+        ...newCredentials(),
+        name: 'bounds',
+      })
     ).json()) as { id: string };
     expect((await admin('PATCH', `/tenants/${id}/limits`, limits)).status).toBe(
       400,
     );
     expect(
-      (await admin('POST', '/tenants', { name: 'bounds', limits })).status,
+      (
+        await admin('POST', '/tenants', {
+          ...newCredentials(),
+          name: 'bounds',
+          limits,
+        })
+      ).status,
     ).toBe(400);
   });
 
   it('requires the admin token and answers 404 for an unknown tenant', async () => {
     const { id } = (await (
-      await admin('POST', '/tenants', { name: 'auth' })
+      await admin('POST', '/tenants', {
+        ...newCredentials(),
+        name: 'auth',
+      })
     ).json()) as { id: string };
     expect(
       (await admin('GET', `/tenants/${id}/limits`, undefined, 'wrong-token-00'))
@@ -271,10 +294,14 @@ describe('tenant limits admin API', () => {
 
   it('applies new defaults from db:provision to every tenant without its own override', async () => {
     const plain = (await (
-      await admin('POST', '/tenants', { name: 'plain' })
+      await admin('POST', '/tenants', {
+        ...newCredentials(),
+        name: 'plain',
+      })
     ).json()) as { id: string };
     const own = (await (
       await admin('POST', '/tenants', {
+        ...newCredentials(),
         name: 'own',
         limits: { maxConcurrentExecutions: 2 },
       })

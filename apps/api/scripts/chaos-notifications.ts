@@ -13,6 +13,7 @@ import {
   COMPOSE,
   docker,
   log,
+  newKeyMaterial,
   openDatabase,
   rootEnv,
   sleep,
@@ -65,19 +66,23 @@ function signed(d: Delivery, secret: string): boolean {
 }
 
 async function main(): Promise<void> {
-  const { apiKey } = await call<{ apiKey: string }>(
+  const apiKey = newKeyMaterial('ff_');
+  await call(
     'POST',
     '/tenants',
     { 'x-admin-token': rootEnv('ADMIN_TOKEN') },
-    { name: `chaos-notifications-${Date.now()}` },
+    {
+      name: `chaos-notifications-${Date.now()}`,
+      apiKey,
+      webhookSecret: newKeyMaterial(),
+    },
   );
   const auth = { 'x-api-key': apiKey };
-  const { secret } = await call<{ secret: string }>(
-    'PUT',
-    '/tenants/me/notifications',
-    auth,
-    { url: 'http://sink:8080/notifications' },
-  );
+  const secret = newKeyMaterial();
+  await call('PUT', '/tenants/me/notifications', auth, {
+    url: 'http://sink:8080/notifications',
+    secret,
+  });
   const wf = await call<{ id: string }>('POST', '/workflows', auth, {
     name: 'chaos-notifications',
     steps: [

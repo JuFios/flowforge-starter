@@ -1,4 +1,5 @@
 import {
+  Body,
   Controller,
   Delete,
   Get,
@@ -7,9 +8,12 @@ import {
   Param,
   ParseUUIDPipe,
   Post,
+  Res,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import { ApiKeyGuard } from '../auth/api-key.guard';
 import { CurrentTenant } from '../auth/current-tenant.decorator';
+import { SigningSecretDto } from '../common/key-material';
 import { Tenant } from '../entities';
 import { RateLimit } from '../limits/rate-limit.guard';
 import { WebhookKeysService } from './webhook-keys.service';
@@ -24,10 +28,20 @@ export class WebhookKeysController {
     return this.keys.list(tenant.id);
   }
 
+  /** Новий ключ `next` із секретом клієнта (201); повтор того самого секрету — 200 з тим самим ID. */
   @Post()
   @Header('Cache-Control', 'no-store')
-  rotate(@CurrentTenant() tenant: Tenant) {
-    return this.keys.rotate(tenant.id);
+  async rotate(
+    @CurrentTenant() tenant: Tenant,
+    @Body() body: SigningSecretDto,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const { id, role, created } = await this.keys.rotate(
+      tenant.id,
+      body.secret,
+    );
+    if (!created) res.status(200);
+    return { id, role };
   }
 
   @Delete(':keyId')

@@ -12,7 +12,7 @@ import {
   truncateAll,
 } from '../helpers/db';
 import { api, Receiver, sleep, startWorker, waitFor } from '../helpers/queue';
-import { TEST_ADMIN_TOKEN } from '../helpers/test-env';
+import { createTenantViaApi } from '../helpers/credentials';
 
 /**
  * Кожна операція з матриці прав (docs/operations.md, «Операції → права») справді виконується справжніми
@@ -47,26 +47,7 @@ describe('every operation works with the runtime roles', () => {
   });
 
   /** Новий тенант через адмін-ендпоінт (API-роль у контексті нового тенанта). */
-  async function newTenant(): Promise<{
-    id: string;
-    apiKey: string;
-    webhookSecret: string;
-  }> {
-    const res = await fetch(`${apiApp.baseUrl}/tenants`, {
-      method: 'POST',
-      headers: {
-        'x-admin-token': TEST_ADMIN_TOKEN,
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({ name: 'ops' }),
-    });
-    expect(res.status).toBe(201);
-    return (await res.json()) as {
-      id: string;
-      apiKey: string;
-      webhookSecret: string;
-    };
-  }
+  const newTenant = () => createTenantViaApi(apiApp.baseUrl, 'ops');
 
   const execution = (id: string) =>
     owner.getRepository(Execution).findOneByOrFail({ id });
