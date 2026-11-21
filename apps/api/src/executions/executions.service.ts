@@ -164,7 +164,10 @@ export class ExecutionsService {
     }
     if (usage.outboxUndelivered + live >= usage.maxOutboxEvents) {
       this.limits.enqueueRejected.inc({ reason: 'outbox_full', trigger });
-      throw new OutboxFullException(usage.maxOutboxEvents);
+      throw new OutboxFullException(
+        usage.maxOutboxEvents,
+        usage.outboxUndelivered,
+      );
     }
   }
 

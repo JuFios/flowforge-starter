@@ -51,15 +51,19 @@ export class WorkflowLimitException extends HttpException {
 /**
  * Квота outbox тенанта вичерпана: недоставлені події разом із живими виконаннями досягли
  * `maxOutboxEvents`. Нове виконання не створено, прийняті події лишаються й доставляються. Без
- * `Retry-After`: місце звільняє доставка подій (endpoint тенанта знову приймає) або явний `discard`.
+ * `Retry-After`: місце звільняє завершення без нової події, доставка або явний `discard`.
  */
 export class OutboxFullException extends HttpException {
-  constructor(limit: number) {
+  constructor(limit: number, undelivered: number) {
+    const action =
+      undelivered === 0
+        ? 'Дочекайтеся завершення виконань. Якщо вони створять сповіщення, місце звільниться після їх доставки або скасування.'
+        : 'Відновіть доставку або скасуйте недоставлені події. Якщо квоту ще займають виконання, дочекайтеся їх завершення.';
     super(
       {
         statusCode: HttpStatus.TOO_MANY_REQUESTS,
         error: 'outbox_full',
-        message: `досягнуто квоти сповіщень: не більше ${limit} недоставлених подій разом із незавершеними виконаннями; відновіть endpoint або відмовтеся від подій`,
+        message: `Квота сповіщень заповнена. Ліміт для недоставлених подій і незавершених виконань — ${limit}. ${action}`,
       },
       HttpStatus.TOO_MANY_REQUESTS,
     );

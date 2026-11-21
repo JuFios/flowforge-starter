@@ -235,7 +235,16 @@ describe('outbox quota', () => {
     // Спроби доставки на недоступний endpoint подій не видаляють і місця не звільняють.
     while (await sender.deliverNext());
     expect(await assertCounter(a)).toBe(3);
-    expect((await run(a, wf)).status).toBe(429);
+    const backlogFull = await run(a, wf);
+    expect(backlogFull.status).toBe(429);
+    const backlogError = (await backlogFull.json()) as {
+      error: string;
+      message: string;
+    };
+    expect(backlogError.error).toBe('outbox_full');
+    expect(backlogError.message).toContain(
+      'Відновіть доставку або скасуйте недоставлені події',
+    );
     // Повтор прийнятого запиту повертає чинний результат і за повної квоти.
     expect((await run(a, wf, 'order-1')).status).toBe(200);
 
@@ -255,6 +264,23 @@ describe('outbox quota', () => {
       [a.tenant.id],
     );
     while (await sender.deliverNext());
+    expect(await assertCounter(a)).toBe(0);
+    expect((await run(a, wf)).status).toBe(201);
+  });
+
+  it('explains how live executions release the quota with no notification endpoint', async () => {
+    expect((await call(a, 'DELETE', '/tenants/me/notifications')).status).toBe(
+      204,
+    );
+    await setQuota(a, 1);
+    const wf = await workflow(a);
+    expect((await run(a, wf)).status).toBe(201);
+    const full = await run(a, wf);
+    expect(full.status).toBe(429);
+    const liveError = (await full.json()) as { error: string; message: string };
+    expect(liveError.error).toBe('outbox_full');
+    expect(liveError.message).toContain('Дочекайтеся завершення виконань');
+    await finishAll(a);
     expect(await assertCounter(a)).toBe(0);
     expect((await run(a, wf)).status).toBe(201);
   });

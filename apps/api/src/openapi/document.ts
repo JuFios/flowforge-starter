@@ -360,15 +360,14 @@ export function buildDocument(app: INestApplication) {
       success.headers = limited;
       op.responses = { [c.code ?? (method === 'post' ? 201 : 200)]: success };
       if (c.replay) op.responses[200] = { ...success, description: c.replay };
-      // Тіло розбирає глобальний парсер до маршруту: будь-який запит зі змінами стану може його
-      // нести, тож 400 (некоректний JSON чи неточне число), 413 і 415 можливі для кожного з них.
-      const carriesBody = method !== 'get';
+      // Парсери читають надіслане тіло до вибору маршруту незалежно від HTTP-методу.
       const errors = new Set([
         ...(c.errors ?? []),
         ...(c.auth.length ? [c.auth === admin ? 403 : 401, 429] : []),
         ...(params.length && !c.noNotFound ? [404] : []),
-        ...(params.length || c.body || c.params || carriesBody ? [400] : []),
-        ...(c.body || carriesBody ? [413, 415] : []),
+        400,
+        413,
+        415,
         500,
       ]);
       for (const code of errors)

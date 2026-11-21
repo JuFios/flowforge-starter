@@ -99,7 +99,7 @@ test('keeps a body draft across method changes and sends run input numbers uncha
   expect(await executions.json()).toMatchObject({ items: [] });
 });
 
-test('unlocks the run button after an unanswered request and retries with the same key', async ({
+test('retries a committed run after losing the response without creating a second execution', async ({
   context,
   page,
   request,
@@ -112,24 +112,44 @@ test('unlocks the run button after an unanswered request and retries with the sa
   await page.getByLabel('Повідомлення').fill('крок');
   await page.getByRole('button', { name: 'Зберегти процес' }).click();
   await expect(page).toHaveURL(/\/workflows\/[a-f0-9-]+$/);
-  // Запит запуску доходить до проксі, але відповідь не приходить ніколи.
+  const workflowId = new URL(page.url()).pathname.split('/').pop();
   const keys: string[] = [];
-  await page.route('**/api/proxy/workflows/*/run', (route) => {
+  let firstExecutionId: string | undefined;
+  await page.route('**/api/proxy/workflows/*/run', async (route) => {
     keys.push(route.request().headers()['idempotency-key'] ?? '');
     if (keys.length > 1) return route.continue();
-    return undefined;
+    // Проксі отримує відповідь після коміту, але браузер її не отримує.
+    const response = await route.fetch();
+    try {
+      expect(response.status()).toBe(201);
+      firstExecutionId = ((await response.json()) as { id: string }).id;
+    } finally {
+      await response.dispose();
+    }
   });
   const run = page.getByRole('button', { name: 'Запустити' });
   await run.click();
   await expect(run).toBeDisabled();
+  await expect.poll(() => firstExecutionId).toMatch(/^[a-f0-9-]+$/);
   await page.clock.fastForward(31_000);
   await expect(page.getByRole('main').getByRole('alert')).toContainText(
     'Результат запуску невідомий',
   );
   await expect(run).toBeEnabled();
+  const replay = page.waitForResponse((response) =>
+    response.url().endsWith('/run'),
+  );
   await run.click();
-  await expect(page).toHaveURL(/\/executions\/[a-f0-9-]+$/);
+  expect((await replay).status()).toBe(200);
+  await expect(page).toHaveURL(new RegExp(`/executions/${firstExecutionId}$`));
   expect(keys).toHaveLength(2);
   expect(keys[0]).not.toBe('');
   expect(keys[1]).toBe(keys[0]);
+  const executions = await page.request.get(
+    '/api/proxy/executions?workflowId=' + workflowId,
+  );
+  expect(executions.ok()).toBe(true);
+  expect(await executions.json()).toMatchObject({
+    items: [{ id: firstExecutionId }],
+  });
 });

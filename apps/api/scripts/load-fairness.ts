@@ -9,7 +9,7 @@
  *     пропускна здатність A за 20 с;
  *  3. «B під backlog-ом A»: ті самі 30 виконань B, поки черга A глибока й endpoint сповіщень A
  *     відповідає 503.
- * Після прогону невиконаний backlog A прибирається.
+ * Після прогону очищаються невиконані задачі й черга сповіщень A.
  *
  * Метрики — за годинником БД: очікування B — від створення виконання до початку першого кроку;
  * повна тривалість — до завершення; p95 захоплення — з гістограми воркерів
@@ -60,6 +60,7 @@ const A_ALONE_MS = 20_000;
 const B_PHASE_LIMIT_MS = BASELINE ? 20 * 60_000 : 120_000;
 const SINK_URL = 'http://sink:8080/effect';
 const UNAVAILABLE_URL = 'http://sink:8080/unavailable';
+const NOTIFICATIONS = '/tenants/me/notifications';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const log = (msg: string) =>
@@ -73,18 +74,29 @@ function rootEnv(name: string): string {
   return value;
 }
 
-async function call<T>(
+function send(
   method: string,
   path: string,
   headers: Record<string, string>,
   body?: unknown,
-): Promise<T> {
-  const res = await fetch(`${API_URL}${path}`, {
+  apiUrl = API_URL,
+): Promise<Response> {
+  return fetch(`${apiUrl}${path}`, {
     method,
     headers: { 'content-type': 'application/json', ...headers },
     body: body === undefined ? undefined : JSON.stringify(body),
     signal: AbortSignal.timeout(10_000),
   });
+}
+
+async function call<T>(
+  method: string,
+  path: string,
+  headers: Record<string, string>,
+  body?: unknown,
+  apiUrl = API_URL,
+): Promise<T> {
+  const res = await send(method, path, headers, body, apiUrl);
   if (!res.ok) {
     await res.body?.cancel();
     throw new Error(`${method} ${path}: HTTP ${res.status}`);
@@ -370,20 +382,85 @@ async function dropA(db: DataSource, a: Tenant): Promise<void> {
   throw new Error(`backlog cleanup deadline exceeded for tenant ${a.id}`);
 }
 
+interface LoadNotifications {
+  apiUrl: string;
+  endpoint: string;
+}
+
+function setLoadNotifications(
+  a: Tenant,
+  notifications: LoadNotifications,
+  enabled: boolean,
+) {
+  return call(
+    'PUT',
+    NOTIFICATIONS,
+    a.auth,
+    { url: notifications.endpoint, enabled },
+    notifications.apiUrl,
+  );
+}
+
+async function cleanupBacklog(
+  db: DataSource,
+  a: Tenant,
+  notifications: LoadNotifications | undefined,
+): Promise<void> {
+  if (notifications) await setLoadNotifications(a, notifications, false);
+  await dropA(db, a);
+  if (!notifications) return;
+
+  // Після паузи воркер не захоплює нову подію. Чекаємо завершення чинних спроб
+  // або закінчення lease (до 125 с для максимального таймауту доставки).
+  const until = performance.now() + 125_000;
+  while (performance.now() < until) {
+    const [{ active }]: Array<{ active: boolean }> = await db.query(
+      `SELECT EXISTS (SELECT 1 FROM outbox_events WHERE "tenantId" = $1
+        AND status = 'sending' AND "leaseUntil" > clock_timestamp()) AS active`,
+      [a.id],
+    );
+    if (!active) {
+      // Штатний DELETE переводить події з простроченим lease у pending і закриває їхні спроби.
+      const removed = await send(
+        'DELETE',
+        NOTIFICATIONS,
+        a.auth,
+        undefined,
+        notifications.apiUrl,
+      );
+      await removed.body?.cancel();
+      if (removed.status !== 204)
+        throw new Error(`DELETE ${NOTIFICATIONS}: HTTP ${removed.status}`);
+      await call(
+        'POST',
+        NOTIFICATIONS + '/events/discard',
+        a.auth,
+        undefined,
+        notifications.apiUrl,
+      );
+      return;
+    }
+    await sleep(100);
+  }
+  throw new Error(`notification cleanup deadline exceeded for tenant ${a.id}`);
+}
+
 export async function withBacklog<T>(
   db: DataSource,
   a: Tenant,
   measure: () => Promise<T>,
+  notifications?: LoadNotifications,
 ): Promise<T> {
   let failure: unknown;
   try {
+    if (notifications) await setLoadNotifications(a, notifications, true);
     await enqueueA(db, a);
     return await measure();
   } catch (err) {
     failure = err;
     throw err;
   } finally {
-    await dropA(db, a).catch((cleanup: unknown) => {
+    await cleanupBacklog(db, a, notifications).catch((cleanup: unknown) => {
       if (failure)
         throw new AggregateError(
           [failure, cleanup],
@@ -469,10 +546,6 @@ async function main(): Promise<void> {
             maxOutboxEvents: 30_000,
           },
         );
-        await call('PUT', '/tenants/me/notifications', a.auth, {
-          url: UNAVAILABLE_URL,
-          enabled: true,
-        });
       }
 
       log(`run ${run}: B alone`);
@@ -480,7 +553,10 @@ async function main(): Promise<void> {
         const alone = await runB(db, b);
 
         log(`run ${run}: A alone (${A_JOBS} queued, ${A_ALONE_MS / 1000} s)`);
-        const result = await withBacklog(db, a, async () => {
+        const notifications = BASELINE
+          ? undefined
+          : { apiUrl: API_URL, endpoint: UNAVAILABLE_URL };
+        const measure = async () => {
           const before = await aSucceeded(db, a);
           await sleep(A_ALONE_MS);
           const aPerSecond =
@@ -500,7 +576,7 @@ async function main(): Promise<void> {
             ? []
             : await db.query(
                 `SELECT count(*)::int AS count FROM outbox_attempts
-                  WHERE "tenantId"=$1 AND "httpStatus"=503 AND "startedAt">=$2`,
+                WHERE "tenantId"=$1 AND "httpStatus"=503 AND "startedAt">=$2`,
                 [a.id, started],
               );
           const claimP95Ms = BASELINE
@@ -514,7 +590,8 @@ async function main(): Promise<void> {
             outboxFailuresDuringB: failures[0]?.count,
             claimP95Ms,
           };
-        });
+        };
+        const result = await withBacklog(db, a, measure, notifications);
         runs.push(result);
       } finally {
         await dropA(db, b);

@@ -4,6 +4,7 @@ import type {
   SchemaObject,
 } from '@nestjs/swagger/dist/interfaces/open-api-spec.interface';
 import { randomUUID } from 'node:crypto';
+import { request } from 'node:http';
 import { DataSource } from 'typeorm';
 import { buildDocument } from '../../src/openapi/document';
 import { SchedulerService } from '../../src/scheduler/scheduler.service';
@@ -23,8 +24,7 @@ interface Observed {
 /**
  * ТЗ 7: OpenAPI відповідає фактичному HTTP. Тест проходить справжні гілки кожного маршруту
  * (успіх, повтор, валідація, автентифікація, відсутній ресурс, конфлікт, межа тіла, кодування) і
- * для кожної відповіді перевіряє, що статус задекларовано для цієї операції, тіло відповідає
- * задекларованій схемі, а задекларовані заголовки присутні. Кожна задокументована операція має
+ * для кожної відповіді перевіряє очікуваний статус, схему тіла й заголовки. Кожна операція має
  * хоча б одну перевірену гілку, тож новий маршрут без перевірки фактичних статусів не пройде.
  */
 describe('OpenAPI matches the actual HTTP responses', () => {
@@ -53,6 +53,7 @@ describe('OpenAPI matches the actual HTTP responses', () => {
   async function send(
     operation: string,
     path: string,
+    expectedStatus: number,
     init: {
       headers?: Record<string, string>;
       body?: unknown;
@@ -60,17 +61,25 @@ describe('OpenAPI matches the actual HTTP responses', () => {
     } = {},
   ): Promise<Observed> {
     const [method] = operation.split(' ');
-    const res = await fetch(app.baseUrl + path, {
-      method: method.toUpperCase(),
-      headers: {
-        ...(init.body !== undefined || init.raw !== undefined
-          ? { 'content-type': 'application/json' }
-          : {}),
-        ...init.headers,
-      },
-      body:
-        init.raw ??
-        (init.body === undefined ? undefined : JSON.stringify(init.body)),
+    const url = app.baseUrl + path;
+    const raw =
+      init.raw ??
+      (init.body === undefined ? undefined : JSON.stringify(init.body));
+    const headers = {
+      ...(raw === undefined ? {} : { 'content-type': 'application/json' }),
+      ...init.headers,
+    };
+    const res =
+      method === 'get' && raw !== undefined
+        ? await getWithBody(url, raw, headers)
+        : await fetch(url, {
+            method: method.toUpperCase(),
+            headers,
+            body: raw,
+          });
+    expect({ operation, status: res.status }).toEqual({
+      operation,
+      status: expectedStatus,
     });
     const text = await res.text();
     let body: unknown = undefined;
@@ -88,6 +97,49 @@ describe('OpenAPI matches the actual HTTP responses', () => {
     };
     observed.push(result);
     return result;
+  }
+
+  /** Fetch відхиляє GET із тілом до мережі, тому надсилаємо його через HTTP-клієнт Node. */
+  function getWithBody(
+    url: string,
+    body: string,
+    headers: Record<string, string>,
+  ): Promise<Response> {
+    return new Promise((resolve, reject) => {
+      const req = request(
+        url,
+        { headers: { ...headers, 'content-length': Buffer.byteLength(body) } },
+        (res) => {
+          const responseHeaders = new Headers();
+          for (const [name, value] of Object.entries(res.headers)) {
+            if (value !== undefined)
+              responseHeaders.set(
+                name,
+                Array.isArray(value) ? value.join(', ') : value,
+              );
+          }
+          let text = '';
+          res.setEncoding('utf8');
+          res.on('data', (chunk: string) => {
+            text += chunk;
+          });
+          res.once('error', reject);
+          res.once('end', () =>
+            resolve(
+              new Response(text || null, {
+                status: res.statusCode,
+                headers: responseHeaders,
+              }),
+            ),
+          );
+        },
+      );
+      req.setTimeout(5000, () =>
+        req.destroy(new Error('GET body test timed out')),
+      );
+      req.once('error', reject);
+      req.end(body);
+    });
   }
 
   function resolve(schema: SchemaObject): SchemaObject {
@@ -188,83 +240,101 @@ describe('OpenAPI matches the actual HTTP responses', () => {
   it('declares every status, body and header the routes actually return', async () => {
     const admin = { 'x-admin-token': TEST_ADMIN_TOKEN };
     // Тенанти: успіх, валідація, токен, межа й кодування тіла.
-    const tenantRes = await send('post /tenants', '/tenants', {
+    const tenantRes = await send('post /tenants', '/tenants', 201, {
       headers: admin,
       body: { name: 'contract' },
     });
-    expect(tenantRes.status).toBe(201);
     const created = tenantRes.body as {
       id: string;
       apiKey: string;
       webhookSecret: string;
     };
     const tenantId = created.id;
-    await send('post /tenants', '/tenants', {
+    await send('post /tenants', '/tenants', 400, {
       headers: admin,
       body: { name: 'x' },
     });
-    await send('post /tenants', '/tenants', {
+    await send('post /tenants', '/tenants', 400, {
       headers: admin,
       body: { name: 'extra', apiKey: 'ff_x' },
     });
-    await send('post /tenants', '/tenants', {
+    await send('post /tenants', '/tenants', 403, {
       headers: { 'x-admin-token': 'wrong-token-0123456789' },
       body: { name: 'denied' },
     });
-    await send('post /tenants', '/tenants', {
+    await send('post /tenants', '/tenants', 413, {
       headers: admin,
       raw: JSON.stringify({ name: 'x'.repeat(2 * 1024 * 1024) }),
     });
-    await send('post /tenants', '/tenants', {
+    await send('post /tenants', '/tenants', 415, {
       headers: { ...admin, 'content-encoding': 'gzip' },
       raw: '{}',
     });
-    await send('post /tenants', '/tenants', { headers: admin, raw: '{"a":' });
-    await send('get /tenants/{id}/limits', `/tenants/${tenantId}/limits`, {
+    await send('post /tenants', '/tenants', 400, {
+      headers: admin,
+      raw: '{"a":',
+    });
+    await send('get /tenants/{id}/limits', `/tenants/${tenantId}/limits`, 200, {
       headers: admin,
     });
-    await send('get /tenants/{id}/limits', `/tenants/${randomUUID()}/limits`, {
+    await send(
+      'get /tenants/{id}/limits',
+      `/tenants/${randomUUID()}/limits`,
+      404,
+      {
+        headers: admin,
+      },
+    );
+    await send('get /tenants/{id}/limits', '/tenants/not-a-uuid/limits', 400, {
       headers: admin,
     });
-    await send('get /tenants/{id}/limits', '/tenants/not-a-uuid/limits', {
-      headers: admin,
-    });
-    await send('patch /tenants/{id}/limits', `/tenants/${tenantId}/limits`, {
-      headers: admin,
-      body: { rateLimit: 10_000 },
-    });
-    await send('patch /tenants/{id}/limits', `/tenants/${tenantId}/limits`, {
-      headers: admin,
-      body: { rateLimit: 0 },
-    });
+    await send(
+      'patch /tenants/{id}/limits',
+      `/tenants/${tenantId}/limits`,
+      200,
+      {
+        headers: admin,
+        body: { rateLimit: 10_000 },
+      },
+    );
+    await send(
+      'patch /tenants/{id}/limits',
+      `/tenants/${tenantId}/limits`,
+      400,
+      {
+        headers: admin,
+        body: { rateLimit: 0 },
+      },
+    );
 
     const key = { 'x-api-key': created.apiKey };
     // Workflow: створення, читання, список, редагування, конфлікт ревізії, видалення.
-    await send('get /workflows', '/workflows', {});
-    await send('get /workflows', '/workflows?limit=0', { headers: key });
-    const wfRes = await send('post /workflows', '/workflows', {
+    await send('get /workflows', '/workflows', 401, {});
+    await send('get /workflows', '/workflows?limit=0', 400, { headers: key });
+    const wfRes = await send('post /workflows', '/workflows', 201, {
       headers: key,
       body: {
         name: 'contract',
         steps: [{ id: 'say', type: 'log', message: 'hi' }],
       },
     });
-    expect(wfRes.status).toBe(201);
     const wf = wfRes.body as { id: string; editRevision: string };
-    await send('post /workflows', '/workflows', {
+    await send('post /workflows', '/workflows', 400, {
       headers: key,
       body: { name: 'x', steps: [] },
     });
-    await send('get /workflows', '/workflows', { headers: key });
-    await send('get /workflows/{id}', `/workflows/${wf.id}`, { headers: key });
-    await send('get /workflows/{id}', `/workflows/${randomUUID()}`, {
+    await send('get /workflows', '/workflows', 200, { headers: key });
+    await send('get /workflows/{id}', `/workflows/${wf.id}`, 200, {
       headers: key,
     });
-    await send('patch /workflows/{id}', `/workflows/${wf.id}`, {
+    await send('get /workflows/{id}', `/workflows/${randomUUID()}`, 404, {
+      headers: key,
+    });
+    await send('patch /workflows/{id}', `/workflows/${wf.id}`, 200, {
       headers: key,
       body: { name: 'renamed', editRevision: wf.editRevision },
     });
-    await send('patch /workflows/{id}', `/workflows/${wf.id}`, {
+    await send('patch /workflows/{id}', `/workflows/${wf.id}`, 409, {
       headers: key,
       body: { name: 'stale', editRevision: wf.editRevision },
     });
@@ -273,57 +343,68 @@ describe('OpenAPI matches the actual HTTP responses', () => {
     const run = await send(
       'post /workflows/{id}/run',
       `/workflows/${wf.id}/run`,
+      201,
       {
         headers: { ...key, 'idempotency-key': 'contract-1' },
         body: { n: 1 },
       },
     );
-    expect(run.status).toBe(201);
     const executionId = (run.body as { id: string }).id;
-    await send('post /workflows/{id}/run', `/workflows/${wf.id}/run`, {
+    await send('post /workflows/{id}/run', `/workflows/${wf.id}/run`, 200, {
       headers: { ...key, 'idempotency-key': 'contract-1' },
       body: { n: 1 },
     });
-    await send('post /workflows/{id}/run', `/workflows/${wf.id}/run`, {
+    await send('post /workflows/{id}/run', `/workflows/${wf.id}/run`, 422, {
       headers: { ...key, 'idempotency-key': 'contract-1' },
       body: { n: 2 },
     });
-    await send('post /workflows/{id}/run', `/workflows/${randomUUID()}/run`, {
-      headers: key,
-      body: {},
-    });
-    await send('post /workflows/{id}/run', `/workflows/${wf.id}/run`, {
+    await send(
+      'post /workflows/{id}/run',
+      `/workflows/${randomUUID()}/run`,
+      404,
+      {
+        headers: key,
+        body: {},
+      },
+    );
+    await send('post /workflows/{id}/run', `/workflows/${wf.id}/run`, 400, {
       headers: key,
       raw: '[1]',
     });
 
     // Виконання: список, деталі, знімок, крок, вихід, повтор (409, потім 202), тикет.
-    await send('get /executions', '/executions', { headers: key });
-    await send('get /executions', '/executions?cursor=bad', { headers: key });
-    await send('get /executions/{id}', `/executions/${executionId}`, {
+    await send('get /executions', '/executions', 200, { headers: key });
+    await send('get /executions', '/executions?cursor=bad', 400, {
       headers: key,
     });
-    await send('get /executions/{id}', `/executions/${randomUUID()}`, {
+    await send('get /executions/{id}', `/executions/${executionId}`, 200, {
+      headers: key,
+    });
+    await send('get /executions/{id}', `/executions/${randomUUID()}`, 404, {
       headers: key,
     });
     await send(
       'get /executions/{id}/summary',
       `/executions/${executionId}/summary`,
+      200,
       { headers: key },
     );
     await send(
       'get /executions/{id}/steps/{index}',
       `/executions/${executionId}/steps/0`,
+      404,
       { headers: key },
     );
     await send(
       'get /executions/{id}/output',
       `/executions/${executionId}/output`,
+      200,
       { headers: key },
     );
     await send(
       'post /executions/{id}/retry',
       `/executions/${executionId}/retry`,
+      409,
       { headers: key },
     );
     await ds.query(
@@ -337,46 +418,49 @@ describe('OpenAPI matches the actual HTTP responses', () => {
     await send(
       'post /executions/{id}/retry',
       `/executions/${executionId}/retry`,
+      202,
       { headers: key },
     );
     await send(
       'post /executions/{id}/realtime-tickets',
       `/executions/${executionId}/realtime-tickets`,
+      201,
       { headers: key },
     );
     await send(
       'post /executions/{id}/realtime-tickets',
       `/executions/${randomUUID()}/realtime-tickets`,
+      404,
       { headers: key },
     );
 
     // Сесії браузера.
-    const sessionRes = await send('post /sessions', '/sessions', {
+    const sessionRes = await send('post /sessions', '/sessions', 201, {
       headers: key,
     });
     const token = (sessionRes.body as { token: string }).token;
-    await send('post /sessions', '/sessions', {
+    await send('post /sessions', '/sessions', 401, {
       headers: { 'x-api-key': 'ff_wrong' },
     });
-    await send('delete /sessions/current', '/sessions/current', {
+    await send('delete /sessions/current', '/sessions/current', 204, {
       headers: { authorization: 'Bearer ' + token },
     });
-    await send('delete /sessions/current', '/sessions/current', {
+    await send('delete /sessions/current', '/sessions/current', 401, {
       headers: { authorization: 'Bearer ' + token },
     });
 
     // Вхідні webhook-и: прийнято, той самий ID з іншим тілом, без підпису, невідомий workflow.
-    await send('patch /workflows/{id}', `/workflows/${wf.id}`, {
+    await send('patch /workflows/{id}', `/workflows/${wf.id}`, 200, {
       headers: key,
       body: { enabled: true },
     });
     const hookBody = '{"order":1}';
     const delivery = randomUUID();
-    await send('post /hooks/{workflowId}', `/hooks/${wf.id}`, {
+    await send('post /hooks/{workflowId}', `/hooks/${wf.id}`, 202, {
       headers: signedHeaders(wf.id, created.webhookSecret, hookBody, delivery),
       raw: hookBody,
     });
-    await send('post /hooks/{workflowId}', `/hooks/${wf.id}`, {
+    await send('post /hooks/{workflowId}', `/hooks/${wf.id}`, 409, {
       headers: signedHeaders(
         wf.id,
         created.webhookSecret,
@@ -385,61 +469,62 @@ describe('OpenAPI matches the actual HTTP responses', () => {
       ),
       raw: '{"order":2}',
     });
-    await send('post /hooks/{workflowId}', `/hooks/${wf.id}`, {
+    await send('post /hooks/{workflowId}', `/hooks/${wf.id}`, 401, {
       raw: hookBody,
     });
-    await send('post /hooks/{workflowId}', `/hooks/${randomUUID()}`, {
+    await send('post /hooks/{workflowId}', `/hooks/${randomUUID()}`, 404, {
       raw: hookBody,
     });
 
     // Ключі вхідних webhook-ів.
     const keys = '/tenants/me/webhook-secrets';
-    await send('get ' + keys, keys, { headers: key });
-    const rotated = await send('post ' + keys, keys, { headers: key });
-    await send('post ' + keys, keys, { headers: key });
+    await send('get ' + keys, keys, 200, { headers: key });
+    const rotated = await send('post ' + keys, keys, 201, { headers: key });
+    await send('post ' + keys, keys, 409, { headers: key });
     const nextKey = (rotated.body as { id: string }).id;
-    await send('delete ' + keys + '/{keyId}', `${keys}/${nextKey}`, {
+    await send('delete ' + keys + '/{keyId}', `${keys}/${nextKey}`, 204, {
       headers: key,
     });
     const [{ webhookKeyId }] = await ds.query<Array<{ webhookKeyId: string }>>(
       'SELECT "webhookKeyId" FROM tenants WHERE id=$1',
       [tenantId],
     );
-    await send('delete ' + keys + '/{keyId}', `${keys}/${webhookKeyId}`, {
+    await send('delete ' + keys + '/{keyId}', `${keys}/${webhookKeyId}`, 409, {
       headers: key,
     });
-    await send('delete ' + keys + '/{keyId}', `${keys}/${randomUUID()}`, {
+    await send('delete ' + keys + '/{keyId}', `${keys}/${randomUUID()}`, 204, {
       headers: key,
     });
 
     // Сповіщення: без налаштувань (404), налаштування, помилки, ротація, журнал, події.
     const notes = '/tenants/me/notifications';
-    await send('get ' + notes, notes, { headers: key });
-    await send('delete ' + notes, notes, { headers: key });
-    await send('post ' + notes + '/secrets', notes + '/secrets', {
+    await send('get ' + notes, notes, 404, { headers: key });
+    await send('delete ' + notes, notes, 404, { headers: key });
+    await send('post ' + notes + '/secrets', notes + '/secrets', 404, {
       headers: key,
     });
     await send(
       'delete ' + notes + '/secrets/{keyId}',
       `${notes}/secrets/${randomUUID()}`,
+      404,
       { headers: key },
     );
     const url = receiver.url('/notify');
-    await send('put ' + notes, notes, { headers: key, body: { url } });
-    await send('put ' + notes, notes, { headers: key, body: { url } });
-    await send('put ' + notes, notes, {
+    await send('put ' + notes, notes, 200, { headers: key, body: { url } });
+    await send('put ' + notes, notes, 200, { headers: key, body: { url } });
+    await send('put ' + notes, notes, 400, {
       headers: key,
       body: { url, secret: 'x'.repeat(64) },
     });
-    await send('put ' + notes, notes, {
+    await send('put ' + notes, notes, 413, {
       headers: key,
       raw: JSON.stringify({ url: 'x'.repeat(2 * 1024 * 1024) }),
     });
-    await send('get ' + notes, notes, { headers: key });
-    await send('post ' + notes + '/secrets', notes + '/secrets', {
+    await send('get ' + notes, notes, 200, { headers: key });
+    await send('post ' + notes + '/secrets', notes + '/secrets', 201, {
       headers: key,
     });
-    await send('post ' + notes + '/secrets', notes + '/secrets', {
+    await send('post ' + notes + '/secrets', notes + '/secrets', 409, {
       headers: key,
     });
     const [{ secretKeyId }] = await ds.query<Array<{ secretKeyId: string }>>(
@@ -449,6 +534,7 @@ describe('OpenAPI matches the actual HTTP responses', () => {
     await send(
       'delete ' + notes + '/secrets/{keyId}',
       `${notes}/secrets/${secretKeyId}`,
+      204,
       { headers: key },
     );
     // Після відкликання поточного ключа наступний став поточним і останнім: його відкликання — 409.
@@ -461,6 +547,7 @@ describe('OpenAPI matches the actual HTTP responses', () => {
     await send(
       'delete ' + notes + '/secrets/{keyId}',
       `${notes}/secrets/${promotedKeyId}`,
+      409,
       { headers: key },
     );
     // Подія завершення.
@@ -472,46 +559,78 @@ describe('OpenAPI matches the actual HTTP responses', () => {
       'SELECT id FROM outbox_events WHERE "tenantId"=$1 LIMIT 1',
       [tenantId],
     );
-    await send('get ' + notes + '/events', notes + '/events', { headers: key });
-    await send('get ' + notes + '/events', notes + '/events?status=bogus', {
-      headers: key,
-    });
-    await send('get ' + notes + '/events/{id}', `${notes}/events/${eventId}`, {
+    await send('get ' + notes + '/events', notes + '/events', 200, {
       headers: key,
     });
     await send(
+      'get ' + notes + '/events',
+      notes + '/events?status=bogus',
+      400,
+      {
+        headers: key,
+      },
+    );
+    await send(
+      'get ' + notes + '/events/{id}',
+      `${notes}/events/${eventId}`,
+      200,
+      {
+        headers: key,
+      },
+    );
+    await send(
       'get ' + notes + '/events/{id}',
       `${notes}/events/${eventId}?limit=1`,
+      200,
       { headers: key },
     );
     await send(
       'get ' + notes + '/events/{id}',
       `${notes}/events/${randomUUID()}`,
+      404,
       { headers: key },
     );
     await send(
       'post ' + notes + '/events/{id}/redeliver',
       `${notes}/events/${eventId}/redeliver`,
+      202,
       { headers: key },
     );
     await send(
       'post ' + notes + '/events/{id}/redeliver',
       `${notes}/events/${randomUUID()}/redeliver`,
+      404,
       { headers: key },
     );
-    await send('post ' + notes + '/events/discard', notes + '/events/discard', {
-      headers: key,
-    });
-    await send('delete ' + notes, notes, { headers: key });
+    await send(
+      'post ' + notes + '/events/discard',
+      notes + '/events/discard',
+      200,
+      {
+        headers: key,
+      },
+    );
+    await send('delete ' + notes, notes, 204, { headers: key });
 
-    await send('delete /workflows/{id}', `/workflows/${wf.id}`, {
+    await send('delete /workflows/{id}', `/workflows/${wf.id}`, 204, {
       headers: key,
     });
-    await send('delete /workflows/{id}', `/workflows/${wf.id}`, {
+    await send('delete /workflows/{id}', `/workflows/${wf.id}`, 404, {
       headers: key,
     });
-    await send('get /health', '/health');
-    await send('get /ready', '/ready');
+    await send('get /health', '/health', 200);
+    await send('get /ready', '/ready', 200);
+    await send('get /health', '/health', 400, { raw: '{"broken":' });
+    await send('get /health', '/health', 413, {
+      raw: JSON.stringify({ body: 'x'.repeat(2 * 1024 * 1024) }),
+    });
+    await send('get /health', '/health', 415, {
+      headers: {
+        'content-type': 'application/x-www-form-urlencoded',
+        'content-encoding': 'gzip',
+      },
+      raw: 'body=x',
+    });
 
     const problems = observed.flatMap(checkAgainstDocument);
     expect(problems).toEqual([]);

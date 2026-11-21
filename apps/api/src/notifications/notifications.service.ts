@@ -401,7 +401,10 @@ export class NotificationsService {
       reason: 'outbox_full',
       trigger: 'redeliver',
     });
-    throw new OutboxFullException(usage.maxOutboxEvents);
+    throw new OutboxFullException(
+      usage.maxOutboxEvents,
+      usage.outboxUndelivered,
+    );
   }
 
   private async settings(

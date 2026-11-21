@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { DataSource } from 'typeorm';
 import { SchedulerService } from '../../src/scheduler/scheduler.service';
 import { RunningApp, startApp } from '../helpers/app';
@@ -91,32 +90,26 @@ describe('secret exposure', () => {
     return out;
   }
 
-  /** Секрети підпису й хеші API-ключів, які зараз зберігає БД (з будь-яких рядків, без RLS). */
-  async function storedCredentials() {
+  /** Секрети підпису, які зараз зберігає БД (з будь-яких рядків, без RLS). */
+  async function storedSigningSecrets() {
     const tenants: Array<{
-      apiKeyHash: string;
       webhookSecret: string;
       nextWebhookSecret: string | null;
     }> = await ds.query(
-      'SELECT "apiKeyHash", "webhookSecret", "nextWebhookSecret" FROM tenants',
+      'SELECT "webhookSecret", "nextWebhookSecret" FROM tenants',
     );
     const settings: Array<{ secret: string; nextSecret: string | null }> =
       await ds.query('SELECT secret, "nextSecret" FROM notification_settings');
-    return {
-      hashes: new Set(tenants.map((t) => t.apiKeyHash)),
-      secrets: [
-        ...tenants.flatMap((t) => [t.webhookSecret, t.nextWebhookSecret]),
-        ...settings.flatMap((s) => [s.secret, s.nextSecret]),
-      ].filter((s): s is string => typeof s === 'string' && s.length > 0),
-    };
+    return [
+      ...tenants.flatMap((t) => [t.webhookSecret, t.nextWebhookSecret]),
+      ...settings.flatMap((s) => [s.secret, s.nextSecret]),
+    ].filter((s): s is string => typeof s === 'string' && s.length > 0);
   }
 
   /** Зібрані за сценарій секрети, бо відкликані ключі вже зникли з БД на момент перевірки. */
-  const seen = { hashes: new Set<string>(), secrets: new Set<string>() };
+  const seenSecrets = new Set<string>();
   async function remember() {
-    const { hashes, secrets } = await storedCredentials();
-    for (const h of hashes) seen.hashes.add(h);
-    for (const s of secrets) seen.secrets.add(s);
+    for (const secret of await storedSigningSecrets()) seenSecrets.add(secret);
   }
 
   /** Відповідь, що створює новий секрет: єдине місце, де його видно (один раз). */
@@ -133,27 +126,30 @@ describe('secret exposure', () => {
       exchanges.findIndex((e) => e.route === ex.route && e.status === 200) ===
         index);
 
-  function assertNoCredentials() {
+  function assertNoCredentials(apiKey: string) {
     const leaks: string[] = [];
     exchanges.forEach((ex, index) => {
+      const body =
+        ex.route === 'POST /tenants' && ex.status === 201
+          ? { ...(ex.body as Record<string, unknown>), apiKey: undefined }
+          : ex.body;
+      if (strings([ex.headers, body]).some((s) => s.includes(apiKey)))
+        leaks.push(`${ex.route}: API key`);
       if (issuing(ex, index)) {
         if (ex.headers['cache-control'] !== 'no-store')
           leaks.push(`${ex.route}: issued without no-store`);
         return;
       }
       for (const s of strings([ex.headers, ex.body])) {
-        const hash = createHash('sha256').update(s).digest('hex');
-        if (seen.hashes.has(hash)) leaks.push(`${ex.route}: API key`);
-        for (const secret of seen.secrets)
+        for (const secret of seenSecrets)
           if (s.includes(secret)) leaks.push(`${ex.route}: signing secret`);
       }
     });
-    const logText = JSON.stringify(app.logs);
-    for (const secret of seen.secrets)
-      if (logText.includes(secret)) leaks.push('log: signing secret');
-    for (const s of strings(app.logs))
-      if (seen.hashes.has(createHash('sha256').update(s).digest('hex')))
-        leaks.push('log: API key');
+    const logStrings = strings(app.logs);
+    if (logStrings.some((s) => s.includes(apiKey))) leaks.push('log: API key');
+    for (const secret of seenSecrets)
+      if (logStrings.some((s) => s.includes(secret)))
+        leaks.push('log: signing secret');
     expect([...new Set(leaks)]).toEqual([]);
   }
 
@@ -169,7 +165,7 @@ describe('secret exposure', () => {
       ].sort(),
     );
     const shown = strings(issued.map((ex) => ex.body));
-    for (const secret of seen.secrets)
+    for (const secret of seenSecrets)
       expect(shown.some((s) => s === secret)).toBe(true);
   }
 
@@ -184,7 +180,9 @@ describe('secret exposure', () => {
     const created = await send('POST', '/tenants', admin, newTenant('one'));
     expect(created.status).toBe(201);
     const id = (created.body as { id: string }).id;
-    const key = { 'x-api-key': apiKeyOf(created) };
+    const apiKey = apiKeyOf(created);
+    expect(apiKey).toMatch(/^ff_/);
+    const key = { 'x-api-key': apiKey };
     await remember();
 
     await send('GET', `/tenants/${id}/limits`, admin);
@@ -257,7 +255,7 @@ describe('secret exposure', () => {
     await send('GET', '/metrics', {});
 
     await remember();
-    assertNoCredentials();
+    assertNoCredentials(apiKey);
     assertIssuedOnce();
   });
 });

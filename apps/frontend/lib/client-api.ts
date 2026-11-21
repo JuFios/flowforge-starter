@@ -187,8 +187,6 @@ export function describeRejection(
     return `Забагато запитів. Спробуйте через ${result.retryAfterSeconds ?? 'кілька'} с.`;
   if (result.error === 'queue_full')
     return 'Черга тенанта заповнена: дочекайтеся завершення запущених виконань.';
-  if (result.error === 'outbox_full')
-    return 'Квота сповіщень тенанта заповнена: endpoint сповіщень має прийняти недоставлені події.';
   if (result.error === 'workflow_limit_reached') return `${result.message}.`;
   return result.message;
 }
