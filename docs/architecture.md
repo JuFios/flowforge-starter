@@ -222,7 +222,7 @@ SECURITY DEFINER Functions Safely»), усі імена в тілі кваліф
 | `webhook_tenant(workflow_id)` | API | тенант workflow — адресата webhook-а, увімкненого чи ні (підпис перевіряється в контексті тенанта; вимкнений приймає лише повтор прийнятої доставки) |
 | `scheduled_workflows(after, limit)` | API | ідентифікатори запланованих workflow для сумісності з попередньою версією |
 | `scheduled_tenants(after, limit)` | API | тенанти з увімкненими розкладами. Планувальник читає сторінки їхніх workflow під RLS |
-| `lock_tenant_usage()` | API | блокує рядок обліку тенанта **з контексту** до кінця транзакції й віддає його лічильники й ліміти (постановка; без контексту — помилка) |
+| `lock_tenant_usage()` | API | блокує рядок черги тенанта з контексту до кінця транзакції, потім читає окремий лічильник outbox і повертає числа для допуску роботи |
 | `tenant_limits()` | API | ефективні ліміти тенанта з контексту (перевизначення або значення за замовчуванням) |
 | `rate_limit_hit(key, window_ms, cost)`, `purge_rate_limits(batch)` | API | лічильник фіксованого вікна ліміту частоти (годинник БД) і кількість видалених відер |
 | `claim_job(worker, lease_ms)` | воркер | одна захоплена задача (рядок задачі змінює сама функція з явним предикатом тенанта, 3.3.5), або ознаки «кандидати зайняті» й «облік перераховано» |
@@ -241,9 +241,9 @@ SECURITY DEFINER Functions Safely»), усі імена в тілі кваліф
 |---|---|---|
 | `flowforge_api_role` | `webhook_deliveries` S I; `tenants` S I U; `workflows` S I U D; `workflow_versions` S I; `executions` S I U; `step_runs` S; `jobs` S I U | автентифікація, створення тенанта, ліміти тенанта (адмін-API), CRUD workflow, запуск (run/webhook/cron), `/retry` (`FOR UPDATE` потребує U), читання виконань, перевірка підпису webhook-а |
 | `flowforge_worker_role` | `workflow_versions` S; `executions` S U; `step_runs` S I U; `jobs` S U | heartbeat, `assertLease` (`FOR UPDATE`), чекпоінти, пауза/пробудження, завершення, провал, повернення в чергу, reaper (захоплення — функцією `claim_job`) |
-| `flowforge_system` | S I U D на тенантні таблиці, `tenant_usage`, `limit_defaults`, `rate_limit_buckets` | тіла SECURITY DEFINER-функцій і тригерів обліку |
+| `flowforge_system` | S I U D на тенантні таблиці, `tenant_usage`, `tenant_outbox_usage`, `limit_defaults`, `rate_limit_buckets` | тіла SECURITY DEFINER-функцій і тригерів обліку |
 
-`tenant_usage` (облік), `limit_defaults` і `rate_limit_buckets` runtime-ролям недоступні зовсім:
+`tenant_usage`, `tenant_outbox_usage`, `limit_defaults` і `rate_limit_buckets` runtime-ролям недоступні зовсім:
 підробити лічильники чи ліміти неможливо, змінюють їх лише тригери й функції.
 
 `TRUNCATE` (обходить RLS), `REFERENCES`, `TRIGGER`, DDL, таблиця `migrations` — нікому з runtime-ролей;
