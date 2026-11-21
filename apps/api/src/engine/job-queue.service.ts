@@ -404,15 +404,17 @@ export class JobQueueService {
           )`,
       [job.executionId, job.tenantId],
     );
-    if (!finished) return false;
-    await this.markLockedJobDone(em, job);
-    return true;
+    return finished > 0;
   }
 
   private async reapBatch(tenantId: string): Promise<ReapedJob[]> {
     return this.db.run(tenantId, async (em) => {
       const expired: Job[] = await em.query(EXPIRED_LEASES_SQL, [tenantId]);
-      const reaped: ReapedJob[] = [];
+      const updates: Array<{
+        job: Job;
+        error: string;
+        outcome: ReapedJob['outcome'];
+      }> = [];
       for (const job of expired) {
         const error = `lease expired: worker ${job.lockedBy ?? '?'} stopped renewing it`;
         let outcome: ReapedJob['outcome'];
@@ -434,18 +436,21 @@ export class JobQueueService {
             [job.executionId, final, tenantId],
           );
         }
-        // Задача — останньою: її оновлення зачіпає облік тенанта (порядок блокувань).
-        if (outcome !== 'done')
-          await this.applyFailure(em, job, error, outcome);
-        reaped.push({
-          id: job.id,
-          executionId: job.executionId,
-          correlationId: job.correlationId,
-          attempts: job.attempts,
-          outcome,
-        });
+        updates.push({ job, error, outcome });
       }
-      return reaped;
+      // Порядок діє для цілої пачки: після зміни jobs reaper тримає tenant_usage.
+      // Кінцеві стани, що потребують блокування налаштувань сповіщень, вже записані.
+      for (const { job, error, outcome } of updates) {
+        if (outcome === 'done') await this.markLockedJobDone(em, job);
+        else await this.applyFailure(em, job, error, outcome);
+      }
+      return updates.map(({ job, outcome }) => ({
+        id: job.id,
+        executionId: job.executionId,
+        correlationId: job.correlationId,
+        attempts: job.attempts,
+        outcome,
+      }));
     });
   }
 

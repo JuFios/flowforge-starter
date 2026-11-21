@@ -749,7 +749,7 @@ describe('data migrations', () => {
     );
     await ds.runMigrations({ transaction: 'each' });
     const [{ undelivered }] = await ds.query<Array<{ undelivered: number }>>(
-      `SELECT "outboxUndelivered" AS undelivered FROM tenant_usage WHERE "tenantId"=$1`,
+      `SELECT undelivered FROM tenant_outbox_usage WHERE "tenantId"=$1`,
       [tenantId],
     );
     expect(undelivered).toBe(3);

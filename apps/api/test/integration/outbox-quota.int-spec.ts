@@ -1,5 +1,6 @@
 import { DataSource } from 'typeorm';
 import { WorkerModule } from '../../src/app.module';
+import { JobQueueService } from '../../src/engine/job-queue.service';
 import { LimitsMetrics } from '../../src/limits/limits.metrics';
 import { OutboxSender } from '../../src/outbox/outbox-sender.service';
 import { SchedulerService } from '../../src/scheduler/scheduler.service';
@@ -12,7 +13,7 @@ import {
   truncateAll,
 } from '../helpers/db';
 import { configureNotifications } from '../helpers/notifications';
-import { Receiver, sleep } from '../helpers/queue';
+import { Receiver, sleep, waitFor } from '../helpers/queue';
 
 /**
  * Квота outbox (ТЗ 3.3.4, 3.3.9, 4): поки endpoint тенанта недоступний, недоставлені події разом
@@ -116,10 +117,10 @@ describe('outbox quota', () => {
   /** Лічильник обліку дорівнює фактичній кількості недоставлених подій. */
   async function assertCounter(tenant: TestTenant) {
     const [row]: Array<{ counter: number; actual: number }> = await ds.query(
-      `SELECT u."outboxUndelivered" AS counter,
+      `SELECT u.undelivered AS counter,
               (SELECT count(*)::int FROM outbox_events e
                 WHERE e."tenantId"=u."tenantId" AND e.status IN ('pending','sending')) AS actual
-         FROM tenant_usage u WHERE u."tenantId"=$1`,
+         FROM tenant_outbox_usage u WHERE u."tenantId"=$1`,
       [tenant.tenant.id],
     );
     expect(row.counter).toBe(row.actual);
@@ -135,6 +136,86 @@ describe('outbox quota', () => {
       )?.value ?? 0
     );
   }
+
+  it('lets a worker claim work for the same tenant while delivery holds the outbox counter', async () => {
+    const wf = await workflow(a);
+    expect((await run(a, wf)).status).toBe(201);
+    await finishAll(a);
+    expect(await assertCounter(a)).toBe(1);
+    expect((await run(a, wf)).status).toBe(201);
+
+    const delivery = ds.createQueryRunner();
+    await delivery.connect();
+    try {
+      await delivery.startTransaction();
+      await delivery.query(
+        `UPDATE outbox_events SET status='delivered', "deliveredAt"=now()
+          WHERE "tenantId"=$1 AND status='pending'`,
+        [a.tenant.id],
+      );
+      const claimed = await worker.app.get(JobQueueService).claimNext('quota');
+      expect(claimed).toMatchObject({ tenantId: a.tenant.id });
+      await delivery.commitTransaction();
+    } finally {
+      if (delivery.isTransactionActive) await delivery.rollbackTransaction();
+      await delivery.release();
+    }
+    expect(await assertCounter(a)).toBe(0);
+  });
+
+  it('takes the notification lock before changing job usage across a mixed reaper batch', async () => {
+    const wf = await workflow(a);
+    expect((await run(a, wf)).status).toBe(201);
+    expect((await run(a, wf)).status).toBe(201);
+    await ds.query(
+      `WITH ordered AS (
+         SELECT id, row_number() OVER (ORDER BY id) AS n FROM jobs WHERE "tenantId"=$1
+       )
+       UPDATE jobs j SET status='running', "lockToken"=gen_random_uuid(),
+              "lockedBy"='lost', "lockedUntil"=now()-make_interval(secs => (3-n)::int),
+              attempts=CASE n WHEN 1 THEN 1 ELSE j."maxAttempts" END
+       FROM ordered WHERE j.id=ordered.id`,
+      [a.tenant.id],
+    );
+    const settings = ds.createQueryRunner();
+    await settings.connect();
+    await settings.startTransaction();
+    const [{ pid }] = (await settings.query(
+      'SELECT pg_backend_pid() AS pid',
+    )) as Array<{ pid: number }>;
+    await settings.query(
+      'SELECT 1 FROM notification_settings WHERE "tenantId"=$1 FOR UPDATE',
+      [a.tenant.id],
+    );
+    const reaped = worker.app
+      .get(JobQueueService)
+      .reapExpired()
+      .then(
+        (jobs) => ({ jobs, error: undefined }),
+        (error: unknown) => ({ jobs: [], error }),
+      );
+    try {
+      await waitFor('reaper to wait for notification settings', async () => {
+        const blocked: unknown[] = await ds.query(
+          'SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))',
+          [pid],
+        );
+        return blocked.length > 0;
+      });
+      await settings.query(
+        'SELECT 1 FROM tenant_usage WHERE "tenantId"=$1 FOR UPDATE NOWAIT',
+        [a.tenant.id],
+      );
+    } finally {
+      await settings.rollbackTransaction();
+      await settings.release();
+      await reaped;
+    }
+    const result = await reaped;
+    expect(result.error).toBeUndefined();
+    expect(result.jobs.map((job) => job.outcome)).toEqual(['retry', 'dead']);
+    expect(await assertCounter(a)).toBe(1);
+  });
 
   it('stops new work of the tenant whose endpoint is down and keeps every accepted event', async () => {
     await setQuota(a, 3);

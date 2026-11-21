@@ -41,19 +41,26 @@ function lockUsageSql(withOutbox: boolean): string {
     RETURNS TABLE (queued integer, running integer, "maxRunning" integer,
                    "maxQueueSize" integer${withOutbox ? ', "outboxUndelivered" integer, "maxOutboxEvents" integer' : ''})
     LANGUAGE plpgsql VOLATILE ${DEFINER} AS $$
-    DECLARE t uuid := public.app_current_tenant();
+    DECLARE
+      t uuid := public.app_current_tenant();
+      usage public.tenant_usage;
     BEGIN
       IF t IS NULL THEN RAISE EXCEPTION 'tenant context is required'; END IF;
+      SELECT u.* INTO STRICT usage
+        FROM public.tenant_usage u WHERE u."tenantId" = t FOR UPDATE;
+      ${
+        withOutbox
+          ? `-- Окремий запит після блокування: бачить актуальний стан після очікування.
       RETURN QUERY
-        SELECT u.queued, u.running, u."maxRunning", u."maxQueueSize"${
-          withOutbox
-            ? `, u."outboxUndelivered",
-               (SELECT COALESCE(tn."maxOutboxEvents", d."maxOutboxEvents")
-                  FROM public.tenants tn CROSS JOIN public.limit_defaults d WHERE tn.id = t)`
-            : ''
-        }
-          FROM public.tenant_usage u WHERE u."tenantId" = t FOR UPDATE;
-      IF NOT FOUND THEN RAISE EXCEPTION 'tenant usage row is missing'; END IF;
+        SELECT usage.queued, usage.running, usage."maxRunning", usage."maxQueueSize",
+               o.undelivered, COALESCE(tn."maxOutboxEvents", d."maxOutboxEvents")
+          FROM public.tenant_outbox_usage o
+          JOIN public.tenants tn ON tn.id = o."tenantId"
+          CROSS JOIN public.limit_defaults d
+         WHERE o."tenantId" = t;
+      IF NOT FOUND THEN RAISE EXCEPTION 'tenant outbox usage or defaults are missing'; END IF;`
+          : `RETURN QUERY SELECT usage.queued, usage.running, usage."maxRunning", usage."maxQueueSize";`
+      }
     END $$`;
 }
 
@@ -83,8 +90,9 @@ async function ownFunction(
  * через квоту: заповнена квота зупиняє лише нову роботу тенанта (429 `outbox_full`, cron
  * відкладає), інші тенанти працюють далі.
  *
- * Лічильник `outboxUndelivered` у `tenant_usage` веде тригер у транзакції кожної зміни події.
- * Порядок блокувань не змінюється: налаштування → подія → облік; постановка бере лише облік.
+ * Тригер веде окремий лічильник `tenant_outbox_usage`: доставка і discard не блокують рядок,
+ * за яким воркери вибирають тенанта. Збільшення лічильника серіалізується з допуском роботи
+ * через `tenant_usage`; якщо потрібні обидва рядки, черга блокується перед лічильником outbox.
  *
  * Історія спроб обмежена `OUTBOX_ATTEMPT_HISTORY` записами на подію (перша й останні), тож за
  * тривалої відмови endpoint-а журнал спроб не росте без межі.
@@ -95,7 +103,7 @@ export class OutboxQuota1797100000000 implements MigrationInterface {
   async up(runner: QueryRunner): Promise<void> {
     const [lo, hi] = LIMIT_BOUNDS.maxOutboxEvents;
     await runner.query(
-      'LOCK TABLE public.tenant_usage, public.outbox_events, public.outbox_attempts IN SHARE ROW EXCLUSIVE MODE',
+      'LOCK TABLE public.tenants, public.tenant_usage, public.outbox_events, public.outbox_attempts IN SHARE ROW EXCLUSIVE MODE',
     );
     await runner.query(
       `ALTER TABLE public.tenants ADD "maxOutboxEvents" integer`,
@@ -111,12 +119,39 @@ export class OutboxQuota1797100000000 implements MigrationInterface {
     await runner.query(tenantLimitsSql(true));
     await ownFunction(runner, 'tenant_limits()', API_ROLE);
 
-    await runner.query(`ALTER TABLE public.tenant_usage
-      ADD "outboxUndelivered" integer NOT NULL DEFAULT 0 CHECK ("outboxUndelivered" >= 0)`);
-    await runner.query(`UPDATE public.tenant_usage u SET "outboxUndelivered" = c.n
-      FROM (SELECT "tenantId", count(*)::integer AS n FROM public.outbox_events
-             WHERE status IN ('pending', 'sending') GROUP BY "tenantId") c
-      WHERE u."tenantId" = c."tenantId"`);
+    await runner.query(`CREATE TABLE public.tenant_outbox_usage (
+      "tenantId" uuid PRIMARY KEY REFERENCES public.tenants(id),
+      undelivered integer NOT NULL DEFAULT 0 CHECK (undelivered >= 0)
+    )`);
+    await runner.query(`INSERT INTO public.tenant_outbox_usage ("tenantId", undelivered)
+      SELECT t.id, COALESCE(c.n, 0)
+        FROM public.tenants t
+        LEFT JOIN (SELECT "tenantId", count(*)::integer AS n FROM public.outbox_events
+                    WHERE status IN ('pending', 'sending') GROUP BY "tenantId") c
+          ON c."tenantId" = t.id`);
+    await runner.query(
+      'ALTER TABLE public.tenant_outbox_usage ENABLE ROW LEVEL SECURITY',
+    );
+    await runner.query(
+      'ALTER TABLE public.tenant_outbox_usage FORCE ROW LEVEL SECURITY',
+    );
+    await runner.query(`CREATE POLICY tenant_isolation ON public.tenant_outbox_usage
+      USING ("tenantId" = public.app_current_tenant())
+      WITH CHECK ("tenantId" = public.app_current_tenant())`);
+    await runner.query('REVOKE ALL ON public.tenant_outbox_usage FROM PUBLIC');
+    await runner.query(
+      `GRANT SELECT, INSERT, UPDATE, DELETE ON public.tenant_outbox_usage TO ${SYSTEM_ROLE}`,
+    );
+
+    await runner.query(`CREATE FUNCTION public.outbox_usage_on_tenant() RETURNS trigger
+      LANGUAGE plpgsql ${DEFINER} AS $$
+      BEGIN
+        INSERT INTO public.tenant_outbox_usage ("tenantId") VALUES (NEW.id);
+        RETURN NULL;
+      END $$`);
+    await ownFunction(runner, 'outbox_usage_on_tenant()', null);
+    await runner.query(`CREATE TRIGGER tenant_usage_outbox_insert
+      AFTER INSERT ON public.tenants FOR EACH ROW EXECUTE FUNCTION public.outbox_usage_on_tenant()`);
 
     await runner.query('DROP FUNCTION public.lock_tenant_usage()');
     await runner.query(lockUsageSql(true));
@@ -134,9 +169,14 @@ export class OutboxQuota1797100000000 implements MigrationInterface {
         IF TG_OP <> 'DELETE' AND NEW.status IN ('pending', 'sending') THEN
           delta := delta + 1; tenant := NEW."tenantId";
         END IF;
+        IF delta > 0 THEN
+          PERFORM 1 FROM public.tenant_usage WHERE "tenantId" = tenant FOR UPDATE;
+          IF NOT FOUND THEN RAISE EXCEPTION 'tenant usage row is missing'; END IF;
+        END IF;
         IF delta <> 0 THEN
-          UPDATE public.tenant_usage SET "outboxUndelivered" = "outboxUndelivered" + delta
+          UPDATE public.tenant_outbox_usage SET undelivered = undelivered + delta
             WHERE "tenantId" = tenant;
+          IF NOT FOUND THEN RAISE EXCEPTION 'tenant outbox usage row is missing'; END IF;
         END IF;
         RETURN NULL;
       END $$`);
@@ -176,8 +216,10 @@ export class OutboxQuota1797100000000 implements MigrationInterface {
     await runner.query(lockUsageSql(false));
     await ownFunction(runner, 'lock_tenant_usage()', API_ROLE);
     await runner.query(
-      'ALTER TABLE public.tenant_usage DROP COLUMN "outboxUndelivered"',
+      'DROP TRIGGER tenant_usage_outbox_insert ON public.tenants',
     );
+    await runner.query('DROP FUNCTION public.outbox_usage_on_tenant()');
+    await runner.query('DROP TABLE public.tenant_outbox_usage');
     await runner.query('DROP FUNCTION public.tenant_limits()');
     await runner.query(tenantLimitsSql(false));
     await ownFunction(runner, 'tenant_limits()', API_ROLE);
