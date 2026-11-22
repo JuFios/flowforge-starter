@@ -58,6 +58,8 @@ interface Contract {
   replay?: string;
   /** Параметр шляху не дає 404 (повтор відкликання відсутнього ключа — 204). */
   noNotFound?: true;
+  /** Тимчасова відмова 503 несе `Retry-After` (спільний пул інстансу зайнятий). */
+  retryUnavailable?: true;
 }
 const contracts: Record<string, Contract> = {
   'get /health': { title: 'Перевірити процес', auth: [], result: 'Health' },
@@ -149,6 +151,7 @@ const contracts: Record<string, Contract> = {
     auth: tenant,
     result: 'ExecutionDetail',
     errors: [503],
+    retryUnavailable: true,
   },
   'get /executions/{id}/summary': {
     title: 'Прочитати поточний знімок стану і план кроків',
@@ -296,7 +299,7 @@ const descriptions: Record<number, string> = {
   500: 'Внутрішня помилка; тіло без внутрішніх деталей, з correlationId',
   422: 'Ключ повторно використано з іншими даними',
   428: 'Браузерний запит має містити актуальну editRevision',
-  429: 'rate_limited повертає Retry-After. queue_full, outbox_full, workflow_limit_reached і ticket_limit не мають визначеного часу повтору.',
+  429: 'rate_limited і detail_in_progress повертають Retry-After. queue_full, outbox_full, workflow_limit_reached і ticket_limit не мають визначеного часу повтору.',
   503: 'Залежність недоступна',
 };
 const json = (name: string) => ({ 'application/json': { schema: ref(name) } });
@@ -392,10 +395,20 @@ export function buildDocument(app: INestApplication) {
                   ...headers,
                   'Retry-After': {
                     schema: integer,
-                    description: 'Секунди до закінчення вікна rate_limited',
+                    description:
+                      'Секунди до повтору: до закінчення вікна rate_limited або для detail_in_progress',
                   },
                 }
-              : headers,
+              : code === 503 && c.retryUnavailable
+                ? {
+                    ...headers,
+                    'Retry-After': {
+                      schema: integer,
+                      description:
+                        'Секунди до повтору, поки спільний пул зайнятий',
+                    },
+                  }
+                : headers,
         };
     }
   return doc;

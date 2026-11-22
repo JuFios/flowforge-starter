@@ -177,7 +177,7 @@ describe('execution details use one PostgreSQL snapshot', () => {
         ]),
       ).toEqual([{ state: 'idle' }]);
       await expect(reader.detail(tenant.id, e.id)).rejects.toMatchObject({
-        status: 503,
+        status: 429,
       });
     } finally {
       client.abort();

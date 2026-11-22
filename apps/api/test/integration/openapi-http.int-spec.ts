@@ -229,7 +229,12 @@ describe('OpenAPI matches the actual HTTP responses', () => {
     for (const header of Object.keys(response.headers ?? {})) {
       if (header === 'Retry-After') {
         const error = (o.body as { error?: string } | undefined)?.error;
-        if (error === 'rate_limited' && !o.headers.get(header))
+        if (
+          (error === 'rate_limited' ||
+            error === 'detail_in_progress' ||
+            o.status === 503) &&
+          !o.headers.get(header)
+        )
           problems.push(`${o.operation} ${o.status}: missing ${header}`);
         continue;
       }

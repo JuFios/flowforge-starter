@@ -8,6 +8,8 @@ import {
   ParseUUIDPipe,
   ParseIntPipe,
   BadRequestException,
+  HttpException,
+  HttpStatus,
   Post,
   Query,
   Res,
@@ -17,6 +19,7 @@ import { TenantAuthGuard } from '../auth/api-key.guard';
 import { RateLimit } from '../limits/rate-limit.guard';
 import { CurrentTenant } from '../auth/current-tenant.decorator';
 import { Tenant } from '../entities';
+import { DETAIL_RETRY_AFTER_SECONDS } from './detail-limits';
 import { ExecutionReader } from './execution-reader.service';
 import { ExecutionsService } from './executions.service';
 import { parseIdempotencyKey } from './idempotency-key';
@@ -101,6 +104,14 @@ export class ExecutionsController {
       return detail;
     } catch (err) {
       res.off('close', close);
+      // Тимчасова відмова (частка тенанта, зайнятий пул, дедлайн): клієнт знає, коли повторити.
+      if (
+        err instanceof HttpException &&
+        [HttpStatus.TOO_MANY_REQUESTS, HttpStatus.SERVICE_UNAVAILABLE].includes(
+          err.getStatus(),
+        )
+      )
+        res.setHeader('Retry-After', String(DETAIL_RETRY_AFTER_SECONDS));
       throw err;
     }
   }

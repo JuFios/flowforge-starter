@@ -4,6 +4,7 @@ import {
   validateDatabaseEnv,
   validateEnv,
 } from '../../src/config/env.validation';
+import { MAX_DETAIL_BYTES } from '../../src/executions/detail-limits';
 
 describe('per-process configuration', () => {
   const url = 'postgres://flowforge_worker:pw@localhost:5432/db';
@@ -239,6 +240,55 @@ describe('validateEnv', () => {
     expect(() => validateEnv({ ...base, WORKER_CONCURRENCY: '64' })).toThrow(
       /DB_POOL_SIZE/,
     );
+  });
+
+  it('keeps one tenant to at most half of every shared API pool', () => {
+    expect(validateEnv(base)).toMatchObject({
+      REALTIME_MAX_CONNECTIONS: 256,
+      REALTIME_MAX_CONNECTIONS_PER_TENANT: 32,
+      DETAIL_MAX_CONCURRENT: 8,
+      DETAIL_MAX_PER_TENANT: 1,
+      DETAIL_DISK_BUDGET_BYTES: 1024 ** 3,
+    });
+    expect(() =>
+      validateEnv({
+        ...base,
+        REALTIME_MAX_CONNECTIONS: '10',
+        REALTIME_MAX_CONNECTIONS_PER_TENANT: '6',
+      }),
+    ).toThrow(
+      /REALTIME_MAX_CONNECTIONS: має бути не менше за 2 × REALTIME_MAX_CONNECTIONS_PER_TENANT/,
+    );
+    expect(() =>
+      validateEnv({
+        ...base,
+        DETAIL_MAX_CONCURRENT: '3',
+        DETAIL_MAX_PER_TENANT: '2',
+      }),
+    ).toThrow(/DETAIL_MAX_CONCURRENT: має бути не менше за 2 × DETAIL_MAX/);
+    expect(
+      validateEnv({
+        ...base,
+        DETAIL_MAX_CONCURRENT: '4',
+        DETAIL_MAX_PER_TENANT: '2',
+        DETAIL_DISK_BUDGET_BYTES: String(4 * MAX_DETAIL_BYTES),
+      }).DETAIL_DISK_BUDGET_BYTES,
+    ).toBe(4 * MAX_DETAIL_BYTES);
+    // Два найбільші знімки одного тенанта займали б увесь бюджет диска.
+    expect(() =>
+      validateEnv({
+        ...base,
+        DETAIL_MAX_CONCURRENT: '4',
+        DETAIL_MAX_PER_TENANT: '2',
+        DETAIL_DISK_BUDGET_BYTES: String(4 * MAX_DETAIL_BYTES - 1),
+      }),
+    ).toThrow(/DETAIL_DISK_BUDGET_BYTES: має бути не менше за/);
+    expect(() =>
+      validateEnv({
+        ...base,
+        DETAIL_DISK_BUDGET_BYTES: String(2 * MAX_DETAIL_BYTES - 1),
+      }),
+    ).toThrow(/DETAIL_DISK_BUDGET_BYTES/);
   });
 });
 

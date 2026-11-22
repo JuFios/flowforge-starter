@@ -69,3 +69,21 @@ export class OutboxFullException extends HttpException {
     );
   }
 }
+
+/**
+ * Тенант уже готує чи отримує стільки знімків `GET /executions/:id`, скільки дозволяє його частка
+ * спільного пулу інстансу (DETAIL_MAX_PER_TENANT). `Retry-After` ставить контролер.
+ */
+export class DetailInProgressException extends HttpException {
+  constructor() {
+    super(
+      {
+        statusCode: HttpStatus.TOO_MANY_REQUESTS,
+        error: 'detail_in_progress',
+        message:
+          'попередній запит повних деталей виконання ще триває; дочитайте його або повторіть пізніше',
+      },
+      HttpStatus.TOO_MANY_REQUESTS,
+    );
+  }
+}

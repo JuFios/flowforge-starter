@@ -4,6 +4,7 @@ import {
   ServiceUnavailableException,
   StreamableFile,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { mkdtemp, open, rm, unlink, writeFile } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -11,17 +12,79 @@ import { join } from 'node:path';
 import { addAbortSignal } from 'node:stream';
 import type { EntityManager } from 'typeorm';
 import { QueryFailedError } from 'typeorm';
-import { MAX_RESPONSE_BYTES } from '../config/outbound';
+import { EnvironmentVariables } from '../config/env.validation';
 import { Execution, StepRun } from '../entities';
+import { DetailInProgressException } from '../limits/limit-exceptions';
 import { TenantDb } from '../tenancy/tenant-db';
-import { MAX_STEPS } from '../workflows/definition';
+import { MAX_DETAIL_BYTES } from './detail-limits';
 
 const STEP_COLUMNS = `s."stepIndex",s."stepId",s.status,s.attempts,left(s.error,500) AS error,s."startedAt",s."finishedAt",s."wakeAt",pg_column_size(s.output) AS "outputBytes"`;
 const DETAIL_TIMEOUT_MS = 60_000;
-const DETAIL_SLOTS = 2;
-// Текстова HTTP-відповідь може розширитись до шести байтів на символ після JSON-екранування.
-// Вихід останнього кроку повторюється в execution.output. Запас охоплює решту полів та вхід.
-const DETAIL_BYTES = ((MAX_STEPS + 1) * 6 + 2) * MAX_RESPONSE_BYTES;
+
+const unavailable = () =>
+  new ServiceUnavailableException('Деталі виконання тимчасово недоступні');
+
+/** Межі спільного пулу знімків інстансу API (DETAIL_* у env.validation.ts). */
+export interface DetailLimits {
+  maxConcurrent: number;
+  maxPerTenant: number;
+  diskBytes: number;
+}
+
+/** Знімок, що готується чи віддається: його місце в пулі й зарезервовані байти диска. */
+export interface DetailLease {
+  /** Резервує байти диска під наступну порцію; бюджет вичерпано — 503. */
+  reserve(bytes: number): void;
+  /** Повертає місце й байти в пул; повторний виклик нічого не змінює. */
+  release(): void;
+}
+
+/**
+ * Облік спільного пулу знімків `GET /executions/:id` інстансу API (docs/operations.md, «Спільні
+ * пули API»). Кількість одночасних знімків і диск тимчасових файлів обмежені окремо; частка
+ * одного тенанта не перевищує половини кожного ресурсу (перевірка конфігурації), тож повільний чи
+ * надмірний клієнт одного тенанта не забирає маршрут в інших. Перевірки й зміни лічильників —
+ * синхронні, тож паралельні запити не обходять меж.
+ */
+export class DetailCapacity {
+  private active = 0;
+  private reserved = 0;
+  private readonly perTenant = new Map<string, number>();
+
+  constructor(private readonly limits: DetailLimits) {}
+
+  /** Займає місце знімка: межа тенанта — 429, зайнятий пул чи диск — 503. */
+  acquire(tenantId: string): DetailLease {
+    const own = this.perTenant.get(tenantId) ?? 0;
+    if (own >= this.limits.maxPerTenant) throw new DetailInProgressException();
+    if (
+      this.active >= this.limits.maxConcurrent ||
+      this.reserved >= this.limits.diskBytes
+    )
+      throw unavailable();
+    this.active++;
+    this.perTenant.set(tenantId, own + 1);
+    let held = 0;
+    let released = false;
+    return {
+      reserve: (bytes: number) => {
+        if (released) throw unavailable();
+        if (this.reserved + bytes > this.limits.diskBytes) throw unavailable();
+        this.reserved += bytes;
+        held += bytes;
+      },
+      release: () => {
+        if (released) return;
+        released = true;
+        this.active--;
+        this.reserved -= held;
+        const left = (this.perTenant.get(tenantId) ?? 1) - 1;
+        if (left > 0) this.perTenant.set(tenantId, left);
+        else this.perTenant.delete(tenantId);
+      },
+    };
+  }
+}
 
 async function openDetailFile(): Promise<FileHandle> {
   const dir = await mkdtemp(join(tmpdir(), 'flowforge-execution-'));
@@ -66,9 +129,18 @@ export interface ExecutionOverview {
 /** Один знімок PostgreSQL для ревізії, стану виконання та його кроків. */
 @Injectable()
 export class ExecutionReader {
-  private readonly detailsInFlight = new Set<string>();
+  private readonly capacity: DetailCapacity;
 
-  constructor(private readonly db: TenantDb) {}
+  constructor(
+    private readonly db: TenantDb,
+    config: ConfigService<EnvironmentVariables, true>,
+  ) {
+    this.capacity = new DetailCapacity({
+      maxConcurrent: config.get('DETAIL_MAX_CONCURRENT', { infer: true }),
+      maxPerTenant: config.get('DETAIL_MAX_PER_TENANT', { infer: true }),
+      diskBytes: config.get('DETAIL_DISK_BUDGET_BYTES', { infer: true }),
+    });
+  }
   async summary(tenantId: string, id: string, sessionId?: string) {
     return this.db.run(tenantId, async (em) => {
       const [row] = await em.query<ExecutionOverview[]>(
@@ -111,14 +183,6 @@ export class ExecutionReader {
     });
   }
   async detail(tenantId: string, id: string, disconnect?: AbortSignal) {
-    const unavailable = () =>
-      new ServiceUnavailableException('Деталі виконання тимчасово недоступні');
-    if (
-      this.detailsInFlight.size >= DETAIL_SLOTS ||
-      this.detailsInFlight.has(tenantId)
-    )
-      throw unavailable();
-    this.detailsInFlight.add(tenantId);
     const expiresAt = performance.now() + DETAIL_TIMEOUT_MS;
     const deadline = AbortSignal.timeout(DETAIL_TIMEOUT_MS);
     const signal = disconnect
@@ -140,6 +204,7 @@ export class ExecutionReader {
     };
     let file: FileHandle | undefined;
     let handedOff = false;
+    const lease = this.capacity.acquire(tenantId);
     try {
       const snapshot = await openDetailFile().catch(() => {
         throw unavailable();
@@ -148,8 +213,10 @@ export class ExecutionReader {
       let length = 0;
       const write = async (json: string) => {
         checkDeadline();
-        length += Buffer.byteLength(json);
-        if (length > DETAIL_BYTES) throw unavailable();
+        const bytes = Buffer.byteLength(json);
+        length += bytes;
+        if (length > MAX_DETAIL_BYTES) throw unavailable();
+        lease.reserve(bytes);
         await writeFile(snapshot, json, { signal }).catch(() => {
           throw unavailable();
         });
@@ -179,7 +246,7 @@ export class ExecutionReader {
         signal,
         snapshot.createReadStream({ start: 0 }),
       );
-      stream.once('close', () => this.detailsInFlight.delete(tenantId));
+      stream.once('close', () => lease.release());
       handedOff = true;
       return new StreamableFile(stream, {
         type: 'application/json; charset=utf-8',
@@ -198,7 +265,7 @@ export class ExecutionReader {
         try {
           await file?.close();
         } finally {
-          this.detailsInFlight.delete(tenantId);
+          lease.release();
         }
       }
     }
