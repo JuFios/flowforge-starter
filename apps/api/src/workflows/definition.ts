@@ -3,11 +3,12 @@ import { BadRequestException } from '@nestjs/common';
 import { exceedsJsonDepth, jsonTooDeepMessage } from '../common/json-depth';
 import { findUnstorable } from '../common/storable-text';
 import { StepDefinition } from '../entities';
+import { MAX_STEPS } from './step-limits';
 
 const STEP_TYPES = ['http', 'transform', 'log', 'delay'] as const;
 type StepType = (typeof STEP_TYPES)[number];
 
-export const MAX_STEPS = 50;
+export { MAX_STEPS };
 /** Розмір усього визначення кроків (JSON), байт. */
 export const MAX_DEFINITION_BYTES = 64 * 1024;
 export const MAX_URL_LENGTH = 2048;

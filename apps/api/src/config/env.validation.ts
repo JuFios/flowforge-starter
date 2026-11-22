@@ -279,7 +279,7 @@ export class EnvironmentVariables extends DatabaseEnvironment {
   REALTIME_TICKET_TTL_MS = 30_000;
   @Type(() => Number)
   @IsInt()
-  @Min(1)
+  @Min(2)
   @Max(10000)
   @IsAtLeastTimes('REALTIME_MAX_CONNECTIONS_PER_TENANT', 2)
   REALTIME_MAX_CONNECTIONS = 256;

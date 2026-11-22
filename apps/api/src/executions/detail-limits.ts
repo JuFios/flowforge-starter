@@ -1,5 +1,5 @@
 import { MAX_RESPONSE_BYTES } from '../config/outbound';
-import { MAX_STEPS } from '../workflows/definition';
+import { MAX_STEPS } from '../workflows/step-limits';
 
 /**
  * Найбільший знімок `GET /executions/:id`, байт. Текстова HTTP-відповідь може розширитись до шести

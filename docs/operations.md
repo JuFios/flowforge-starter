@@ -101,7 +101,10 @@ LOCAL_WORKER
 ### Оновлення з попередньої версії
 
 Том `pgdata`, створений попередньою версією (до ізоляції тенантів), оновлюється так (з кореня
-репозиторію, `.env` з чотирма секретами — як у «Запуск»):
+репозиторію, `.env` з чотирма секретами — як у «Запуск»). Перед оновленням звірте власні значення
+спільних пулів API з правилом «Спільні пули API» (розділ «Конфігурація»): процеси не стартують, якщо
+`REALTIME_MAX_CONNECTIONS` менше за 2 × `REALTIME_MAX_CONNECTIONS_PER_TENANT` або
+`DETAIL_MAX_CONCURRENT` менше за 2 × `DETAIL_MAX_PER_TENANT`.
 
 ```bash
 docker compose stop api worker frontend   # старі процеси не працюють під час міграції
@@ -317,7 +320,7 @@ WebSocket підтримує зміну API-інстансу й відкритт
 | `OUTBOX_HTTP_TIMEOUT_MS` | `10000` | таймаут однієї спроби доставки, 100..60000 мс; транспорт застосовує мінімум із цим значенням та `HTTP_STEP_TIMEOUT_MS`; lease спроби — `2 ×` таймаут `+ 5 с` |
 | `OUTBOX_BACKOFF_BASE_MS` / `OUTBOX_BACKOFF_MAX_MS` | `5000` / `3600000` | backoff між спробами (експоненційний, повний jitter, не раніше за `Retry-After`); стеля — найдовша пауза: спроб без ліміту, недоставлена подія не видаляється |
 | `OUTBOX_RETENTION_DAYS` | `7` | скільки днів зберігати доставлені або явно скасовані тенантом події, 1..3650 |
-| `REALTIME_MAX_CONNECTIONS` / `REALTIME_MAX_CONNECTIONS_PER_TENANT` | `256` / `32` | WebSocket-підписок на інстанс API і з них одного тенанта (1..10000 / 1..1000); перша — не менше за 2 × другу |
+| `REALTIME_MAX_CONNECTIONS` / `REALTIME_MAX_CONNECTIONS_PER_TENANT` | `256` / `32` | WebSocket-підписок на інстанс API і з них одного тенанта (2..10000 / 1..1000); перша — не менше за 2 × другу |
 | `DETAIL_MAX_CONCURRENT` / `DETAIL_MAX_PER_TENANT` | `8` / `1` | одночасних знімків `GET /executions/:id` на інстанс API (2..256) і з них одного тенанта (1..16); перша — не менше за 2 × другу |
 | `DETAIL_DISK_BUDGET_BYTES` | `1073741824` | диск тимчасових файлів знімків інстансу, байт; не менше за 2 × `DETAIL_MAX_PER_TENANT` × найбільший знімок (~308 МБ) |
 | `TEST_DATABASE_URL` | `postgres://flowforge:flowforge@localhost:5432/flowforge_test` | лише для інтеграційних тестів |
