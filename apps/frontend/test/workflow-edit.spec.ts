@@ -127,7 +127,9 @@ test('retries a committed run after losing the response without creating a secon
       await response.dispose();
     }
   });
-  const run = page.getByRole('button', { name: 'Запустити' });
+  const run = page.getByRole('button', {
+    name: /^(Запустити|Повторити попередній запуск)$/,
+  });
   await run.click();
   await expect(run).toBeDisabled();
   await expect.poll(() => firstExecutionId).toMatch(/^[a-f0-9-]+$/);

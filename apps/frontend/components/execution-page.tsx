@@ -18,6 +18,9 @@ export function ExecutionPage({ id }: { id: string }) {
     [output, setOutput] = useState(''),
     [waiting, busy] = useState(false);
   const abort = useRef<AbortController>();
+  const retryRequest = useRef<AbortController>();
+  const [unresolvedCycle, rememberCycle] = useState<number>();
+  const [resolvedCycle, markResolved] = useState<number>();
   useEffect(() => {
     const base = 'executions/' + id;
     const stream = new ExecutionStream(
@@ -96,6 +99,7 @@ export function ExecutionPage({ id }: { id: string }) {
       initial.abort();
       stream.stop();
       abort.current?.abort();
+      retryRequest.current?.abort();
     };
   }, [id]);
   async function detail(path: string) {
@@ -123,18 +127,47 @@ export function ExecutionPage({ id }: { id: string }) {
           : 'Зв’язок перервано. Повторіть читання.',
     );
   }
+  const failedCycle =
+    data?.status === 'failed' &&
+    Number.isInteger(data.terminalCycles) &&
+    data.terminalCycles > (resolvedCycle ?? -1)
+      ? data.terminalCycles
+      : undefined;
+  const retryCycle = unresolvedCycle ?? failedCycle;
   async function retry() {
+    if (retryCycle === undefined || retryRequest.current) return;
+    const controller = new AbortController();
+    retryRequest.current = controller;
     busy(true);
     fail('');
-    const r = await apiRequest('POST', 'executions/' + id + '/retry');
-    busy(false);
-    if (r.kind === 'session_expired') return goToLogin();
-    if (r.kind === 'rejected') fail(describeRejection(r));
-    // Повтор міг дійти до API: стан виконання покаже сторінка, повторне натискання безпечне (409).
-    if (r.kind === 'network')
-      fail(
-        `Результат повтору невідомий (${r.message}). Перевірте стан виконання.`,
+    try {
+      const r = await apiRequest(
+        'POST',
+        `executions/${id}/retry?expectedTerminalCycle=${retryCycle}`,
+        { signal: controller.signal },
       );
+      if (controller.signal.aborted) return;
+      if (r.kind === 'session_expired') return goToLogin();
+      if (
+        r.kind === 'ok' ||
+        (r.kind === 'rejected' && r.error === 'retry_cycle_conflict')
+      ) {
+        markResolved(retryCycle);
+        rememberCycle(undefined);
+      }
+      if (r.kind === 'rejected') {
+        if (r.status >= 500 || r.status === 429 || r.status === 408)
+          rememberCycle(retryCycle);
+        fail(describeRejection(r));
+      }
+      if (r.kind === 'network') {
+        rememberCycle(retryCycle);
+        fail('Результат повтору невідомий. Повторіть попередній запит.');
+      }
+    } finally {
+      retryRequest.current = undefined;
+      if (!controller.signal.aborted) busy(false);
+    }
   }
   const connection = {
     connecting: 'Підключення…',
@@ -180,9 +213,11 @@ export function ExecutionPage({ id }: { id: string }) {
               </div>
             </dl>
             {data.error && <p role="alert">{data.error}</p>}
-            {data.status === 'failed' && (
+            {retryCycle !== undefined && (
               <button disabled={waiting} onClick={retry}>
-                Повторити виконання
+                {unresolvedCycle === undefined
+                  ? 'Повторити виконання'
+                  : 'Повторити попередній запит'}
               </button>
             )}
             {error && <p role="alert">{error}</p>}

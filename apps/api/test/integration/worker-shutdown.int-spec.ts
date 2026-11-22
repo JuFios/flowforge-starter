@@ -1,8 +1,9 @@
 import { DataSource } from 'typeorm';
 import { JobQueueService } from '../../src/engine/job-queue.service';
 import { JobRunnerService } from '../../src/engine/job-runner.service';
+import { StepExecutor } from '../../src/engine/step-executor';
 import { AppModule, WorkerModule } from '../../src/app.module';
-import { Execution, Job } from '../../src/entities';
+import { Execution, Job, StepRun } from '../../src/entities';
 import { RunningApp, startApp } from '../helpers/app';
 import { createTenant, openTestDataSource, truncateAll } from '../helpers/db';
 import { api, Receiver, sleep, startWorker, waitFor } from '../helpers/queue';
@@ -63,6 +64,131 @@ describe('worker graceful shutdown', () => {
 
   const jobOf = (executionId: string) =>
     ds.getRepository(Job).findOneByOrFail({ executionId });
+
+  it.each([false, true])(
+    'aborts a reclaimed job after the old attempt finishes (database unavailable: %s)',
+    async (disconnected) => {
+      const id = await run();
+      worker = await startApp(WorkerModule);
+      const queue = worker.app.get(JobQueueService);
+      const runner = worker.app.get(JobRunnerService);
+      const executor = worker.app.get(StepExecutor);
+      const first = await queue.claimNext('same-worker');
+      if (!first) throw new Error('first claim was not acquired');
+      const heartbeat = queue.heartbeat.bind(queue);
+      jest
+        .spyOn(queue, 'heartbeat')
+        .mockImplementation((job) =>
+          job.lockToken === first.lockToken
+            ? Promise.resolve(false)
+            : heartbeat(job),
+        );
+      let finishOld!: () => void;
+      const oldBarrier = new Promise<void>((resolve) => {
+        finishOld = resolve;
+      });
+      let finishNew!: () => void;
+      const newBarrier = new Promise<void>((resolve) => {
+        finishNew = resolve;
+      });
+      let oldEntered = false;
+      let freshSignal: AbortSignal | undefined;
+      const execute = jest
+        .spyOn(executor, 'execute')
+        .mockImplementationOnce(async () => {
+          oldEntered = true;
+          await oldBarrier;
+          return { stale: true };
+        })
+        .mockImplementationOnce(async (_step, _context, options) => {
+          if (!options?.signal)
+            throw new Error('attempt has no cancellation signal');
+          const signal = options.signal;
+          freshSignal = signal;
+          const abort = () => finishNew();
+          signal.addEventListener('abort', abort, { once: true });
+          try {
+            await newBarrier;
+            signal.throwIfAborted();
+            return { fresh: true };
+          } finally {
+            signal.removeEventListener('abort', abort);
+          }
+        });
+      const old = runner.process(first);
+      let fresh: Promise<void> | undefined;
+      try {
+        await waitFor('old attempt to reach its step', () => oldEntered);
+        await ds.query(
+          `UPDATE jobs SET "lockedUntil"=now() - interval '1 second' WHERE id=$1`,
+          [first.id],
+        );
+        expect(await queue.reapExpired()).toMatchObject([{ outcome: 'retry' }]);
+        let second: Awaited<ReturnType<JobQueueService['claimNext']>>;
+        await waitFor('same process to reclaim the job', async () => {
+          second = await queue.claimNext('same-worker');
+          return !!second;
+        });
+        if (!second) throw new Error('second claim was not acquired');
+        expect(second.id).toBe(first.id);
+        expect(second.lockToken).not.toBe(first.lockToken);
+        fresh = runner.process(second);
+        await waitFor('new attempt to reach its step', () => !!freshSignal);
+        finishOld();
+        await old;
+        expect(await jobOf(id)).toMatchObject({
+          status: 'running',
+          lockToken: second.lockToken,
+        });
+        expect(
+          await ds.getRepository(StepRun).findOneByOrFail({ executionId: id }),
+        ).toMatchObject({
+          status: 'running',
+          output: null,
+        });
+
+        const release = queue.release.bind(queue);
+        const runtime = worker.app.get(DataSource);
+        const releaseAttempt = jest
+          .spyOn(queue, 'release')
+          .mockImplementation(async (job) => {
+            if (disconnected) await runtime.destroy();
+            await release(job);
+          });
+        const started = performance.now();
+        await runner.beforeApplicationShutdown();
+        expect(freshSignal?.aborted).toBe(true);
+        expect(performance.now() - started).toBeLessThan(5_000);
+        expect(releaseAttempt).toHaveBeenCalledWith(second);
+        await fresh;
+        if (disconnected) {
+          expect(await jobOf(id)).toMatchObject({
+            status: 'running',
+            lockToken: second.lockToken,
+          });
+          const recovery = await startWorker(1);
+          try {
+            await waitFor(
+              'a different worker to finish after lease expiry',
+              async () => (await jobOf(id)).status === 'done',
+            );
+          } finally {
+            await recovery.close();
+          }
+        } else {
+          expect(await jobOf(id)).toMatchObject({
+            status: 'queued',
+            lockToken: null,
+          });
+        }
+      } finally {
+        finishOld();
+        finishNew();
+        await Promise.allSettled([old, fresh]);
+        execute.mockRestore();
+      }
+    },
+  );
 
   function respondAfter(ms: number) {
     receiver.respond = async (_req, res) => {

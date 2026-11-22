@@ -57,10 +57,10 @@ export class JobRunnerService implements BeforeApplicationShutdown {
   /** Скасовується на початку завершення: цикли перестають брати задачі й виходять із пауз. */
   private stopping = new AbortController();
   private loops: Promise<void>[] = [];
-  private readonly inFlight = new Map<
-    string,
-    { keeper: LeaseKeeper; done: Promise<void> }
-  >();
+  private readonly inFlight = new Set<{
+    keeper: LeaseKeeper;
+    done: Promise<void>;
+  }>();
   private readonly maintenanceTimers = new Set<NodeJS.Timeout>();
   private readonly maintenanceRuns = new Set<Promise<void>>();
   /** Невдалі захоплення поспіль (спільно для всіх циклів); 0 — захоплення працює. */
@@ -385,9 +385,10 @@ export class JobRunnerService implements BeforeApplicationShutdown {
         }
       },
     );
-    const tracked = done.catch(() => undefined);
-    this.inFlight.set(job.id, { keeper, done: tracked });
-    void tracked.finally(() => this.inFlight.delete(job.id));
+    const attempt = { keeper, done: done.catch(() => undefined) };
+    // Те саме завдання може мати новий lease до завершення старої спроби.
+    this.inFlight.add(attempt);
+    void attempt.done.then(() => this.inFlight.delete(attempt));
     return done;
   }
 

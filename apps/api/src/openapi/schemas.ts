@@ -216,8 +216,8 @@ const event = {
 const attempt = object({
   attempt: integer,
   senderId: str,
-  revision: integer,
-  keyIds: array(uuid),
+  revision: nullable(integer),
+  keyIds: nullable(array(uuid)),
   startedAt: date,
   finishedAt: nullable(date),
   outcome: nullable(str),
@@ -259,6 +259,7 @@ export const schemas: Record<string, SchemaObject> = {
   ExecutionSummary: object({
     ...listing,
     revision: { ...str, pattern: '^[0-9]+$' },
+    terminalCycles: { ...integer, minimum: 0, maximum: 2_147_483_647 },
     plan: array(object({ id: stepId, type: choice(types) })),
     steps: array(object(stepSummary)),
     inputBytes: integer,

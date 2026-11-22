@@ -170,6 +170,15 @@ const contracts: Record<string, Contract> = {
     result: 'ExecutionId',
     code: 202,
     errors: [409],
+    params: [
+      param('expectedTerminalCycle', 'query', {
+        ...integer,
+        minimum: 0,
+        maximum: 2_147_483_647,
+        description:
+          'Значення terminalCycles зі знімка failed. Передавайте той самий номер під час повтору запиту. Якщо цикл змінився або він уже не failed, API повертає 409 (retry_cycle_conflict). Без параметра повторюється поточний failed.',
+      }),
+    ],
   },
   'post /executions/{id}/realtime-tickets': {
     title: 'Отримати одноразовий тикет на одну підписку цього виконання',

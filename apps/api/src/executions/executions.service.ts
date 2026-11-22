@@ -369,7 +369,11 @@ export class ExecutionsService {
    * Виконання й задача змінюються в одній транзакції; рядок виконання блокується, тож із двох
    * одночасних повторів пройде один.
    */
-  async retry(tenantId: string, id: string): Promise<Execution> {
+  async retry(
+    tenantId: string,
+    id: string,
+    expectedTerminalCycle?: number,
+  ): Promise<Execution> {
     const correlationId = getCorrelationId() ?? newCorrelationId();
     const execution = await this.db.run(tenantId, async (em) => {
       const [row]: Execution[] = await em.query(
@@ -377,6 +381,17 @@ export class ExecutionsService {
         [id, tenantId],
       );
       if (!row) throw new NotFoundException('Execution не знайдено');
+      if (
+        expectedTerminalCycle !== undefined &&
+        (row.terminalCycles !== expectedTerminalCycle ||
+          row.status !== 'failed')
+      )
+        throw new ConflictException({
+          statusCode: 409,
+          error: 'retry_cycle_conflict',
+          message:
+            'Цей термінальний цикл уже змінився. Перевірте стан виконання.',
+        });
       if (row.status !== 'failed')
         throw new ConflictException(
           `повторити можна лише виконання зі статусом failed (зараз: ${row.status})`,

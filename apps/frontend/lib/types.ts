@@ -87,6 +87,7 @@ export interface ExecutionSummary {
   correlationId: string | null;
   /** Монотонна ревізія: більша — новіша (рядок, бо bigint). */
   revision: string;
+  terminalCycles: number;
   outputBytes: number | null;
   inputBytes: number;
   plan: Array<{ id: string; type: StepType }>;

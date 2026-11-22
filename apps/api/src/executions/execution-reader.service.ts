@@ -8,6 +8,7 @@ const STEP_COLUMNS = `s."stepIndex",s."stepId",s.status,s.attempts,left(s.error,
 export interface ExecutionOverview {
   id: string;
   revision: string;
+  terminalCycles: number;
   workflowName: string | null;
   status: Execution['status'];
   steps: Array<
@@ -32,7 +33,7 @@ export class ExecutionReader {
   async summary(tenantId: string, id: string, sessionId?: string) {
     return this.db.run(tenantId, async (em) => {
       const [row] = await em.query<ExecutionOverview[]>(
-        `SELECT e.id,e."workflowId",e.revision::text,e.status,e.trigger,
+        `SELECT e.id,e."workflowId",e.revision::text,e."terminalCycles",e.status,e.trigger,
         e."createdAt",e."finishedAt",e."scheduledAt",e."correlationId",left(e.error,500) AS error,
         w.name AS "workflowName",v.version AS "workflowVersion",pg_column_size(e.output) AS "outputBytes",pg_column_size(e.input) AS "inputBytes",
         COALESCE((SELECT jsonb_agg(jsonb_build_object('id',a.step->>'id','type',a.step->>'type') ORDER BY a.pos)

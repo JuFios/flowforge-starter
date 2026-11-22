@@ -6,6 +6,7 @@ import type { AddressInfo } from 'node:net';
 import { AppModule } from '../../src/app.module';
 import { configureApp } from '../../src/bootstrap';
 import { RUNTIME_DATABASE_URL } from '../../src/database/runtime-database-url';
+import { installOpenApi } from '../../src/openapi/document';
 import { buildPinoHttpOptions } from '../../src/observability/logger.options';
 import { jsonLineSink } from './json-log-sink';
 import { testWorkerDatabaseUrl } from './test-env';
@@ -21,6 +22,7 @@ export interface RunningApp {
 export interface StartOptions extends ModuleMetadata {
   /** Писати логи (рівень info, справжня конфігурація логера) у масив logs замість stdout. */
   captureLogs?: boolean;
+  openApi?: boolean;
 }
 
 /**
@@ -31,7 +33,7 @@ export async function startApp(
   rootModule: Type = AppModule,
   options: StartOptions = {},
 ): Promise<RunningApp> {
-  const { captureLogs, ...extra } = options;
+  const { captureLogs, openApi, ...extra } = options;
   const logs: Array<Record<string, unknown>> = [];
   let builder = Test.createTestingModule({
     ...extra,
@@ -53,6 +55,7 @@ export async function startApp(
   const app = configureApp(
     moduleRef.createNestApplication({ bufferLogs: true }),
   );
+  if (openApi) installOpenApi(app);
   await app.listen(0, '127.0.0.1');
   const { port } = (app.getHttpServer() as Server).address() as AddressInfo;
   return {

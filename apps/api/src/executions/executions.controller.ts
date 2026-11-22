@@ -67,8 +67,21 @@ export class ExecutionsController {
   async retry(
     @CurrentTenant() t: Tenant,
     @Param('id', ParseUUIDPipe) id: string,
+    @Query('expectedTerminalCycle') expectedTerminalCycle?: unknown,
   ) {
-    const execution = await this.executions.retry(t.id, id);
+    let cycle: number | undefined;
+    if (expectedTerminalCycle !== undefined) {
+      if (
+        typeof expectedTerminalCycle !== 'string' ||
+        !/^(0|[1-9][0-9]{0,9})$/.test(expectedTerminalCycle) ||
+        Number(expectedTerminalCycle) > 2_147_483_647
+      )
+        throw new BadRequestException(
+          'expectedTerminalCycle має бути цілим числом від 0 до 2147483647',
+        );
+      cycle = Number(expectedTerminalCycle);
+    }
+    const execution = await this.executions.retry(t.id, id, cycle);
     return { executionId: execution.id };
   }
 

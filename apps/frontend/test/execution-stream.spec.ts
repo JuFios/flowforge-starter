@@ -38,6 +38,7 @@ function summary(
     scheduledAt: null,
     correlationId: null,
     revision,
+    terminalCycles: 0,
     outputBytes: null,
     inputBytes: 2,
     plan: [],

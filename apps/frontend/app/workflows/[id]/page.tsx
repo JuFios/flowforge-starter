@@ -5,7 +5,7 @@ export default async function Workflow({ params }: { params: { id: string } }) {
   const path = '/workflows/' + encodeURIComponent(params.id);
   const result = await serverApi<WorkflowView>(path, path);
   return result.ok ? (
-    <WorkflowDetail wf={result.data} />
+    <WorkflowDetail key={params.id} wf={result.data} />
   ) : (
     <section className="panel">
       <h1>Процес недоступний</h1>

@@ -6,11 +6,13 @@ import type {
 import { randomUUID } from 'node:crypto';
 import { request } from 'node:http';
 import { DataSource } from 'typeorm';
-import { buildDocument } from '../../src/openapi/document';
+import { AppModule, WorkerModule } from '../../src/app.module';
+import { OutboxSender } from '../../src/outbox/outbox-sender.service';
 import { SchedulerService } from '../../src/scheduler/scheduler.service';
+import { SystemDb } from '../../src/tenancy/system-db';
 import { RunningApp, startApp } from '../helpers/app';
 import { openTestDataSource, truncateAll } from '../helpers/db';
-import { Receiver } from '../helpers/queue';
+import { Receiver, waitFor } from '../helpers/queue';
 import { TEST_ADMIN_TOKEN } from '../helpers/test-env';
 import { signedHeaders } from '../helpers/webhook';
 
@@ -38,9 +40,11 @@ describe('OpenAPI matches the actual HTTP responses', () => {
     ds = await openTestDataSource();
     await truncateAll(ds);
     await receiver.start();
-    app = await startApp();
+    app = await startApp(AppModule, { openApi: true });
     app.app.get(SchedulerService).onApplicationShutdown();
-    doc = buildDocument(app.app);
+    const published = await fetch(app.baseUrl + '/docs-json');
+    expect(published.status).toBe(200);
+    doc = (await published.json()) as OpenAPIObject;
   });
   afterAll(async () => {
     await app.close();
@@ -538,10 +542,10 @@ describe('OpenAPI matches the actual HTTP responses', () => {
       { headers: key },
     );
     // Після відкликання поточного ключа наступний став поточним і останнім: його відкликання — 409.
-    const [{ promotedKeyId }] = await ds.query<
-      Array<{ promotedKeyId: string }>
+    const [{ promotedKeyId, revision }] = await ds.query<
+      Array<{ promotedKeyId: string; revision: number }>
     >(
-      'SELECT "secretKeyId" AS "promotedKeyId" FROM notification_settings WHERE "tenantId"=$1',
+      'SELECT "secretKeyId" AS "promotedKeyId", revision FROM notification_settings WHERE "tenantId"=$1',
       [tenantId],
     );
     await send(
@@ -584,6 +588,101 @@ describe('OpenAPI matches the actual HTTP responses', () => {
       200,
       { headers: key },
     );
+    const worker = await startApp(WorkerModule);
+    try {
+      const claim = await worker.app
+        .get(SystemDb)
+        .claimOutboxEvent('sender-disappeared-before-begin', 10_000, 1);
+      expect(claim.event).toMatchObject({ id: eventId, attempt: 1 });
+      const journal = () =>
+        send(
+          'get ' + notes + '/events/{id}',
+          `${notes}/events/${eventId}`,
+          200,
+          { headers: key },
+        );
+      expect((await journal()).body).toMatchObject({
+        status: 'sending',
+        attempts: [
+          {
+            attempt: 1,
+            revision: null,
+            keyIds: null,
+            outcome: null,
+            finishedAt: null,
+          },
+        ],
+      });
+
+      // Відправник зник до begin. Просуваємо обидва строки, що їх використовує штатний claim.
+      await ds.query(
+        `UPDATE outbox_events SET "leaseUntil" = now() - interval '1 second' WHERE id=$1`,
+        [eventId],
+      );
+      await ds.query(
+        `UPDATE notification_settings SET "dueAt" = now() - interval '1 second' WHERE "tenantId"=$1`,
+        [tenantId],
+      );
+      let respond!: () => void;
+      const responseBarrier = new Promise<void>((resolve) => {
+        respond = resolve;
+      });
+      receiver.respond = async (_req, res) => {
+        await responseBarrier;
+        res.writeHead(200).end();
+      };
+      const delivery = worker.app.get(OutboxSender).deliverNext();
+      try {
+        await waitFor(
+          'configured delivery to reach its receiver',
+          () => receiver.hits('/notify').length === 1,
+        );
+        expect((await journal()).body).toMatchObject({
+          status: 'sending',
+          attempts: [
+            {
+              attempt: 1,
+              revision: null,
+              keyIds: null,
+              outcome: 'lease_expired',
+            },
+            {
+              attempt: 2,
+              revision,
+              keyIds: [promotedKeyId],
+              outcome: null,
+              finishedAt: null,
+            },
+          ],
+        });
+      } finally {
+        respond();
+        expect(await delivery).toBe(true);
+      }
+      const recovered = (await journal()).body as {
+        attempts: Array<{ finishedAt: string | null }>;
+      };
+      expect(recovered).toMatchObject({
+        status: 'delivered',
+        attempts: [
+          {
+            attempt: 1,
+            revision: null,
+            keyIds: null,
+            outcome: 'lease_expired',
+          },
+          {
+            attempt: 2,
+            revision,
+            keyIds: [promotedKeyId],
+            outcome: 'delivered',
+          },
+        ],
+      });
+      expect(recovered.attempts[0].finishedAt).toEqual(expect.any(String));
+    } finally {
+      await worker.close();
+    }
     await send(
       'get ' + notes + '/events/{id}',
       `${notes}/events/${randomUUID()}`,
