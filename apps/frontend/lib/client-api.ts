@@ -52,6 +52,18 @@ function messagesOf(body: ApiErrorBody | undefined): string[] {
   return typeof message === 'string' && message ? [message] : [];
 }
 
+function retryAfterSeconds(value: string | null): number | undefined {
+  const text = value?.trim();
+  if (!text) return undefined;
+  if (/^\d+$/.test(text))
+    return Math.min(Number(text), Math.floor(Number.MAX_SAFE_INTEGER / 1000));
+  if (!/^[A-Z][a-z]{2}[ ,]/.test(text)) return undefined;
+  const date = Date.parse(text);
+  return Number.isFinite(date)
+    ? Math.max(0, Math.ceil((date - Date.now()) / 1000))
+    : undefined;
+}
+
 /**
  * Запит із дедлайном, що охоплює і заголовки, і читання тіла. Дедлайн і скасування викликачем
  * завершують запит одразу, навіть якщо `fetch` чи читання тіла не реагують на сигнал; пізня
@@ -66,6 +78,7 @@ export async function apiRequest<T>(
   if (options.signal?.aborted) return { kind: 'aborted' };
   const controller = new AbortController();
   let timedOut = false;
+  let throttled: ClientResult<T> | undefined;
   const onCallerAbort = () => controller.abort();
   options.signal?.addEventListener('abort', onCallerAbort, { once: true });
   const timer = setTimeout(() => {
@@ -78,12 +91,12 @@ export async function apiRequest<T>(
       () =>
         resolve(
           timedOut
-            ? {
+            ? (throttled ?? {
                 kind: 'network',
                 message: 'сервер не відповів вчасно',
                 uncertain: method !== 'GET',
                 timedOut: true,
-              }
+              })
             : { kind: 'aborted' },
         ),
       { once: true },
@@ -92,7 +105,9 @@ export async function apiRequest<T>(
   try {
     return await Promise.race([
       interrupted,
-      send<T>(method, path, options, controller.signal),
+      send<T>(method, path, options, controller.signal, (response) => {
+        throttled = response;
+      }),
     ]);
   } finally {
     clearTimeout(timer);
@@ -105,6 +120,7 @@ async function send<T>(
   path: string,
   options: RequestOptions,
   signal: AbortSignal,
+  onThrottled: (response: ClientResult<T>) => void,
 ): Promise<ClientResult<T>> {
   const headers: Record<string, string> = {};
   const bodyText =
@@ -136,16 +152,32 @@ async function send<T>(
   if (res.status === 401) return { kind: 'session_expired' };
   if (res.status === 204)
     return { kind: 'ok', status: 204, data: undefined as T };
+  const retryAfter = retryAfterSeconds(res.headers.get('retry-after'));
+  const throttled: ClientResult<T> | undefined =
+    res.status === 429 && retryAfter !== undefined
+      ? {
+          kind: 'rejected',
+          status: 429,
+          error: 'rate_limited',
+          message: 'Забагато запитів',
+          messages: [],
+          retryAfterSeconds: retryAfter,
+          correlationId: res.headers.get('x-request-id') ?? undefined,
+        }
+      : undefined;
+  if (throttled) onThrottled(throttled);
   let body: unknown;
   try {
     body = await res.json();
   } catch {
     if (signal.aborted) return { kind: 'aborted' };
-    return {
-      kind: 'network',
-      message: 'відповідь сервера обірвалася',
-      uncertain: method !== 'GET',
-    };
+    return (
+      throttled ?? {
+        kind: 'network',
+        message: 'відповідь сервера обірвалася',
+        uncertain: method !== 'GET',
+      }
+    );
   }
   if (res.ok) return { kind: 'ok', status: res.status, data: body as T };
   const error = body as ApiErrorBody;
@@ -159,7 +191,6 @@ async function send<T>(
       message: messagesOf(error)[0] ?? 'API тимчасово недоступний',
       uncertain: method !== 'GET',
     };
-  const retryAfter = Number(res.headers.get('retry-after'));
   const messages = messagesOf(error);
   return {
     kind: 'rejected',
@@ -167,8 +198,7 @@ async function send<T>(
     error: typeof error?.error === 'string' ? error.error : String(res.status),
     message: messages.join('; ') || `помилка ${res.status}`,
     messages,
-    retryAfterSeconds:
-      Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : undefined,
+    retryAfterSeconds: retryAfter,
     correlationId: res.headers.get('x-request-id') ?? error?.correlationId,
   };
 }

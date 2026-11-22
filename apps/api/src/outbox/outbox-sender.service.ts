@@ -407,7 +407,7 @@ export class OutboxSender implements BeforeApplicationShutdown {
     );
   }
 
-  /** Видаляє доставлені події, старші за OUTBOX_RETENTION_DAYS, пачками; кількість видалених. */
+  /** Пачками видаляє доставлені й скасовані події після OUTBOX_RETENTION_DAYS. */
   async purgeDelivered(): Promise<number> {
     const days = this.config.get('OUTBOX_RETENTION_DAYS', { infer: true });
     let total = 0;

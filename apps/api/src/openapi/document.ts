@@ -148,6 +148,7 @@ const contracts: Record<string, Contract> = {
     title: 'Прочитати повне виконання з результатами кроків',
     auth: tenant,
     result: 'ExecutionDetail',
+    errors: [503],
   },
   'get /executions/{id}/summary': {
     title: 'Прочитати поточний знімок стану і план кроків',
@@ -382,7 +383,9 @@ export function buildDocument(app: INestApplication) {
       for (const code of errors)
         op.responses[code] = {
           description: descriptions[code],
-          content: json(code === 503 ? 'Health' : 'Error'),
+          content: json(
+            code === 503 && c.result === 'Health' ? 'Health' : 'Error',
+          ),
           headers:
             code === 429
               ? {

@@ -5,6 +5,7 @@ import { MetricsService } from '../observability/metrics.service';
 /** Що сталося з одним моментом розкладу (мітка `outcome`). */
 export type FiringOutcome =
   'created' | 'existing' | 'missed_skipped' | 'missed_run_once';
+export type ScheduleBlockedReason = 'queue_full' | 'outbox_full';
 
 /**
  * Метрики планувальника (процес API, docs/operations.md, «Метрики»). Мітки — лише з обмеженого набору значень,
@@ -14,7 +15,7 @@ export type FiringOutcome =
 export class SchedulerMetrics {
   /** Оброблені моменти розкладу за результатом. */
   readonly firings: Counter<'outcome'>;
-  /** Спроби спрацювання, відкладені повною чергою тенанта (курсор не рухається). */
+  /** Спроби спрацювання, відкладені через квоту черги або outbox (курсор не рухається). */
   readonly blocked: Counter<'reason'>;
   /** Розклади, які не вдалося обробити (невалідний вираз, помилка БД обробки workflow). */
   readonly errors: Counter<'reason'>;
@@ -63,6 +64,7 @@ export class SchedulerMetrics {
     ])
       this.firings.inc({ outcome }, 0);
     this.blocked.inc({ reason: 'queue_full' }, 0);
+    this.blocked.inc({ reason: 'outbox_full' }, 0);
     for (const reason of ['invalid_schedule', 'database'])
       this.errors.inc({ reason }, 0);
   }

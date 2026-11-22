@@ -86,8 +86,23 @@ export class ExecutionsController {
   }
 
   @Get('executions/:id')
-  get(@CurrentTenant() t: Tenant, @Param('id', ParseUUIDPipe) id: string) {
-    return this.reader.detail(t.id, id);
+  async get(
+    @CurrentTenant() t: Tenant,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const disconnect = new AbortController();
+    const close = () => disconnect.abort();
+    res.once('close', close);
+    if (res.destroyed) close();
+    try {
+      const detail = await this.reader.detail(t.id, id, disconnect.signal);
+      detail.getStream().once('close', () => res.off('close', close));
+      return detail;
+    } catch (err) {
+      res.off('close', close);
+      throw err;
+    }
   }
   @Get('executions/:id/summary')
   summary(@CurrentTenant() t: Tenant, @Param('id', ParseUUIDPipe) id: string) {

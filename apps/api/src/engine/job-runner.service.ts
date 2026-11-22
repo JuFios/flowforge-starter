@@ -99,6 +99,23 @@ export class JobRunnerService implements BeforeApplicationShutdown {
       () => this.purgeFinished(),
       () => Math.min(MAX_TIMER_MS, cleanupMs * (0.5 + Math.random())),
     );
+    let moreVersions = true;
+    this.scheduleMaintenance(
+      async () => {
+        moreVersions = false;
+        const { deleted, more } = await this.queue.purgeWorkflowVersions();
+        moreVersions = more;
+        if (deleted > 0)
+          this.logger.log(
+            { deleted },
+            'deleted unreferenced workflow versions',
+          );
+      },
+      () =>
+        moreVersions
+          ? 1_000 + Math.random() * 1_000
+          : Math.min(MAX_TIMER_MS, cleanupMs * (0.5 + Math.random())),
+    );
   }
 
   /** Кожен прохід має один таймер або один активний запит. Завершення чекає на активні проходи. */

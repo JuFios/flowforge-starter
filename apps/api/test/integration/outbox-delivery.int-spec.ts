@@ -78,6 +78,36 @@ describe('notification delivery', () => {
     return values.find((v) => v.labels.outcome === name)?.value ?? 0;
   }
 
+  it('retains delivered and explicitly cancelled events from their own terminal timestamps', async () => {
+    const cases = {
+      oldDelivered: await complete(),
+      oldCancelled: await complete(),
+      newDelivered: await complete(),
+      newCancelled: await complete(),
+      pending: await complete(),
+    };
+    for (const [key, row] of Object.entries(cases)) {
+      if (key === 'pending') continue;
+      const status = key.endsWith('Delivered') ? 'delivered' : 'cancelled';
+      await ds.query(
+        `UPDATE outbox_events SET status=$2::text,
+           "deliveredAt"=CASE WHEN $2::text='delivered' THEN now()-make_interval(days=>$3) END,
+           "cancelledAt"=CASE WHEN $2::text='cancelled' THEN now()-make_interval(days=>$3) END
+           WHERE id=$1`,
+        [row.id, status, key.startsWith('old') ? 8 : 6],
+      );
+    }
+    const cleanup = await sender();
+    expect(await cleanup.purgeDelivered()).toBe(2);
+    expect(await cleanup.purgeDelivered()).toBe(0);
+    const rows: Array<{ id: string }> = await ds.query(
+      'SELECT id FROM outbox_events',
+    );
+    expect(new Set(rows.map((row) => row.id))).toEqual(
+      new Set([cases.newDelivered.id, cases.newCancelled.id, cases.pending.id]),
+    );
+  });
+
   beforeAll(async () => {
     ds = await openTestDataSource();
     await receiver.start();

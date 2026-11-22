@@ -111,6 +111,7 @@ function harness(
     clearTimeout: (handle) => {
       timers.delete(handle as number);
     },
+    now: () => now,
     random: () => 0.5,
   };
   const stream = new ExecutionStream(ID, deps, {
@@ -318,6 +319,59 @@ test('falls back to HTTP polling after three failed connections and stops pollin
   const calls = h.summaryCalls;
   await h.advance(POLL_INTERVAL_MS * 5);
   expect(h.summaryCalls).toBe(calls);
+});
+
+test('shares the Retry-After deadline across initial and fallback reads and cancels delayed polls', async () => {
+  let reconnect = false;
+  const h = harness({
+    summaries: async () => ({
+      ok: false,
+      reason: 'retry',
+      retryAfterMs: 60_000,
+    }),
+    tickets: async () =>
+      reconnect
+        ? { ok: true, ticket: 'restored' }
+        : { ok: false, reason: 'retry' },
+  });
+  h.stream.fetchInitialSummary();
+  h.stream.start();
+  await h.flush();
+  await h.advance(59_999);
+  expect(h.summaryCalls).toBe(1);
+  await h.advance(1);
+  expect(h.summaryCalls).toBe(2);
+  h.stream.nudge();
+  await h.advance(59_999);
+  expect(h.summaryCalls).toBe(2);
+  reconnect = true;
+  h.stream.nudge();
+  await h.flush();
+  h.sockets[0].send({ type: 'snapshot', execution: summary('6') });
+  await h.advance(1);
+  expect(h.summaryCalls).toBe(2);
+  expect(h.states.at(-1)).toBe('live');
+  h.stream.stop();
+  expect(h.timers.size).toBe(0);
+});
+
+test('stops a scheduled retry when the execution page unmounts', async () => {
+  const h = harness({
+    summaries: async () => ({
+      ok: false,
+      reason: 'retry',
+      retryAfterMs: 60_000,
+    }),
+    tickets: async () => ({ ok: false, reason: 'retry' }),
+  });
+  h.stream.start();
+  await h.flush();
+  await h.advance(2_000);
+  expect(h.summaryCalls).toBe(1);
+  h.stream.stop();
+  await h.advance(120_000);
+  expect(h.summaryCalls).toBe(1);
+  expect(h.timers.size).toBe(0);
 });
 
 test('treats close code 4401 as a revoked session and 4404 as a gone execution', async () => {

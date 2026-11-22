@@ -35,6 +35,9 @@ export const POSTURE: {
   functions: Readonly<Record<string, FunctionPosture>>;
 } = {
   tables: {
+    workflow_version_cleanup: {
+      grants: { [SYSTEM_ROLE]: ['SELECT', 'UPDATE'] },
+    },
     workflow_usage: {
       tenantColumn: 'tenantId',
       grants: { [SYSTEM_ROLE]: ['SELECT', 'INSERT', 'UPDATE'] },
@@ -181,6 +184,7 @@ export const POSTURE: {
       owner: SYSTEM_ROLE,
       execute: [WORKER_ROLE],
     },
+    'purge_workflow_versions()': { owner: SYSTEM_ROLE, execute: [WORKER_ROLE] },
     'queue_depth_by_tenant()': { owner: SYSTEM_ROLE, execute: [WORKER_ROLE] },
     // Тригерні функції обліку: їх викликає лише тригер.
     'tenant_usage_on_job()': { owner: SYSTEM_ROLE, execute: [] },

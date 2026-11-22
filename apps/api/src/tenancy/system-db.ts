@@ -254,4 +254,10 @@ export class SystemDb {
     );
     return row.deleted;
   }
+
+  async purgeWorkflowVersions(): Promise<{ deleted: number; more: boolean }> {
+    const [row]: Array<{ deleted: number; more: boolean }> =
+      await this.ds.query('SELECT * FROM purge_workflow_versions()');
+    return row;
+  }
 }

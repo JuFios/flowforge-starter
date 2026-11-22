@@ -11,6 +11,54 @@ test.afterEach(() => {
   globalThis.fetch = realFetch;
 });
 
+test('keeps Retry-After from a throttled summary with an empty response body', async () => {
+  globalThis.fetch = async () =>
+    new Response(null, { status: 429, headers: { 'Retry-After': '60' } });
+  expect(await apiRequest('GET', 'executions/x/summary')).toMatchObject({
+    kind: 'rejected',
+    status: 429,
+    retryAfterSeconds: 60,
+  });
+});
+
+test('keeps the observed Retry-After when the throttled response body stalls', async () => {
+  globalThis.fetch = async () =>
+    new Response(stalledBody().body, {
+      status: 429,
+      headers: { 'Retry-After': '60' },
+    });
+  expect(
+    await apiRequest('GET', 'executions/x/summary', { timeoutMs: 40 }),
+  ).toMatchObject({
+    kind: 'rejected',
+    status: 429,
+    retryAfterSeconds: 60,
+  });
+});
+
+test('reads a Retry-After HTTP-date and ignores malformed delays', async () => {
+  const target = new Date(Date.now() + 90_000).toUTCString();
+  for (const [header, expected] of [
+    [target, expect.any(Number)],
+    ['1e9', undefined],
+  ]) {
+    globalThis.fetch = async () =>
+      Response.json(
+        {},
+        { status: 429, headers: { 'Retry-After': header as string } },
+      );
+    const answer = await apiRequest('GET', 'executions/x/summary');
+    expect(answer).toMatchObject({
+      kind: 'rejected',
+      retryAfterSeconds: expected,
+    });
+    if (header === target && answer.kind === 'rejected') {
+      expect(answer.retryAfterSeconds).toBeGreaterThanOrEqual(88);
+      expect(answer.retryAfterSeconds).toBeLessThanOrEqual(90);
+    }
+  }
+});
+
 /** Відповідь із заголовками, тіло якої не закривається (зависле з'єднання після заголовків). */
 function stalledBody(): Response {
   const stream = new ReadableStream<Uint8Array>({

@@ -63,6 +63,10 @@ export function ExecutionPage({ id }: { id: string }) {
                     : r.kind === 'rejected' && r.status === 404
                       ? 'gone'
                       : 'retry',
+                retryAfterMs:
+                  r.kind === 'rejected' && r.retryAfterSeconds !== undefined
+                    ? r.retryAfterSeconds * 1000
+                    : undefined,
               };
         },
         openSocket(ticket) {
@@ -75,6 +79,7 @@ export function ExecutionPage({ id }: { id: string }) {
         },
         setTimeout: (fn, ms) => window.setTimeout(fn, ms),
         clearTimeout: (h) => window.clearTimeout(h as number),
+        now: () => performance.now(),
         random: Math.random,
       },
       {
@@ -85,18 +90,12 @@ export function ExecutionPage({ id }: { id: string }) {
         onSessionExpired: goToLogin,
       },
     );
-    const initial = new AbortController();
-    void apiRequest<ExecutionSummary>('GET', base + '/summary', {
-      signal: initial.signal,
-    }).then((r) => {
-      if (!initial.signal.aborted && r.kind === 'ok') stream.seed(r.data);
-    });
+    stream.fetchInitialSummary();
     const online = () => stream.nudge();
     window.addEventListener('online', online);
     stream.start();
     return () => {
       window.removeEventListener('online', online);
-      initial.abort();
       stream.stop();
       abort.current?.abort();
       retryRequest.current?.abort();

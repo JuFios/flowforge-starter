@@ -78,6 +78,34 @@ describe('secret exposure', () => {
     return exchange;
   }
 
+  it('keeps malformed JSON out of the error response and correlated log', async () => {
+    const marker = 'FFcanary';
+    const requestId = 'invalid-json-regression';
+    const body = JSON.stringify({
+      name: 'example',
+      steps: [{ id: 'call', type: 'http', headers: { Authorization: marker } }],
+    }).replace(JSON.stringify(marker), marker);
+    const bad = await send(
+      'POST',
+      '/workflows',
+      { 'x-request-id': requestId },
+      body,
+    );
+    expect(bad.status).toBe(400);
+    expect(bad.headers['x-request-id']).toBe(requestId);
+    expect(bad.body).toMatchObject({
+      statusCode: 400,
+      message: 'Невалідний JSON',
+      correlationId: requestId,
+    });
+    expect(app.logs).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ status: 400, correlationId: requestId }),
+      ]),
+    );
+    expect(JSON.stringify([bad, app.logs])).not.toContain(marker);
+  });
+
   /** Усі рядки значення (рекурсивно), разом із ключами об'єктів. */
   function strings(value: unknown, out: string[] = []): string[] {
     if (typeof value === 'string') out.push(value);

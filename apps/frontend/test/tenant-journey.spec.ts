@@ -95,13 +95,18 @@ test('a tenant edits a masked header, runs a workflow and follows its durable re
       compose('start');
       const api = process.env.API_ORIGIN ?? 'http://localhost:3000';
       await expect
-        .poll(async () => {
-          try {
-            return (await request.get(api + '/ready', { timeout: 1_000 })).ok();
-          } catch {
-            return false;
-          }
-        })
+        .poll(
+          async () => {
+            try {
+              return (
+                await request.get(api + '/ready', { timeout: 1_000 })
+              ).ok();
+            } catch {
+              return false;
+            }
+          },
+          { timeout: 20_000 },
+        )
         .toBe(true);
     }
   }

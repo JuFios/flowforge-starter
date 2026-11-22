@@ -1,9 +1,46 @@
-import { Injectable, NotFoundException, StreamableFile } from '@nestjs/common';
-import { Readable, addAbortSignal } from 'node:stream';
+import {
+  Injectable,
+  NotFoundException,
+  ServiceUnavailableException,
+  StreamableFile,
+} from '@nestjs/common';
+import { mkdtemp, open, rm, unlink, writeFile } from 'node:fs/promises';
+import type { FileHandle } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { addAbortSignal } from 'node:stream';
+import type { EntityManager } from 'typeorm';
+import { QueryFailedError } from 'typeorm';
+import { MAX_RESPONSE_BYTES } from '../config/outbound';
 import { Execution, StepRun } from '../entities';
 import { TenantDb } from '../tenancy/tenant-db';
+import { MAX_STEPS } from '../workflows/definition';
 
 const STEP_COLUMNS = `s."stepIndex",s."stepId",s.status,s.attempts,left(s.error,500) AS error,s."startedAt",s."finishedAt",s."wakeAt",pg_column_size(s.output) AS "outputBytes"`;
+const DETAIL_TIMEOUT_MS = 60_000;
+const DETAIL_SLOTS = 2;
+// Текстова HTTP-відповідь може розширитись до шести байтів на символ після JSON-екранування.
+// Вихід останнього кроку повторюється в execution.output. Запас охоплює решту полів та вхід.
+const DETAIL_BYTES = ((MAX_STEPS + 1) * 6 + 2) * MAX_RESPONSE_BYTES;
+
+async function openDetailFile(): Promise<FileHandle> {
+  const dir = await mkdtemp(join(tmpdir(), 'flowforge-execution-'));
+  let file: FileHandle | undefined;
+  try {
+    const path = join(dir, 'detail.json');
+    file = await open(path, 'wx+', 0o600);
+    await unlink(path);
+    await rm(dir, { recursive: true });
+    return file;
+  } catch (error) {
+    try {
+      await file?.close();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+    throw error;
+  }
+}
 
 export interface ExecutionOverview {
   id: string;
@@ -29,6 +66,8 @@ export interface ExecutionOverview {
 /** Один знімок PostgreSQL для ревізії, стану виконання та його кроків. */
 @Injectable()
 export class ExecutionReader {
+  private readonly detailsInFlight = new Set<string>();
+
   constructor(private readonly db: TenantDb) {}
   async summary(tenantId: string, id: string, sessionId?: string) {
     return this.db.run(tenantId, async (em) => {
@@ -71,37 +110,97 @@ export class ExecutionReader {
       return row;
     });
   }
-  async detail(tenantId: string, id: string) {
-    const execution = await this.db.run(tenantId, (em) =>
-      em.findOneBy(Execution, { id, tenantId }),
-    );
-    if (!execution) throw new NotFoundException('Виконання не знайдено');
-    const read = (after: number) =>
-      this.db.run(tenantId, (em) =>
-        em.query<StepRun[]>(
-          `SELECT * FROM step_runs WHERE "executionId"=$1 AND "tenantId"=$2 AND "stepIndex">$3 ORDER BY "stepIndex" LIMIT 2`,
-          [id, tenantId, after],
-        ),
+  async detail(tenantId: string, id: string, disconnect?: AbortSignal) {
+    const unavailable = () =>
+      new ServiceUnavailableException('Деталі виконання тимчасово недоступні');
+    if (
+      this.detailsInFlight.size >= DETAIL_SLOTS ||
+      this.detailsInFlight.has(tenantId)
+    )
+      throw unavailable();
+    this.detailsInFlight.add(tenantId);
+    const expiresAt = performance.now() + DETAIL_TIMEOUT_MS;
+    const deadline = AbortSignal.timeout(DETAIL_TIMEOUT_MS);
+    const signal = disconnect
+      ? AbortSignal.any([deadline, disconnect])
+      : deadline;
+    const checkDeadline = () => {
+      if (signal.aborted || performance.now() >= expiresAt) throw unavailable();
+    };
+    const limitQuery = async (em: EntityManager) => {
+      checkDeadline();
+      const remaining = Math.max(1, Math.floor(expiresAt - performance.now()));
+      await em.query(
+        `SELECT pg_catalog.set_config('statement_timeout',
+           LEAST(COALESCE(NULLIF(setting::integer, 0), $1), $1)::text, true)
+         FROM pg_catalog.pg_settings WHERE name='statement_timeout'`,
+        [remaining],
       );
-    async function* json() {
-      yield JSON.stringify(execution).slice(0, -1) + ',"steps":[';
-      let after = -1;
-      for (;;) {
-        const rows = await read(after);
-        for (const row of rows) {
-          yield (after < 0 ? '' : ',') + JSON.stringify(row);
-          after = row.stepIndex;
+      checkDeadline();
+    };
+    let file: FileHandle | undefined;
+    let handedOff = false;
+    try {
+      const snapshot = await openDetailFile().catch(() => {
+        throw unavailable();
+      });
+      file = snapshot;
+      let length = 0;
+      const write = async (json: string) => {
+        checkDeadline();
+        length += Buffer.byteLength(json);
+        if (length > DETAIL_BYTES) throw unavailable();
+        await writeFile(snapshot, json, { signal }).catch(() => {
+          throw unavailable();
+        });
+      };
+      await this.db.snapshot(tenantId, async (em) => {
+        await limitQuery(em);
+        const execution = await em.findOneBy(Execution, { id, tenantId });
+        if (!execution) throw new NotFoundException('Виконання не знайдено');
+        await write(JSON.stringify(execution).slice(0, -1) + ',"steps":[');
+        let after = -1;
+        for (;;) {
+          await limitQuery(em);
+          const rows = await em.query<StepRun[]>(
+            `SELECT * FROM step_runs WHERE "executionId"=$1 AND "tenantId"=$2 AND "stepIndex">$3 ORDER BY "stepIndex" LIMIT 2`,
+            [id, tenantId, after],
+          );
+          for (const row of rows) {
+            await write((after < 0 ? '' : ',') + JSON.stringify(row));
+            after = row.stepIndex;
+          }
+          if (rows.length < 2) break;
         }
-        if (rows.length < 2) break;
+        await write(']}');
+      });
+      checkDeadline();
+      const stream = addAbortSignal(
+        signal,
+        snapshot.createReadStream({ start: 0 }),
+      );
+      stream.once('close', () => this.detailsInFlight.delete(tenantId));
+      handedOff = true;
+      return new StreamableFile(stream, {
+        type: 'application/json; charset=utf-8',
+        length,
+      });
+    } catch (err) {
+      if (
+        signal.aborted ||
+        (err instanceof QueryFailedError &&
+          (err.driverError as { code?: unknown }).code === '57014')
+      )
+        throw unavailable();
+      throw err;
+    } finally {
+      if (!handedOff) {
+        try {
+          await file?.close();
+        } finally {
+          this.detailsInFlight.delete(tenantId);
+        }
       }
-      yield ']}';
     }
-    return new StreamableFile(
-      addAbortSignal(
-        AbortSignal.timeout(60_000),
-        Readable.from(json(), { objectMode: false }),
-      ),
-      { type: 'application/json; charset=utf-8' },
-    );
   }
 }

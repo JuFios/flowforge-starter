@@ -228,6 +228,7 @@ SECURITY DEFINER Functions Safely»), усі імена в тілі кваліф
 | `claim_job(worker, lease_ms)` | воркер | одна захоплена задача (рядок задачі змінює сама функція з явним предикатом тенанта, 3.3.5), або ознаки «кандидати зайняті» й «облік перераховано» |
 | `expired_lease_tenants(exclude, limit)` | воркер | тенанти з простроченими lease (reaper обробляє кожного під RLS) |
 | `purge_finished_jobs(days, batch)`, `purge_execution_history(days, batch)` | воркер | кількість видалених рядків, що вже підпадають під термін зберігання |
+| `purge_workflow_versions()` | воркер | кількість видалених версій і ознаку швидкого продовження обходу. Службовий курсор `workflow_version_cleanup` доступний лише системній ролі (S U) |
 | `queue_depth_by_tenant()` | воркер | `(tenantId, queued, running)` тенантів із незавершеними задачами (метрика) |
 
 Тригерні функції обліку (`tenant_usage_on_job`, `…_on_tenant`, `…_on_defaults`) — теж власності

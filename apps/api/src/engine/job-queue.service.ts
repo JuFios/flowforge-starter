@@ -480,6 +480,10 @@ export class JobQueueService {
     return total;
   }
 
+  purgeWorkflowVersions(): Promise<{ deleted: number; more: boolean }> {
+    return this.system.purgeWorkflowVersions();
+  }
+
   async purgeFinished(
     retentionDays: number,
     signal?: AbortSignal,

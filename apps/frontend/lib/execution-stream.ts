@@ -25,7 +25,7 @@ export type TicketResult =
 
 export type SummaryResult =
   | { ok: true; summary: ExecutionSummary }
-  | { ok: false; reason: 'gone' | 'session' | 'retry' };
+  | { ok: false; reason: 'gone' | 'session' | 'retry'; retryAfterMs?: number };
 
 export interface SocketLike {
   onopen: ((ev: unknown) => void) | null;
@@ -42,6 +42,7 @@ export interface StreamDeps {
   openSocket(ticket: string): SocketLike;
   setTimeout(fn: () => void, ms: number): unknown;
   clearTimeout(handle: unknown): void;
+  now(): number;
   random(): number;
 }
 
@@ -55,6 +56,7 @@ export const BACKOFF_MIN_MS = 500;
 export const BACKOFF_MAX_MS = 30_000;
 export const WATCHDOG_MS = 45_000;
 export const POLL_INTERVAL_MS = 5_000;
+const MAX_TIMER_MS = 2_147_483_647;
 export const POLL_AFTER_FAILURES = 3;
 /** Найбільше повідомлення, яке клієнт розбирає (знімок без виходів кроків значно менший). */
 export const MAX_MESSAGE_CHARS = 1_048_576;
@@ -89,6 +91,9 @@ export class ExecutionStream {
   private reconnectTimer: unknown;
   private watchdogTimer: unknown;
   private pollTimer: unknown;
+  private polling = false;
+  private nextSummaryAt = 0;
+  private nextTicketAt = 0;
 
   constructor(
     private readonly executionId: string,
@@ -105,12 +110,18 @@ export class ExecutionStream {
     void this.connect();
   }
 
+  fetchInitialSummary(): void {
+    void this.readSummary();
+  }
+
   /** Мережа повернулася: не чекати решту backoff. */
   nudge(): void {
     if (this.stopped || this.state === 'live' || this.state === 'gone') return;
     this.deps.clearTimeout(this.reconnectTimer);
     this.reconnectTimer = undefined;
-    void this.connect();
+    if (this.deps.now() < this.nextTicketAt)
+      this.armReconnect(this.nextTicketAt);
+    else void this.connect();
   }
 
   stop(): void {
@@ -178,7 +189,7 @@ export class ExecutionStream {
     this.setState(
       this.failures === 0
         ? 'connecting'
-        : this.pollTimer
+        : this.polling
           ? 'polling'
           : 'reconnecting',
     );
@@ -256,44 +267,72 @@ export class ExecutionStream {
     if (this.stopped) return;
     this.failures++;
     if (this.failures >= POLL_AFTER_FAILURES) this.startPolling();
-    this.setState(this.pollTimer ? 'polling' : 'reconnecting');
-    this.deps.clearTimeout(this.reconnectTimer);
-    const delay = Math.max(
-      minDelayMs,
-      backoffMs(this.failures, this.deps.random),
+    this.setState(this.polling ? 'polling' : 'reconnecting');
+    const now = this.deps.now();
+    this.nextTicketAt = now + minDelayMs;
+    this.armReconnect(
+      Math.max(
+        this.nextTicketAt,
+        now + backoffMs(this.failures, this.deps.random),
+      ),
     );
-    this.reconnectTimer = this.deps.setTimeout(() => {
-      this.reconnectTimer = undefined;
-      void this.connect();
-    }, delay);
+  }
+
+  private armReconnect(at: number): void {
+    this.deps.clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = this.deps.setTimeout(
+      () => {
+        this.reconnectTimer = undefined;
+        if (this.deps.now() < at) this.armReconnect(at);
+        else void this.connect();
+      },
+      Math.min(Math.max(0, at - this.deps.now()), MAX_TIMER_MS),
+    );
   }
 
   private startPolling(): void {
-    if (this.pollTimer || this.stopped) return;
-    const tick = async () => {
-      this.pollAbort?.abort();
-      const abort = new AbortController();
-      this.pollAbort = abort;
-      const result = await this.deps
-        .fetchSummary(abort.signal)
-        .catch(() => undefined);
-      if (this.pollAbort !== abort) return;
-      this.pollAbort = undefined;
-      if (result?.ok) this.apply(result.summary, true);
-      else if (result?.reason === 'gone') return this.gone();
-      else if (result?.reason === 'session') {
-        this.stop();
-        return this.events.onSessionExpired();
-      }
-      this.pollTimer = this.deps.setTimeout(
-        () => void tick(),
-        POLL_INTERVAL_MS,
-      );
-    };
-    this.pollTimer = this.deps.setTimeout(() => void tick(), 0);
+    if (this.polling || this.stopped) return;
+    this.polling = true;
+    this.schedulePoll();
+  }
+
+  private schedulePoll(): void {
+    if (!this.polling || this.pollAbort) return;
+    const wait = Math.max(0, this.nextSummaryAt - this.deps.now());
+    this.pollTimer = this.deps.setTimeout(
+      () => {
+        this.pollTimer = undefined;
+        if (this.deps.now() < this.nextSummaryAt) this.schedulePoll();
+        else void this.readSummary();
+      },
+      Math.min(wait, MAX_TIMER_MS),
+    );
+  }
+
+  private async readSummary(): Promise<void> {
+    if (this.pollAbort || this.stopped || this.state === 'gone') return;
+    const abort = new AbortController();
+    this.pollAbort = abort;
+    const result = await this.deps
+      .fetchSummary(abort.signal)
+      .catch(() => undefined);
+    if (this.pollAbort !== abort) return;
+    this.pollAbort = undefined;
+    if (result?.ok) this.apply(result.summary, true);
+    else if (result?.reason === 'gone') return this.gone();
+    else if (result?.reason === 'session') {
+      this.stop();
+      return this.events.onSessionExpired();
+    }
+    const retryAfter = result?.ok === false ? (result.retryAfterMs ?? 0) : 0;
+    if (this.polling || retryAfter > 0)
+      this.nextSummaryAt =
+        this.deps.now() + Math.max(POLL_INTERVAL_MS, retryAfter);
+    this.schedulePoll();
   }
 
   private stopPolling(): void {
+    this.polling = false;
     this.deps.clearTimeout(this.pollTimer);
     this.pollTimer = undefined;
     this.pollAbort?.abort();
