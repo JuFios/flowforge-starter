@@ -103,7 +103,11 @@ export class JobRunnerService implements BeforeApplicationShutdown {
     this.scheduleMaintenance(
       async () => {
         moreVersions = false;
-        const { deleted, more } = await this.queue.purgeWorkflowVersions();
+        // Пауза між проходами — чверть інтервалу очищення: коротша за найменшу паузу циклу
+        // (0,5×), але довша за повторні виклики воркерів, які ще продовжували завершений прохід.
+        const { deleted, more } = await this.queue.purgeWorkflowVersions(
+          Math.floor(cleanupMs / 4),
+        );
         moreVersions = more;
         if (deleted > 0)
           this.logger.log(

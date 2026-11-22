@@ -480,8 +480,10 @@ export class JobQueueService {
     return total;
   }
 
-  purgeWorkflowVersions(): Promise<{ deleted: number; more: boolean }> {
-    return this.system.purgeWorkflowVersions();
+  purgeWorkflowVersions(
+    minGapMs: number,
+  ): Promise<{ deleted: number; more: boolean }> {
+    return this.system.purgeWorkflowVersions(minGapMs);
   }
 
   async purgeFinished(

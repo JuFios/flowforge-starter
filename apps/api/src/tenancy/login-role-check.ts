@@ -60,7 +60,7 @@ export const GROUP_FUNCTIONS: Readonly<Record<string, readonly string[]>> = {
     'purge_delivered_events(integer,integer)',
     'purge_execution_history(integer,integer)',
     'purge_finished_jobs(integer,integer)',
-    'purge_workflow_versions()',
+    'purge_workflow_versions(integer)',
     'queue_depth_by_tenant()',
   ],
 };

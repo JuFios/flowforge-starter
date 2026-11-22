@@ -29,7 +29,7 @@ describe('workflow version cleanup', () => {
   beforeEach(async () => {
     await truncateAll(ds);
     await ds.query(
-      'UPDATE workflow_version_cleanup SET cursor_id=NULL,end_id=NULL',
+      'UPDATE workflow_version_cleanup SET cursor_id=NULL,end_id=NULL,finished_at=NULL',
     );
   });
   afterAll(async () => {
@@ -96,7 +96,7 @@ describe('workflow version cleanup', () => {
     await tx.startTransaction();
     try {
       const rolledBack = (await tx.query(
-        'SELECT * FROM purge_workflow_versions()',
+        'SELECT * FROM purge_workflow_versions(0)',
       )) as Array<{
         deleted: number;
         more: boolean;
@@ -132,6 +132,52 @@ describe('workflow version cleanup', () => {
     ]);
     expect(results.reduce((sum, row) => sum + row.deleted, 0)).toBe(1);
     expect(await ds.getRepository(WorkflowVersion).count()).toBe(0);
+  });
+
+  it('starts no new pass until the gap after the last one, even for a worker that took part in it', async () => {
+    const { tenant } = await createTenant(ds);
+    const orphans = (count: number) =>
+      ds.query(
+        `INSERT INTO workflow_versions ("workflowId","tenantId",version,steps)
+         SELECT gen_random_uuid(),$1,1,'[]'::jsonb FROM generate_series(1,$2)`,
+        [tenant.id, count],
+      );
+    await orphans(505);
+    const peer = await startApp(WorkerModule);
+    try {
+      const other = peer.app.get(SystemDb);
+      const gap = 60_000;
+      // Два воркери ділять один прохід; останню сторінку забирає другий.
+      expect(await system.purgeWorkflowVersions(gap)).toEqual({
+        deleted: 500,
+        more: true,
+      });
+      expect(await other.purgeWorkflowVersions(gap)).toEqual({
+        deleted: 5,
+        more: false,
+      });
+      // Перший воркер востаннє бачив `more: true`; його наступний виклик не починає новий прохід.
+      await orphans(3);
+      expect(await system.purgeWorkflowVersions(gap)).toEqual({
+        deleted: 0,
+        more: false,
+      });
+      expect(await other.purgeWorkflowVersions(gap)).toEqual({
+        deleted: 0,
+        more: false,
+      });
+      expect(await ds.getRepository(WorkflowVersion).count()).toBe(3);
+      // Після паузи (тут — нульової) новий прохід прибирає нові версії без посилань.
+      expect(await system.purgeWorkflowVersions(0)).toEqual({
+        deleted: 3,
+        more: false,
+      });
+      await expect(system.purgeWorkflowVersions(-1)).rejects.toThrow(
+        /minimum gap between cleanup passes/,
+      );
+    } finally {
+      await peer.close();
+    }
   });
 
   it('preserves versions needed by a launch and edit waiting on the workflow row', async () => {

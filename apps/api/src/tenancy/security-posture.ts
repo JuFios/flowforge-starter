@@ -184,7 +184,10 @@ export const POSTURE: {
       owner: SYSTEM_ROLE,
       execute: [WORKER_ROLE],
     },
-    'purge_workflow_versions()': { owner: SYSTEM_ROLE, execute: [WORKER_ROLE] },
+    'purge_workflow_versions(integer)': {
+      owner: SYSTEM_ROLE,
+      execute: [WORKER_ROLE],
+    },
     'queue_depth_by_tenant()': { owner: SYSTEM_ROLE, execute: [WORKER_ROLE] },
     // Тригерні функції обліку: їх викликає лише тригер.
     'tenant_usage_on_job()': { owner: SYSTEM_ROLE, execute: [] },

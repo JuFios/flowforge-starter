@@ -1,24 +1,10 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
 import { SYSTEM_ROLE, WORKER_ROLE } from '../../tenancy/roles';
 
-export class WorkflowVersionCleanup1797200000000 implements MigrationInterface {
-  name = 'WorkflowVersionCleanup1797200000000';
-
-  async up(runner: QueryRunner): Promise<void> {
-    await runner.query(`CREATE INDEX "IDX_executions_workflow_version_tenant"
-      ON public.executions ("workflowVersionId", "tenantId")`);
-    await runner.query(`CREATE TABLE public.workflow_version_cleanup (
-      singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
-      cursor_id uuid, end_id uuid,
-      CHECK (cursor_id IS NULL OR (end_id IS NOT NULL AND cursor_id < end_id))
-    )`);
-    await runner.query(
-      'INSERT INTO public.workflow_version_cleanup DEFAULT VALUES',
-    );
-    await runner.query(
-      `GRANT SELECT, UPDATE ON public.workflow_version_cleanup TO ${SYSTEM_ROLE}`,
-    );
-    await runner.query(`CREATE FUNCTION public.purge_workflow_versions()
+/**
+ * Перша ревізія очищення версій (без паузи між проходами). Наступна міграція відновлює її у `down`.
+ */
+export const PURGE_WORKFLOW_VERSIONS_V1 = `CREATE FUNCTION public.purge_workflow_versions()
       RETURNS TABLE(deleted integer, more boolean)
       LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
       DECLARE
@@ -75,7 +61,26 @@ export class WorkflowVersionCleanup1797200000000 implements MigrationInterface {
             end_id = CASE WHEN more THEN scan_end END
         WHERE singleton;
         RETURN NEXT;
-      END $$`);
+      END $$`;
+
+export class WorkflowVersionCleanup1797200000000 implements MigrationInterface {
+  name = 'WorkflowVersionCleanup1797200000000';
+
+  async up(runner: QueryRunner): Promise<void> {
+    await runner.query(`CREATE INDEX "IDX_executions_workflow_version_tenant"
+      ON public.executions ("workflowVersionId", "tenantId")`);
+    await runner.query(`CREATE TABLE public.workflow_version_cleanup (
+      singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
+      cursor_id uuid, end_id uuid,
+      CHECK (cursor_id IS NULL OR (end_id IS NOT NULL AND cursor_id < end_id))
+    )`);
+    await runner.query(
+      'INSERT INTO public.workflow_version_cleanup DEFAULT VALUES',
+    );
+    await runner.query(
+      `GRANT SELECT, UPDATE ON public.workflow_version_cleanup TO ${SYSTEM_ROLE}`,
+    );
+    await runner.query(PURGE_WORKFLOW_VERSIONS_V1);
     await runner.query(
       `ALTER FUNCTION public.purge_workflow_versions() OWNER TO ${SYSTEM_ROLE}`,
     );

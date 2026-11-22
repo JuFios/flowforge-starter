@@ -82,7 +82,7 @@ const FUNCTION_EXECUTE: Record<string, string[]> = {
     'purge_delivered_events(integer,integer)',
     'purge_execution_history(integer,integer)',
     'purge_finished_jobs(integer,integer)',
-    'purge_workflow_versions()',
+    'purge_workflow_versions(integer)',
     'queue_depth_by_tenant()',
   ],
   // Власник: тіла definer-функцій і тригерні функції обліку (їх викликає лише тригер).
@@ -109,7 +109,7 @@ const FUNCTION_EXECUTE: Record<string, string[]> = {
     'purge_execution_history(integer,integer)',
     'purge_finished_jobs(integer,integer)',
     'purge_rate_limits(integer)',
-    'purge_workflow_versions()',
+    'purge_workflow_versions(integer)',
     'queue_depth_by_tenant()',
     'rate_limit_hit(text,integer,integer)',
     'redeem_realtime_ticket(bytea)',
