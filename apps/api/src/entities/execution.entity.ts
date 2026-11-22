@@ -22,6 +22,11 @@ export type ExecutionStatus = 'pending' | 'running' | 'succeeded' | 'failed';
 })
 @Index('IDX_execution_page_tenant', ['tenantId', 'createdAt', 'id'])
 @Index('IDX_execution_page_status', ['tenantId', 'status', 'createdAt', 'id'])
+// Перевірка посилань під час очищення версій workflow та перевірка їх FK.
+@Index('IDX_executions_workflow_version_tenant', [
+  'workflowVersionId',
+  'tenantId',
+])
 @Index('IDX_execution_page_workflow', [
   'tenantId',
   'workflowId',
