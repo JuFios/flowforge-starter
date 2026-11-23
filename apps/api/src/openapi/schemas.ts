@@ -226,16 +226,21 @@ const attempt = object({
 });
 const page = (name: string) =>
   object({ items: array(ref(name)), nextCursor: nullable(str) });
+const errorFields = {
+  statusCode: integer,
+  error: str,
+  message: { oneOf: [str, array(str)] },
+  correlationId: str,
+};
+/** Тіло відмови `429` маршруту: `error` — лише коди, які маршрут повертає. */
+export const limitError = (codes: readonly string[]): SchemaObject =>
+  object({ ...errorFields, error: choice(codes) }, [
+    'statusCode',
+    'error',
+    'message',
+  ]);
 export const schemas: Record<string, SchemaObject> = {
-  Error: object(
-    {
-      statusCode: integer,
-      error: str,
-      message: { oneOf: [str, array(str)] },
-      correlationId: str,
-    },
-    ['statusCode', 'message'],
-  ),
+  Error: object(errorFields, ['statusCode', 'message']),
   CreateWorkflow: closed({ ...definition, steps: steps('create') }, [
     'name',
     'steps',
