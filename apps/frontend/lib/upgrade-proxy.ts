@@ -96,7 +96,9 @@ export function createUpgradeProxy(
       if (!open) return;
       // Лише поки з'єднання не встановлено, тикет точно не дійшов до API (як у lib/upstream.ts).
       if (!sent) return proxyUpgrade(req, socket, head, attempt + 1, first);
-      // Інакше інший інстанс отримав би вже погашений тикет: браузер візьме новий.
+      // Інакше інший інстанс отримав би вже погашений тикет: браузер візьме новий. Наступний
+      // upgrade починається з іншого інстансу, щоб завислий API не перехоплював кожен тикет.
+      preferred = (attempt + first + 1) % apiUrls.length;
       if (reason === 'timeout') reject(socket, 504, 'Gateway Timeout');
       else reject(socket, 502, 'Bad Gateway');
     };

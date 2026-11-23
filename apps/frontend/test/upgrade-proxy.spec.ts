@@ -145,6 +145,20 @@ test('does not resend a ticket to another instance after the first one received 
   expect(other.tickets).toEqual([]);
 });
 
+test('starts the next upgrade at another instance after one hung on a ticket', async () => {
+  const slow = await silentApi();
+  const other = await upgradingApi();
+  const proxy = await proxyTo([slow.url, other.url]);
+  expect(await (await upgrade(proxy)).status).toBe(
+    'HTTP/1.1 504 Gateway Timeout',
+  );
+  expect(await (await upgrade(proxy)).status).toBe(
+    'HTTP/1.1 101 Switching Protocols',
+  );
+  expect(slow.requests).toHaveLength(1);
+  expect(other.tickets).toEqual([TICKET]);
+});
+
 test('does not resend a ticket after the connection breaks mid-request', async () => {
   const broken = await resettingApi();
   const other = await upgradingApi();
