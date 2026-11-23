@@ -6,6 +6,7 @@ import { loadEnvConfig } from '@next/env';
 import next from 'next';
 import { clientIp, parseTrustProxy, peerIsTrustedProxy } from './lib/client-ip';
 import { frontendConfig } from './lib/server-config';
+import { sharedInstancePool } from './lib/instance-pool';
 import {
   createUpgradeProxy,
   expectedOrigin,
@@ -82,6 +83,8 @@ async function main(): Promise<void> {
     publicOrigin: config.publicOrigin,
     connectTimeoutMs: WS_CONNECT_TIMEOUT_MS,
     responseTimeoutMs: WS_RESPONSE_TIMEOUT_MS,
+    // Той самий пул, що й у HTTP-маршрутів: інстанс, що завис для одних, обходять і інші.
+    pool: sharedInstancePool(config.apiUrls),
   });
   const trust = parseTrustProxy(process.env.FRONTEND_TRUST_PROXY);
   // Next реєструє власний upgrade при першому HTTP-запиті. Окремий об’єкт

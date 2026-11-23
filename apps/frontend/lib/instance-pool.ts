@@ -12,10 +12,12 @@
  *
  * Свідчення впорядковані за початком спроби (`begin`), а не за моментом результату. Спроби, що
  * почалися до позначки, належать до того самого інциденту: їхні пізні таймаути не подовжують
- * cooldown, а пізній успіх не повертає першість щойно завислому інстансу.
+ * cooldown, а пізній успіх не повертає першість щойно завислому інстансу. Так само відмова спроби,
+ * почата до новішої відповіді інстансу, його вже не позначає: він відповідав після неї.
  *
- * Стан живе в пам'яті процесу. Це лише порядок перебору, а не дані: після рестарту фронтенду
- * перебір знову починається з першої адреси `API_URLS`.
+ * Стан живе в пам'яті процесу, один пул на процес для HTTP і WebSocket (`sharedInstancePool`).
+ * Це лише порядок перебору, а не дані: після рестарту фронтенду перебір знову починається з першої
+ * адреси `API_URLS`.
  */
 export const BASE_COOLDOWN_MS = 30_000;
 export const MAX_COOLDOWN_MS = 300_000;
@@ -33,6 +35,8 @@ export class InstancePool {
   private sequence = 0;
   /** Номер останньої спроби, початої до позначки інстансу (0 — не позначався). */
   private readonly markedAt: number[];
+  /** Номер найновішої спроби, на яку інстанс відповів (0 — ще не відповідав). */
+  private readonly answeredAt: number[];
   /** Поспіль відмов без успіху: визначає тривалість cooldown. */
   private readonly failures: number[];
   /** До якого моменту інстанс підозрілий (0 — справний). */
@@ -51,6 +55,7 @@ export class InstancePool {
     this.maxCooldownMs = options.maxCooldownMs ?? MAX_COOLDOWN_MS;
     this.now = options.now ?? Date.now;
     this.markedAt = new Array<number>(size).fill(0);
+    this.answeredAt = new Array<number>(size).fill(0);
     this.failures = new Array<number>(size).fill(0);
     this.suspectUntil = new Array<number>(size).fill(0);
   }
@@ -76,14 +81,19 @@ export class InstancePool {
   /** Інстанс відповів. Спроба, почата до останньої позначки, підозру не знімає. */
   succeeded(index: number, attempt: number): void {
     if (attempt <= this.markedAt[index]) return;
+    this.answeredAt[index] = Math.max(this.answeredAt[index], attempt);
     this.preferred = index;
     this.failures[index] = 0;
     this.suspectUntil[index] = 0;
   }
 
-  /** Невизначена відмова. Спроба, почата до останньої позначки, — той самий інцидент. */
+  /**
+   * Невизначена відмова. Спроба, почата до останньої позначки, — той самий інцидент; почата до
+   * новішої відповіді — застаріле свідчення.
+   */
   failed(index: number, attempt: number): void {
-    if (attempt <= this.markedAt[index]) return;
+    if (attempt <= this.markedAt[index] || attempt < this.answeredAt[index])
+      return;
     this.markedAt[index] = this.sequence;
     this.failures[index] = Math.min(this.failures[index] + 1, 32);
     this.suspectUntil[index] =
@@ -97,4 +107,25 @@ export class InstancePool {
       if (next !== undefined) this.preferred = next;
     }
   }
+}
+
+const POOLS = Symbol.for('flowforge.frontend.instancePools');
+type PoolRegistry = { [POOLS]?: Map<string, InstancePool> };
+
+/**
+ * Один пул на процес для того самого `API_URLS`: HTTP-маршрути Next і WebSocket-проксі власного
+ * сервера живуть в одному процесі, але в різних графах модулів, тож спільний стан — через
+ * `globalThis`. Тоді завислий інстанс, виявлений одним проксі, обходить і інший. Ключ — список
+ * origin-ів: різних списків у процесі один-два, тож реєстр обмежений.
+ */
+export function sharedInstancePool(apiUrls: readonly URL[]): InstancePool {
+  const registry = globalThis as PoolRegistry;
+  const pools = (registry[POOLS] ??= new Map<string, InstancePool>());
+  const key = apiUrls.map((url) => url.origin).join(',');
+  let pool = pools.get(key);
+  if (!pool) {
+    pool = new InstancePool(apiUrls.length);
+    pools.set(key, pool);
+  }
+  return pool;
 }

@@ -90,6 +90,22 @@ export async function healthyApi() {
   return { url: await listen(server), paths };
 }
 
+/** Інстанс, що надсилає заголовки й початок тіла, а далі мовчить. */
+export async function stallingBodyApi() {
+  const paths: string[] = [];
+  const server = createHttpServer((req, res) => {
+    paths.push(req.url ?? '');
+    track(req.socket);
+    req.resume();
+    res.writeHead(200, {
+      'content-type': 'application/json',
+      'content-length': '64',
+    });
+    res.write('{"items":[');
+  });
+  return { url: await listen(server), paths };
+}
+
 /** Адреса, на якій ніхто не слухає (з'єднання відхиляється). */
 export async function closedPort(): Promise<URL> {
   const server = createTcpServer();

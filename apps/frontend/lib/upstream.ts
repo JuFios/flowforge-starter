@@ -1,4 +1,4 @@
-import { InstancePool } from './instance-pool';
+import { InstancePool, sharedInstancePool } from './instance-pool';
 import { frontendConfig } from './server-config';
 
 /**
@@ -57,6 +57,7 @@ export function createUpstream(
       : timeout;
     for (const index of pool.order()) {
       const attempt = pool.begin();
+      const started = Date.now();
       try {
         const response = await fetch(new URL(request.path, apiUrls[index]), {
           method: request.method,
@@ -67,10 +68,15 @@ export function createUpstream(
           cache: 'no-store',
         });
         pool.succeeded(index, attempt);
-        return response;
+        return watchBody(response, () => {
+          if (!request.signal?.aborted) pool.failed(index, attempt);
+        });
       } catch (err) {
         if (timeout.aborted) {
-          pool.failed(index, attempt);
+          // Бюджет спільний для всіх спроб. Інстанс, якому дісталося менше половини (решту з'їв
+          // таймаут з'єднання з попереднім), за таймаут не відповідає.
+          if (Date.now() - started >= apiTimeoutMs / 2)
+            pool.failed(index, attempt);
           throw new UpstreamUnavailableError('timeout');
         }
         // Браузер пішов сам: це не свідчення про стан інстансу.
@@ -84,9 +90,43 @@ export function createUpstream(
   };
 }
 
+/**
+ * Тіло читається вже після `succeeded`: обрив чи таймаут посеред тіла (заголовки прийшли, далі
+ * тиша) теж позначає інстанс. Скасування з боку браузера — ні.
+ */
+function watchBody(response: Response, onFailure: () => void): Response {
+  if (!response.body) return response;
+  const reader = response.body.getReader();
+  const body = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      let part: ReadableStreamReadResult<Uint8Array>;
+      try {
+        part = await reader.read();
+      } catch (err) {
+        onFailure();
+        controller.error(err);
+        return;
+      }
+      if (part.done) controller.close();
+      else controller.enqueue(part.value);
+    },
+    cancel(reason) {
+      return reader.cancel(reason);
+    },
+  });
+  return new Response(body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  });
+}
+
 let shared: CallApi | undefined;
 
 export function callApi(request: UpstreamRequest): Promise<Response> {
-  shared ??= createUpstream(frontendConfig());
+  if (!shared) {
+    const config = frontendConfig();
+    shared = createUpstream(config, sharedInstancePool(config.apiUrls));
+  }
   return shared(request);
 }

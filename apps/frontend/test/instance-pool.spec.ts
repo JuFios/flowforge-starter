@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { InstancePool } from '../lib/instance-pool';
+import { InstancePool, sharedInstancePool } from '../lib/instance-pool';
 
 /** Порядок перебору інстансів API проксі фронтенду з керованим годинником. */
 function pool(size: number) {
@@ -77,6 +77,21 @@ test('ignores a late answer to a request sent before the instance hung', () => {
   expect(instances.order()).toEqual([1, 0]);
   instances.succeeded(0, instances.begin());
   expect(instances.order()).toEqual([0, 1]);
+});
+
+test('ignores a late failure of a request sent before a newer answer', () => {
+  const { instances } = pool(2);
+  const early = instances.begin();
+  instances.succeeded(0, instances.begin());
+  instances.failed(0, early);
+  expect(instances.order()).toEqual([0, 1]);
+});
+
+test('shares one pool per API list within the process', () => {
+  const urls = [new URL('http://api:3000'), new URL('http://api-2:3000')];
+  const pool = sharedInstancePool(urls);
+  expect(sharedInstancePool(urls.map((u) => new URL(u.href)))).toBe(pool);
+  expect(sharedInstancePool([urls[0]])).not.toBe(pool);
 });
 
 test('rejects an empty instance list', () => {
