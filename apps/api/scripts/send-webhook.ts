@@ -88,13 +88,20 @@ async function main(): Promise<void> {
   }
   const result = JSON.parse(Buffer.concat(chunks, size).toString('utf8')) as {
     executionId?: unknown;
+    executionPurged?: unknown;
   };
   if (
     typeof result.executionId !== 'string' ||
-    !/^[\da-f-]{36}$/i.test(result.executionId)
+    !/^[\da-f-]{36}$/i.test(result.executionId) ||
+    typeof result.executionPurged !== 'boolean'
   )
     throw new Error('invalid execution ID');
-  console.log(response.status, result.executionId);
+  // Повтор після очищення історії: доставку прийнято, але виконання за цим ID вже немає.
+  console.log(
+    response.status,
+    result.executionId,
+    ...(result.executionPurged ? ['(execution history purged)'] : []),
+  );
 }
 void main().catch((error: unknown) => {
   console.error(error instanceof Error ? error.message : 'delivery failed');
