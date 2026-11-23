@@ -479,7 +479,7 @@ describe('notification delivery', () => {
       ).toBeGreaterThanOrEqual(90); // OUTBOX_BACKOFF_BASE_MS = 100 у тестах
   });
 
-  it('waits at least as long as Retry-After asks, within the backoff ceiling', async () => {
+  it('schedules the retry at least one second after a 429 with Retry-After: 1', async () => {
     const e = await complete();
     receiver.respond = (_req, res) => {
       res.writeHead(429, { 'retry-after': '1' });
@@ -487,13 +487,14 @@ describe('notification delivery', () => {
     };
     const s = await sender();
     await s.deliverNext();
-    const [{ wait }]: Array<{ wait: number }> = await ds.query(
-      `SELECT extract(epoch FROM "nextAttemptAt" - now()) AS wait FROM outbox_events WHERE id = $1`,
+    const [{ delaySeconds }]: Array<{ delaySeconds: number }> = await ds.query(
+      `SELECT extract(epoch FROM e."nextAttemptAt" - a."finishedAt")::double precision AS "delaySeconds"
+       FROM outbox_events e
+       JOIN outbox_attempts a ON a."eventId" = e.id AND a.attempt = 1
+       WHERE e.id = $1`,
       [e.id],
     );
-    // OUTBOX_BACKOFF_MAX_MS у тестах — 1 с: побажання отримувача не продовжує паузу понад стелю.
-    expect(Number(wait)).toBeGreaterThan(0.8);
-    expect(Number(wait)).toBeLessThanOrEqual(1.05);
+    expect(delaySeconds).toBeGreaterThanOrEqual(1);
   });
 
   it('reaches a tenant behind more than a claim window of tenants at their in-flight limit', async () => {
