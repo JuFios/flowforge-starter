@@ -10,6 +10,7 @@ import { EntityManager, QueryFailedError } from 'typeorm';
 import {
   cursorAtSql,
   decodeKeysetCursor,
+  WORKFLOWS_CURSOR_SCOPE,
   Page,
   toPage,
 } from '../common/keyset-cursor';
@@ -99,7 +100,9 @@ export class WorkflowsService {
     query: ListWorkflowsQuery,
   ): Promise<Page<WorkflowSummary>> {
     const limit = query.limit ?? DEFAULT_WORKFLOW_PAGE;
-    const after = query.cursor ? decodeKeysetCursor(query.cursor) : null;
+    const after = query.cursor
+      ? decodeKeysetCursor(query.cursor, WORKFLOWS_CURSOR_SCOPE)
+      : null;
     const params: unknown[] = [tenantId, limit + 1];
     let where = '"tenantId" = $1';
     if (after) {
@@ -115,7 +118,7 @@ export class WorkflowsService {
           params,
         ),
       );
-    return toPage(rows, limit);
+    return toPage(rows, limit, WORKFLOWS_CURSOR_SCOPE);
   }
 
   get(tenantId: string, id: string): Promise<Workflow> {
