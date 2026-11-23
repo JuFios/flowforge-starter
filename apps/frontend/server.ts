@@ -1,16 +1,16 @@
-import {
-  createServer,
-  IncomingMessage,
-  request as httpRequest,
-} from 'node:http';
-import { request as httpsRequest } from 'node:https';
+import { createServer, IncomingMessage } from 'node:http';
 import { posix } from 'node:path';
 import type { Duplex } from 'node:stream';
 import { parseArgs } from 'node:util';
 import { loadEnvConfig } from '@next/env';
 import next from 'next';
 import { clientIp, parseTrustProxy, peerIsTrustedProxy } from './lib/client-ip';
-import { frontendConfig, type FrontendConfig } from './lib/server-config';
+import { frontendConfig } from './lib/server-config';
+import {
+  createUpgradeProxy,
+  expectedOrigin,
+  reject,
+} from './lib/upgrade-proxy';
 
 /**
  * Власний HTTP-сервер фронтенду (README, «Межа довіри браузера»). Він потрібен з двох причин:
@@ -23,9 +23,12 @@ import { frontendConfig, type FrontendConfig } from './lib/server-config';
  */
 /** Скільки чекати з'єднання з API для WebSocket, перш ніж спробувати наступний інстанс. */
 const WS_CONNECT_TIMEOUT_MS = 5_000;
+/**
+ * Скільки чекати відповіді API на upgrade після надсилання тикета. Довше за 8 с, які API дає
+ * на перевірку тикета, тож браузер отримує власну відповідь API, а не таймаут проксі.
+ */
+const WS_RESPONSE_TIMEOUT_MS = 10_000;
 const SHUTDOWN_TIMEOUT_MS = 5_000;
-/** Найдовший шлях upgrade: `/realtime?ticket=` + токен. */
-const MAX_UPGRADE_URL = 256;
 
 type TrustProxy = ReturnType<typeof parseTrustProxy>;
 
@@ -59,139 +62,6 @@ function normalizeForwarded(req: IncomingMessage, trust: TrustProxy): void {
   req.headers['x-forwarded-proto'] = proto;
 }
 
-function expectedOrigin(
-  req: IncomingMessage,
-  publicOrigin?: string,
-): string | undefined {
-  if (publicOrigin) return publicOrigin;
-  const host = req.headers.host;
-  return host
-    ? `${req.headers['x-forwarded-proto'] as string}://${host}`
-    : undefined;
-}
-
-function reject(socket: Duplex, status: number, reason: string): void {
-  socket.end(
-    `HTTP/1.1 ${status} ${reason}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`,
-  );
-}
-
-/**
- * Upgrade `/realtime` → API. Перевіряється лише Origin (чужа сторінка не відкриє сокет від імені
- * браузера) і форма шляху; тикет погашає API. Інстанс API, що не відповідає, пропускається.
- */
-function proxyUpgrade(
-  req: IncomingMessage,
-  socket: Duplex,
-  head: Buffer,
-  config: FrontendConfig,
-  attempt = 0,
-  first = preferred,
-): void {
-  const { apiUrls, publicOrigin } = config;
-  const url = req.url ?? '';
-  if (
-    url.length > MAX_UPGRADE_URL ||
-    !/^\/realtime\?ticket=[A-Za-z0-9_-]{1,128}$/.test(url)
-  )
-    return reject(socket, 404, 'Not Found');
-  const origin = expectedOrigin(req, publicOrigin);
-  if (!origin || req.headers.origin !== origin)
-    return reject(socket, 403, 'Forbidden');
-  if (attempt >= apiUrls.length) return reject(socket, 502, 'Bad Gateway');
-  const target = apiUrls[(attempt + first) % apiUrls.length];
-  const headers: Record<string, string> = {
-    connection: 'Upgrade',
-    upgrade: 'websocket',
-    'x-forwarded-for': req.headers['x-forwarded-for'] as string,
-  };
-  for (const name of [
-    'sec-websocket-key',
-    'sec-websocket-version',
-    'sec-websocket-extensions',
-    'origin',
-  ])
-    if (typeof req.headers[name] === 'string')
-      headers[name] = req.headers[name] as string;
-  const send = target.protocol === 'https:' ? httpsRequest : httpRequest;
-  const upstream = send(new URL(url, target), {
-    method: 'GET',
-    headers,
-  });
-  let connected = false;
-  const cleanup = () => {
-    clearTimeout(deadline);
-    socket.off('error', abort);
-    socket.off('close', abort);
-  };
-  const abort = () => {
-    connected = true;
-    cleanup();
-    upstream.destroy();
-  };
-  const fail = () => {
-    const retry = !connected && !socket.destroyed;
-    abort();
-    if (retry) proxyUpgrade(req, socket, head, config, attempt + 1, first);
-  };
-  const deadline = setTimeout(fail, WS_CONNECT_TIMEOUT_MS).unref();
-  upstream.on('error', fail);
-  socket.once('error', abort);
-  socket.once('close', abort);
-  upstream.on('response', (res) => {
-    // API відмовив до upgrade (тикет недійсний, ліміт): статус і Retry-After — браузеру.
-    connected = true;
-    const retryAfter = res.headers['retry-after'];
-    socket.end(
-      `HTTP/1.1 ${res.statusCode ?? 502} ${res.statusMessage ?? ''}\r\n` +
-        (typeof retryAfter === 'string'
-          ? `Retry-After: ${retryAfter}\r\n`
-          : '') +
-        'Connection: close\r\nContent-Length: 0\r\n\r\n',
-    );
-    res.resume();
-    res.once('end', cleanup);
-    res.once('close', cleanup);
-  });
-  upstream.on('upgrade', (res, upstreamSocket, upstreamHead) => {
-    connected = true;
-    cleanup();
-    if (socket.destroyed) {
-      upstreamSocket.destroy();
-      return;
-    }
-    upstreamSocket.setTimeout(0);
-    preferred = (attempt + first) % apiUrls.length;
-    const lines = [`HTTP/1.1 101 Switching Protocols`];
-    for (const name of [
-      'upgrade',
-      'connection',
-      'sec-websocket-accept',
-      'sec-websocket-extensions',
-      'sec-websocket-protocol',
-    ]) {
-      const value = res.headers[name];
-      if (typeof value === 'string') lines.push(`${name}: ${value}`);
-    }
-    socket.write(lines.join('\r\n') + '\r\n\r\n');
-    if (upstreamHead.length) socket.write(upstreamHead);
-    if (head.length) upstreamSocket.write(head);
-    // pipe тримає backpressure в обидва боки; закриття одного боку закриває інший.
-    upstreamSocket.pipe(socket).pipe(upstreamSocket);
-    const close = () => {
-      upstreamSocket.destroy();
-      socket.destroy();
-    };
-    upstreamSocket.on('error', close);
-    upstreamSocket.on('close', close);
-    socket.on('error', close);
-    socket.on('close', close);
-  });
-  upstream.end();
-}
-
-let preferred = 0;
-
 async function main(): Promise<void> {
   const { values } = parseArgs({
     options: {
@@ -207,6 +77,12 @@ async function main(): Promise<void> {
     throw new Error('PORT must be an integer from 1 to 65535');
   const hostname = process.env.HOSTNAME ?? '0.0.0.0';
   const config = frontendConfig();
+  const proxyUpgrade = createUpgradeProxy({
+    apiUrls: config.apiUrls,
+    publicOrigin: config.publicOrigin,
+    connectTimeoutMs: WS_CONNECT_TIMEOUT_MS,
+    responseTimeoutMs: WS_RESPONSE_TIMEOUT_MS,
+  });
   const trust = parseTrustProxy(process.env.FRONTEND_TRUST_PROXY);
   // Next реєструє власний upgrade при першому HTTP-запиті. Окремий об’єкт
   // сервера приймає лише HMR; сокетом /realtime володіє один обробник.
@@ -271,7 +147,7 @@ async function main(): Promise<void> {
     socket.once('close', () => upgraded.delete(socket));
     normalizeForwarded(req, trust);
     if ((req.url ?? '').startsWith('/realtime'))
-      return proxyUpgrade(req, socket, head, config);
+      return proxyUpgrade(req, socket, head);
     // У режимі розробки — HMR Next; у production інших upgrade немає.
     if (
       dev &&
