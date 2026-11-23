@@ -171,7 +171,7 @@ fencing-токеном (`lockToken`) для володіння задачею. A
 кроки, задачі, workflow, версії), а чуже — 404, як неіснуюче. (2) Postgres: RLS з `FORCE` на кожній
 тенантній таблиці під ролями без BYPASSRLS. Шари доводяться окремо: `tenant-predicates.int-spec.ts`
 запускає сервіси на з'єднанні власника, що обходить RLS (прибраний предикат — червоний тест, хоча
-HTTP-тести зелені завдяки RLS, див. проблему 34), а `rls.int-spec.ts` — прямий SQL під runtime-ролями
+HTTP-тести зелені завдяки RLS), а `rls.int-spec.ts` — прямий SQL під runtime-ролями
 в обхід сервісів. Третій рубіж — композитні FK: рядок задачі чи кроку може посилатися лише на
 виконання свого тенанта, виконання — лише на знімок свого тенанта (FK-перевірки Postgres не залежать
 від RLS, тож це тримається навіть для власника схеми).
@@ -210,10 +210,9 @@ backfill під `FORCE ROW LEVEL SECURITY` (під яким звичайний �
 
 **Крос-тенантні кроки.** Варіанти: BYPASSRLS для ролі воркера (вимикає захист для всього воркера,
 включно з виконанням кроків тенантів); виняток у політиці для службової ролі (умова в кожній політиці,
-легко помилитися); вузькі SECURITY DEFINER-функції. Обрано функції: вони лише знаходять, де є робота,
-і віддають ідентифікатори або кількості, а самі рядки застосунок читає й змінює вже під RLS у
-контексті конкретного тенанта. Два свідомі винятки — операції, крос-тенантні за природою, що
-змінюють рядки самі й лише з явним предикатом: очищення (`purge_*`) і захоплення (`claim_job`, 3.3.5). Власник — `flowforge_system`; `SET search_path = pg_catalog, public,
+легко помилитися); вузькі SECURITY DEFINER-функції. Обрано функції з фіксованими операціями. Наприклад,
+планувальник отримує ідентифікатори тенантів із належними розкладами, а їхні workflow читає під RLS.
+Захоплення задач і подій, погашення тикета та порційне очищення змінюють рядки всередині функції. Власник — `flowforge_system`; `SET search_path = pg_catalog, public,
 pg_temp` (`pg_temp` явно останнім — інакше він шукається першим, документація Postgres «Writing
 SECURITY DEFINER Functions Safely»), усі імена в тілі кваліфіковані; `EXECUTE` — лише потрібній ролі,
 `PUBLIC` — нічого; аргументи обмежені. Підміну імен тимчасовою таблицею перевіряє `rls.int-spec.ts`.
@@ -222,8 +221,10 @@ SECURITY DEFINER Functions Safely»), усі імена в тілі кваліф
 |---|---|---|
 | `auth_tenant(api_key_hash)` | API | id тенанта за sha256 ключа (без секретів) |
 | `webhook_tenant(workflow_id)` | API | тенант workflow — адресата webhook-а, увімкненого чи ні (підпис перевіряється в контексті тенанта; вимкнений приймає лише повтор прийнятої доставки) |
-| `scheduled_workflows(after, limit)` | API | ідентифікатори запланованих workflow для сумісності з попередньою версією |
-| `scheduled_tenants(after, limit)` | API | тенанти з увімкненими розкладами. Планувальник читає сторінки їхніх workflow під RLS |
+| `due_schedule_tenants(after, limit)` | API | тенанти, у яких настав час спрацювання ввімкненого розкладу |
+| `auth_session(hash)` | API | ідентифікатори чинної сесії й тенанта та час завершення сесії |
+| `redeem_realtime_ticket(hash)` | API | погашає одноразовий тикет і повертає контекст підписки |
+| `purge_browser_credentials(batch)` | API | кількість видалених прострочених сесій і тикетів |
 | `lock_tenant_usage()` | API | блокує рядок черги тенанта з контексту до кінця транзакції, потім читає окремий лічильник outbox і повертає числа для допуску роботи |
 | `tenant_limits()` | API | ефективні ліміти тенанта з контексту (перевизначення або значення за замовчуванням) |
 | `rate_limit_hit(key, window_ms, cost)`, `purge_rate_limits(batch)` | API | лічильник фіксованого вікна ліміту частоти (годинник БД) і кількість видалених відер |
@@ -232,22 +233,40 @@ SECURITY DEFINER Functions Safely»), усі імена в тілі кваліф
 | `purge_finished_jobs(days, batch)`, `purge_execution_history(days, batch)` | воркер | кількість видалених рядків, що вже підпадають під термін зберігання |
 | `purge_workflow_versions(integer)` | воркер | кількість видалених версій і ознаку швидкого продовження обходу; аргумент — найменша пауза між обходами, мс. Службовий курсор і момент завершення обходу `workflow_version_cleanup` доступні лише системній ролі (S U) |
 | `queue_depth_by_tenant()` | воркер | `(tenantId, queued, running)` тенантів із незавершеними задачами (метрика) |
+| `claim_outbox_event(sender, lease_ms, in_flight)` | воркер | захоплена подія з тенантом, токеном оренди й номером спроби або результат перерахунку |
+| `finish_outbox_event(event_id, token, delay_seconds, result, http_status)` | воркер | чи вдалося за чинним токеном завершити доставку або призначити повтор |
+| `purge_delivered_events(days, batch)` | воркер | кількість видалених доставлених і скасованих подій за строком зберігання |
+| `outbox_backlog()` | воркер | кількість подій у станах `pending` і `sending` та час створення найстарішої з них за тенантом |
 
-Тригерні функції обліку (`tenant_usage_on_job`, `…_on_tenant`, `…_on_defaults`) — теж власності
-`flowforge_system` і без `EXECUTE` для будь-кого: їх викликає лише тригер.
+API, воркер і системна роль також можуть викликати `app_current_tenant()`, яку використовує політика RLS.
+Тригерні функції викликаються тригерами. API й воркер не мають гранту `EXECUTE` на них.
 
-**Операції → права** (таблиці; рядки звужує RLS). Перевіряється в обидва боки: `db-acl.int-spec.ts`
-звіряє каталог прав із цією таблицею точно (зайве право — такий самий провал, як відсутнє), а
-`role-operations.int-spec.ts` виконує кожну операцію справжніми ролями на непорожніх даних.
+**Операції → права.** Ролі в таблиці — `flowforge_api_role`, `flowforge_worker_role` та `flowforge_system`.
+S, I, U, D означають `SELECT`, `INSERT`, `UPDATE`, `DELETE`. Політика порівнює вказану колонку з
+`app_current_tenant()` для читання й запису. `db-acl.int-spec.ts` звіряє права з каталогом PostgreSQL,
+а `role-operations.int-spec.ts` перевіряє операції під runtime-ролями.
 
-| Роль | Права | Операції |
-|---|---|---|
-| `flowforge_api_role` | `webhook_deliveries` S I; `tenants` S I U; `workflows` S I U D; `workflow_versions` S I; `executions` S I U; `step_runs` S; `jobs` S I U | автентифікація, створення тенанта, ліміти тенанта (адмін-API), CRUD workflow, запуск (run/webhook/cron), `/retry` (`FOR UPDATE` потребує U), читання виконань, перевірка підпису webhook-а |
-| `flowforge_worker_role` | `workflow_versions` S; `executions` S U; `step_runs` S I U; `jobs` S U | heartbeat, `assertLease` (`FOR UPDATE`), чекпоінти, пауза/пробудження, завершення, провал, повернення в чергу, reaper (захоплення — функцією `claim_job`) |
-| `flowforge_system` | S I U D на тенантні таблиці, `tenant_usage`, `tenant_outbox_usage`, `limit_defaults`, `rate_limit_buckets` | тіла SECURITY DEFINER-функцій і тригерів обліку |
-
-`tenant_usage`, `tenant_outbox_usage`, `limit_defaults` і `rate_limit_buckets` runtime-ролям недоступні зовсім:
-підробити лічильники чи ліміти неможливо, змінюють їх лише тригери й функції.
+| Таблиця | Колонка політики RLS | API | Воркер | Системна роль |
+|---|---|---|---|---|
+| `workflow_version_cleanup` | — | — | — | S U |
+| `workflow_usage` | `tenantId` | — | — | S I U |
+| `browser_sessions` | `tenantId` | S I D | — | S U D |
+| `realtime_tickets` | `tenantId` | S I D | — | S U D |
+| `tenants` | `id` | S I U | — | S I U D |
+| `webhook_deliveries` | `tenantId` | S I | — | — |
+| `workflows` | `tenantId` | S I U D | — | S I U D |
+| `workflow_versions` | `tenantId` | S I | S | S I U D |
+| `executions` | `tenantId` | S I U | S U | S I U D |
+| `step_runs` | `tenantId` | S | S I U | S I U D |
+| `jobs` | `tenantId` | S I U | S U | S I U D |
+| `notification_settings` | `tenantId` | S I U D | S | S I U D |
+| `outbox_events` | `tenantId` | S U | S U | S I U D |
+| `outbox_attempts` | `tenantId` | S | S U | S I U D |
+| `tenant_usage` | `tenantId` | — | — | S I U D |
+| `tenant_outbox_usage` | `tenantId` | — | — | S I U D |
+| `limit_defaults` | — | — | — | S I U D |
+| `rate_limit_buckets` | — | — | — | S I U D |
+| `migrations` | — | — | — | — |
 
 `TRUNCATE` (обходить RLS), `REFERENCES`, `TRIGGER`, DDL, таблиця `migrations` — нікому з runtime-ролей;
 `CREATE` у схемі `public` відкликано в `PUBLIC`.
@@ -341,7 +360,7 @@ compose), надання нічого в кластері не змінює, а 
 |---|---|
 | I-1 Службові ролі | Точні атрибути (`NOLOGIN`, без SUPERUSER/CREATEDB/CREATEROLE/REPLICATION, BYPASSRLS лише в `flowforge_system`), жодних налаштувань ролі, **жодної сесії** під службовою роллю в усьому кластері, жодних сторонніх членів; службові ролі не володіють і не мають прав ні на що в цій БД поза таблицями й функціями `public` (view чи definer-функція системної ролі в іншій схемі читали б усіх тенантів) |
 | I-2 Точні права | Для кожної функції, таблиці, view і послідовності `public`: власник і повний набір (одержувач, право), крім прав самого власника, точно за переліком. Без грантів із `GRANT OPTION`, без прав на окремі стовпці, без `CREATE` у `public` для будь-кого, крім власника. Невідомий об'єкт допустимий, лише якщо він належить власнику міграцій і нікому нічого не дає |
-| I-3 Точні політики | На кожній тенантній таблиці (`tenants`, `workflows`, `workflow_versions`, `executions`, `step_runs`, `jobs`, `tenant_usage`) — RLS + FORCE і рівно одна політика `tenant_isolation` (PERMISSIVE, усі команди, `PUBLIC`, точний вираз). Інші політики будь-де в `public` — порушення: дозвільні політики Postgres об'єднує через `OR`, тож одна чужа відкрила б рядки всім |
+| I-3 Точні політики | На кожній таблиці з указаною колонкою політики в матриці «Операції → права» — RLS + FORCE і рівно одна політика `tenant_isolation` (PERMISSIVE, усі команди, `PUBLIC`, точний вираз). Інші політики будь-де в `public` — порушення: дозвільні політики Postgres об'єднує через `OR`, тож одна чужа відкрила б рядки всім |
 
 **Де перевіряється.** (1) `npm run db:migrate` (`src/database/migrate.ts`, крок `migrate` у compose)
 виконує всі невиконані міграції й звірку в **одній транзакції** під advisory-локом (на лок іншого запуску чекає не довше 10 хв, далі відмовляє з поясненням, а не висить): якщо
