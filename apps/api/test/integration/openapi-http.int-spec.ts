@@ -1,4 +1,8 @@
-import type { OpenAPIObject } from '@nestjs/swagger/dist/interfaces/open-api-spec.interface';
+import type {
+  OpenAPIObject,
+  OperationObject,
+  SchemaObject,
+} from '@nestjs/swagger/dist/interfaces/open-api-spec.interface';
 import { randomUUID } from 'node:crypto';
 import { DataSource } from 'typeorm';
 import { AppModule, WorkerModule } from '../../src/app.module';
@@ -45,7 +49,7 @@ describe('OpenAPI matches the actual HTTP responses', () => {
     () => app.baseUrl,
     () => doc,
   );
-  const { observed, send, checkAgainstDocument } = contract;
+  const { observed, send, checkAgainstDocument, violations } = contract;
 
   it('declares every status, body and header the routes actually return', async () => {
     const admin = { 'x-admin-token': TEST_ADMIN_TOKEN };
@@ -546,5 +550,78 @@ describe('OpenAPI matches the actual HTTP responses', () => {
     );
     const exercised = new Set(observed.map((o) => o.operation));
     expect(documented.filter((op) => !exercised.has(op))).toEqual([]);
+  });
+  it('accepts every documented request body example on its operation', async () => {
+    /** Приклад тіла операції з документа й відхилення від її схеми. */
+    function example(operation: string): Record<string, unknown> {
+      const [method, path] = operation.split(' ');
+      const op = (doc.paths[path] as Record<string, OperationObject>)[method];
+      const media = (
+        op.requestBody as {
+          content: Record<string, { example?: unknown; schema: SchemaObject }>;
+        }
+      ).content['application/json'];
+      // Операція в повідомленні провалу: який саме приклад відсутній.
+      expect({
+        operation,
+        hasExample: typeof media.example === 'object',
+      }).toEqual({
+        operation,
+        hasExample: true,
+      });
+      expect(violations(media.example, media.schema)).toEqual([]);
+      return media.example as Record<string, unknown>;
+    }
+    const admin = { 'x-admin-token': TEST_ADMIN_TOKEN };
+    const created = (
+      await send('post /tenants', '/tenants', 201, {
+        headers: admin,
+        body: example('post /tenants'),
+      })
+    ).body as { id: string; apiKey: string; webhookSecret: string };
+    await send(
+      'patch /tenants/{id}/limits',
+      `/tenants/${created.id}/limits`,
+      200,
+      {
+        headers: admin,
+        body: example('patch /tenants/{id}/limits'),
+      },
+    );
+    const key = { 'x-api-key': created.apiKey };
+    const wf = (
+      await send('post /workflows', '/workflows', 201, {
+        headers: key,
+        body: example('post /workflows'),
+      })
+    ).body as { id: string };
+    await send('patch /workflows/{id}', `/workflows/${wf.id}`, 200, {
+      headers: key,
+      body: example('patch /workflows/{id}'),
+    });
+    await send('post /workflows/{id}/run', `/workflows/${wf.id}/run`, 201, {
+      headers: key,
+      body: example('post /workflows/{id}/run'),
+    });
+    const raw = JSON.stringify(example('post /hooks/{workflowId}'));
+    await send('post /hooks/{workflowId}', `/hooks/${wf.id}`, 202, {
+      headers: signedHeaders(wf.id, created.webhookSecret, raw),
+      raw,
+    });
+    // Тестове середовище не резолвить публічні домени: адресу з прикладу замінює отримувач тесту,
+    // а сам приклад уже звірено зі схемою вище.
+    await send(
+      'put /tenants/me/notifications',
+      '/tenants/me/notifications',
+      200,
+      {
+        headers: key,
+        body: {
+          ...example('put /tenants/me/notifications'),
+          url: receiver.url('/notify'),
+        },
+      },
+    );
+    expect(observed.flatMap(checkAgainstDocument)).toEqual([]);
   });
 });

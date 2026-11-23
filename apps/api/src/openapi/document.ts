@@ -91,6 +91,58 @@ interface Contract {
   retryUnavailable?: true;
   /** Коди `429` маршруту, крім `rate_limited`. */
   limits?: LimitCode[];
+  /** Приклад тіла запиту для «Try it out»; тест надсилає його на операцію. */
+  example?: Record<string, unknown>;
+}
+
+/** Групи операцій у Swagger UI, у порядку показу. */
+const TAGS = [
+  {
+    name: 'Процеси',
+    description: 'Визначення workflow: кроки, розклад і запуск',
+  },
+  {
+    name: 'Виконання',
+    description: 'Перебіг і результати виконань, повтор і тикети real-time',
+  },
+  {
+    name: 'Вхідні webhook-и',
+    description: 'Запуск процесу підписаною доставкою зовнішньої системи',
+  },
+  {
+    name: 'Ключі webhook-ів',
+    description: 'Ротація секрету підпису вхідних webhook-ів без простою',
+  },
+  {
+    name: 'Сповіщення',
+    description:
+      'Підписані сповіщення про завершення виконань: налаштування, ключі й журнал доставки',
+  },
+  {
+    name: 'Сесії браузера',
+    description: 'Обмін API-ключа на відкличну сесію інтерфейсу',
+  },
+  {
+    name: 'Тенанти',
+    description: 'Адміністрування: створення тенантів і їхні ліміти',
+  },
+  { name: 'Службові', description: 'Перевірки стану процесу й бази даних' },
+];
+/** Група операції за шляхом; шлях без групи — помилка побудови документа. */
+function tagOf(path: string): string {
+  const groups: Array<[RegExp, string]> = [
+    [/^\/(health|ready)$/, 'Службові'],
+    [/^\/tenants\/me\/webhook-secrets/, 'Ключі webhook-ів'],
+    [/^\/tenants\/me\/notifications/, 'Сповіщення'],
+    [/^\/tenants($|\/\{id\})/, 'Тенанти'],
+    [/^\/sessions/, 'Сесії браузера'],
+    [/^\/workflows/, 'Процеси'],
+    [/^\/executions/, 'Виконання'],
+    [/^\/hooks\//, 'Вхідні webhook-и'],
+  ];
+  const found = groups.find(([pattern]) => pattern.test(path));
+  if (!found) throw new Error('Відсутня група операції ' + path);
+  return found[1];
 }
 const contracts: Record<string, Contract> = {
   'get /health': { title: 'Перевірити процес', auth: [], result: 'Health' },
@@ -105,6 +157,10 @@ const contracts: Record<string, Contract> = {
     auth: admin,
     result: 'TenantCredentials',
     body: 'CreateTenant',
+    example: {
+      name: 'acme',
+      limits: { maxConcurrentExecutions: 5, rateLimit: 600 },
+    },
   },
   'get /tenants/{id}/limits': {
     title: 'Прочитати чинні ліміти та перевизначення',
@@ -116,6 +172,7 @@ const contracts: Record<string, Contract> = {
     auth: admin,
     result: 'Limits',
     body: 'LimitsPatch',
+    example: { maxQueueSize: 50_000, rateLimit: null },
   },
   'post /sessions': {
     title: 'Обміняти ключ на відкличну браузерну сесію',
@@ -139,6 +196,21 @@ const contracts: Record<string, Contract> = {
     result: 'Workflow',
     body: 'CreateWorkflow',
     limits: ['workflow_limit_reached'],
+    example: {
+      name: 'order-sync',
+      steps: [
+        {
+          id: 'fetch',
+          type: 'http',
+          method: 'GET',
+          url: 'https://example.com/?order={{ input.order }}',
+          headers: { Accept: 'application/json' },
+        },
+        { id: 'summary', type: 'transform', expr: '{"status": "synced"}' },
+        { id: 'pause', type: 'delay', ms: 1000 },
+        { id: 'note', type: 'log', message: 'order {{ input.order }} synced' },
+      ],
+    },
   },
   'get /workflows/{id}': {
     title: 'Прочитати визначення з маркерами збережених заголовків',
@@ -152,6 +224,7 @@ const contracts: Record<string, Contract> = {
     result: 'Workflow',
     body: 'UpdateWorkflow',
     errors: [409, 428],
+    example: { name: 'order-sync (weekdays)', enabled: true },
   },
   'delete /workflows/{id}': {
     title: 'Видалити процес',
@@ -168,6 +241,7 @@ const contracts: Record<string, Contract> = {
     errors: [409, 422],
     replay: 'Ідемпотентний повтор того самого запиту',
     limits: ['queue_full', 'outbox_full'],
+    example: { order: 'A-1001' },
   },
   'get /executions': {
     title: 'Переглянути сторінку виконань без вхідних і вихідних даних',
@@ -232,6 +306,7 @@ const contracts: Record<string, Contract> = {
     body: 'RunInput',
     code: 202,
     limits: ['queue_full', 'outbox_full'],
+    example: { order: 'A-1001', source: 'shop' },
     params: [
       param(
         'X-Webhook-Delivery-Id',
@@ -278,6 +353,7 @@ const contracts: Record<string, Contract> = {
     auth: key,
     result: 'SettingsResult',
     body: 'SettingsInput',
+    example: { url: 'https://example.com/flowforge-hooks', enabled: true },
   },
   ['delete ' + notes]: {
     title:
@@ -372,6 +448,7 @@ export function buildDocument(app: INestApplication) {
     .build();
   const doc = SwaggerModule.createDocument(app, config);
   doc.components = { ...doc.components, schemas };
+  doc.tags = TAGS;
   for (const [path, item] of Object.entries(doc.paths))
     for (const method of httpMethods) {
       const op: OperationObject | undefined = item[method];
@@ -379,6 +456,7 @@ export function buildDocument(app: INestApplication) {
       const c = contracts[method + ' ' + path];
       if (!c) throw new Error('Відсутній контракт ' + method + ' ' + path);
       op.summary = c.title;
+      op.tags = [tagOf(path)];
       op.security = c.auth;
       const params: ParameterObject[] = Array.from(
         path.matchAll(/\{(\w+)\}/g),
@@ -395,7 +473,9 @@ export function buildDocument(app: INestApplication) {
       if (c.body)
         op.requestBody = {
           required: c.body !== 'RunInput',
-          content: json(c.body),
+          content: {
+            'application/json': { schema: ref(c.body), example: c.example },
+          },
         };
       const success: ResponseObject = {
         description: c.title,
