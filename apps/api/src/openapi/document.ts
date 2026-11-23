@@ -15,6 +15,7 @@ import {
   eventStatus,
   status,
   ref,
+  limitError,
 } from './schemas';
 
 const key = [{ tenantKey: [] }];
@@ -46,6 +47,34 @@ function page(maximum: number): ParameterObject[] {
   ];
 }
 
+/** Відмови `429`, які маршрут повертає, крім `rate_limited` (його має кожен маршрут з автентифікацією). */
+type LimitCode =
+  | 'queue_full'
+  | 'outbox_full'
+  | 'workflow_limit_reached'
+  | 'ticket_limit'
+  | 'detail_in_progress';
+/** Пояснення кодів `429` в описі відповіді. */
+const LIMIT_TEXT: Record<LimitCode | 'rate_limited', string> = {
+  rate_limited:
+    'rate_limited — перевищено ліміт частоти запитів; Retry-After каже, коли почнеться нове вікно',
+  detail_in_progress:
+    'detail_in_progress — тенант уже читає стільки повних деталей одночасно, скільки дозволено; Retry-After каже, коли повторити',
+  queue_full:
+    'queue_full — черга тенанта заповнена; місце звільнить завершення його задач',
+  outbox_full:
+    'outbox_full — заповнена квота недоставлених сповіщень і живих виконань; місце звільнить доставка або відмова від подій',
+  workflow_limit_reached:
+    'workflow_limit_reached — досягнуто ліміту кількості workflow; місце звільнить видалення процесу',
+  ticket_limit:
+    'ticket_limit — забагато невикористаних тикетів; місце звільнить використання або спливання тикетів',
+};
+/** Коди, відповідь яких несе `Retry-After`. */
+const TIMED: ReadonlySet<string> = new Set([
+  'rate_limited',
+  'detail_in_progress',
+]);
+
 interface Contract {
   title: string;
   auth: SecurityRequirementObject[];
@@ -60,6 +89,60 @@ interface Contract {
   noNotFound?: true;
   /** Тимчасова відмова 503 несе `Retry-After` (спільний пул інстансу зайнятий). */
   retryUnavailable?: true;
+  /** Коди `429` маршруту, крім `rate_limited`. */
+  limits?: LimitCode[];
+  /** Приклад тіла запиту для «Try it out»; тест надсилає його на операцію. */
+  example?: Record<string, unknown>;
+}
+
+/** Групи операцій у Swagger UI, у порядку показу. */
+const TAGS = [
+  {
+    name: 'Процеси',
+    description: 'Визначення workflow: кроки, розклад і запуск',
+  },
+  {
+    name: 'Виконання',
+    description: 'Перебіг і результати виконань, повтор і тикети real-time',
+  },
+  {
+    name: 'Вхідні webhook-и',
+    description: 'Запуск процесу підписаною доставкою зовнішньої системи',
+  },
+  {
+    name: 'Ключі webhook-ів',
+    description: 'Ротація секрету підпису вхідних webhook-ів без простою',
+  },
+  {
+    name: 'Сповіщення',
+    description:
+      'Підписані сповіщення про завершення виконань: налаштування, ключі й журнал доставки',
+  },
+  {
+    name: 'Сесії браузера',
+    description: 'Обмін API-ключа на відкличну сесію інтерфейсу',
+  },
+  {
+    name: 'Тенанти',
+    description: 'Адміністрування: створення тенантів і їхні ліміти',
+  },
+  { name: 'Службові', description: 'Перевірки стану процесу й бази даних' },
+];
+/** Група операції за шляхом; шлях без групи — помилка побудови документа. */
+function tagOf(path: string): string {
+  const groups: Array<[RegExp, string]> = [
+    [/^\/(health|ready)$/, 'Службові'],
+    [/^\/tenants\/me\/webhook-secrets/, 'Ключі webhook-ів'],
+    [/^\/tenants\/me\/notifications/, 'Сповіщення'],
+    [/^\/tenants($|\/\{id\})/, 'Тенанти'],
+    [/^\/sessions/, 'Сесії браузера'],
+    [/^\/workflows/, 'Процеси'],
+    [/^\/executions/, 'Виконання'],
+    [/^\/hooks\//, 'Вхідні webhook-и'],
+  ];
+  const found = groups.find(([pattern]) => pattern.test(path));
+  if (!found) throw new Error('Відсутня група операції ' + path);
+  return found[1];
 }
 const contracts: Record<string, Contract> = {
   'get /health': { title: 'Перевірити процес', auth: [], result: 'Health' },
@@ -74,6 +157,10 @@ const contracts: Record<string, Contract> = {
     auth: admin,
     result: 'TenantCredentials',
     body: 'CreateTenant',
+    example: {
+      name: 'acme',
+      limits: { maxConcurrentExecutions: 5, rateLimit: 600 },
+    },
   },
   'get /tenants/{id}/limits': {
     title: 'Прочитати чинні ліміти та перевизначення',
@@ -85,6 +172,7 @@ const contracts: Record<string, Contract> = {
     auth: admin,
     result: 'Limits',
     body: 'LimitsPatch',
+    example: { maxQueueSize: 50_000, rateLimit: null },
   },
   'post /sessions': {
     title: 'Обміняти ключ на відкличну браузерну сесію',
@@ -107,6 +195,22 @@ const contracts: Record<string, Contract> = {
     auth: tenant,
     result: 'Workflow',
     body: 'CreateWorkflow',
+    limits: ['workflow_limit_reached'],
+    example: {
+      name: 'order-sync',
+      steps: [
+        {
+          id: 'fetch',
+          type: 'http',
+          method: 'GET',
+          url: 'https://example.com/?order={{ input.order }}',
+          headers: { Accept: 'application/json' },
+        },
+        { id: 'summary', type: 'transform', expr: '{"status": "synced"}' },
+        { id: 'pause', type: 'delay', ms: 1000 },
+        { id: 'note', type: 'log', message: 'order {{ input.order }} synced' },
+      ],
+    },
   },
   'get /workflows/{id}': {
     title: 'Прочитати визначення з маркерами збережених заголовків',
@@ -120,6 +224,7 @@ const contracts: Record<string, Contract> = {
     result: 'Workflow',
     body: 'UpdateWorkflow',
     errors: [409, 428],
+    example: { name: 'order-sync (weekdays)', enabled: true },
   },
   'delete /workflows/{id}': {
     title: 'Видалити процес',
@@ -135,6 +240,8 @@ const contracts: Record<string, Contract> = {
     // 409 — ключ щойно звільнило очищення історії виконань між пошуком і вставкою.
     errors: [409, 422],
     replay: 'Ідемпотентний повтор того самого запиту',
+    limits: ['queue_full', 'outbox_full'],
+    example: { order: 'A-1001' },
   },
   'get /executions': {
     title: 'Переглянути сторінку виконань без вхідних і вихідних даних',
@@ -152,6 +259,7 @@ const contracts: Record<string, Contract> = {
     result: 'ExecutionDetail',
     errors: [503],
     retryUnavailable: true,
+    limits: ['detail_in_progress'],
   },
   'get /executions/{id}/summary': {
     title: 'Прочитати поточний знімок стану і план кроків',
@@ -174,6 +282,7 @@ const contracts: Record<string, Contract> = {
     result: 'ExecutionId',
     code: 202,
     errors: [409],
+    limits: ['queue_full', 'outbox_full'],
     params: [
       param('expectedTerminalCycle', 'query', {
         ...integer,
@@ -188,6 +297,7 @@ const contracts: Record<string, Contract> = {
     title: 'Отримати одноразовий тикет на одну підписку цього виконання',
     auth: tenant,
     result: 'Ticket',
+    limits: ['ticket_limit'],
   },
   'post /hooks/{workflowId}': {
     title: 'Прийняти підписану доставку в межах п’яти хвилин',
@@ -195,6 +305,8 @@ const contracts: Record<string, Contract> = {
     result: 'ExecutionId',
     body: 'RunInput',
     code: 202,
+    limits: ['queue_full', 'outbox_full'],
+    example: { order: 'A-1001', source: 'shop' },
     params: [
       param(
         'X-Webhook-Delivery-Id',
@@ -241,6 +353,7 @@ const contracts: Record<string, Contract> = {
     auth: key,
     result: 'SettingsResult',
     body: 'SettingsInput',
+    example: { url: 'https://example.com/flowforge-hooks', enabled: true },
   },
   ['delete ' + notes]: {
     title:
@@ -286,6 +399,7 @@ const contracts: Record<string, Contract> = {
     result: 'Event',
     code: 202,
     errors: [409],
+    limits: ['outbox_full'],
   },
 };
 const descriptions: Record<number, string> = {
@@ -299,9 +413,14 @@ const descriptions: Record<number, string> = {
   500: 'Внутрішня помилка; тіло без внутрішніх деталей, з correlationId',
   422: 'Ключ повторно використано з іншими даними',
   428: 'Браузерний запит має містити актуальну editRevision',
-  429: 'rate_limited і detail_in_progress повертають Retry-After. queue_full, outbox_full, workflow_limit_reached і ticket_limit не мають визначеного часу повтору.',
   503: 'Залежність недоступна',
 };
+/** Заголовки ліміту частоти (`limits/rate-limit-headers.ts`). */
+const RATE_LIMIT_HEADERS: Array<[string, string]> = [
+  ['Limit', 'Скільки запитів дозволено у вікні ліміту'],
+  ['Remaining', 'Скільки запитів лишилось у поточному вікні'],
+  ['Reset', 'Секунди до початку нового вікна'],
+];
 const json = (name: string) => ({ 'application/json': { schema: ref(name) } });
 export function buildDocument(app: INestApplication) {
   const config = new DocumentBuilder()
@@ -329,6 +448,7 @@ export function buildDocument(app: INestApplication) {
     .build();
   const doc = SwaggerModule.createDocument(app, config);
   doc.components = { ...doc.components, schemas };
+  doc.tags = TAGS;
   for (const [path, item] of Object.entries(doc.paths))
     for (const method of httpMethods) {
       const op: OperationObject | undefined = item[method];
@@ -336,6 +456,7 @@ export function buildDocument(app: INestApplication) {
       const c = contracts[method + ' ' + path];
       if (!c) throw new Error('Відсутній контракт ' + method + ' ' + path);
       op.summary = c.title;
+      op.tags = [tagOf(path)];
       op.security = c.auth;
       const params: ParameterObject[] = Array.from(
         path.matchAll(/\{(\w+)\}/g),
@@ -352,7 +473,9 @@ export function buildDocument(app: INestApplication) {
       if (c.body)
         op.requestBody = {
           required: c.body !== 'RunInput',
-          content: json(c.body),
+          content: {
+            'application/json': { schema: ref(c.body), example: c.example },
+          },
         };
       const success: ResponseObject = {
         description: c.title,
@@ -365,11 +488,8 @@ export function buildDocument(app: INestApplication) {
       // (400, 413, 415) і відмови автентифікації виникають раніше й можуть їх не мати.
       const limited: NonNullable<ResponseObject['headers']> = { ...headers };
       if (c.auth.length)
-        for (const name of ['Limit', 'Remaining', 'Reset'])
-          limited['X-RateLimit-' + name] = {
-            schema: integer,
-            description: 'Вікно частоти запитів',
-          };
+        for (const [name, description] of RATE_LIMIT_HEADERS)
+          limited['X-RateLimit-' + name] = { schema: integer, description };
       success.headers = limited;
       op.responses = { [c.code ?? (method === 'post' ? 201 : 200)]: success };
       if (c.replay) op.responses[200] = { ...success, description: c.replay };
@@ -383,12 +503,19 @@ export function buildDocument(app: INestApplication) {
         415,
         500,
       ]);
+      const limits = ['rate_limited' as const, ...(c.limits ?? [])];
       for (const code of errors)
         op.responses[code] = {
-          description: descriptions[code],
-          content: json(
-            code === 503 && c.result === 'Health' ? 'Health' : 'Error',
-          ),
+          description:
+            code === 429
+              ? limits.map((name) => LIMIT_TEXT[name]).join('. ') + '.'
+              : descriptions[code],
+          content:
+            code === 429
+              ? { 'application/json': { schema: limitError(limits) } }
+              : json(
+                  code === 503 && c.result === 'Health' ? 'Health' : 'Error',
+                ),
           headers:
             code === 429
               ? {
@@ -396,7 +523,8 @@ export function buildDocument(app: INestApplication) {
                   'Retry-After': {
                     schema: integer,
                     description:
-                      'Секунди до повтору: до закінчення вікна rate_limited або для detail_in_progress',
+                      'Секунди до повтору для ' +
+                      limits.filter((name) => TIMED.has(name)).join(' і '),
                   },
                 }
               : code === 503 && c.retryUnavailable
