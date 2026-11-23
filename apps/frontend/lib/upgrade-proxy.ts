@@ -2,6 +2,7 @@ import { IncomingMessage, request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import type { Socket } from 'node:net';
 import type { Duplex } from 'node:stream';
+import { InstancePool } from './instance-pool';
 
 /** Найдовший шлях upgrade: `/realtime?ticket=` + токен. */
 const MAX_UPGRADE_URL = 256;
@@ -13,6 +14,8 @@ export interface UpgradeProxyOptions {
   connectTimeoutMs: number;
   /** Скільки чекати відповіді API після надсилання запиту з тикетом. */
   responseTimeoutMs: number;
+  /** Порядок перебору інстансів (у тестах — з керованим годинником). */
+  pool?: InstancePool;
 }
 
 export function expectedOrigin(
@@ -42,19 +45,21 @@ export function createUpgradeProxy(
 ): (req: IncomingMessage, socket: Duplex, head: Buffer) => void {
   const { apiUrls, publicOrigin, connectTimeoutMs, responseTimeoutMs } =
     options;
-  /** Звідки починати перебір: інстанс, що прийняв останній upgrade. */
-  let preferred = 0;
+  /** Той самий запобіжник, що й для HTTP (`lib/instance-pool.ts`): завислий API не стоїть першим. */
+  const pool = options.pool ?? new InstancePool(apiUrls.length);
 
   function proxyUpgrade(
     req: IncomingMessage,
     socket: Duplex,
     head: Buffer,
-    attempt: number,
-    first: number,
+    order: number[],
+    position: number,
   ): void {
-    if (attempt >= apiUrls.length) return reject(socket, 502, 'Bad Gateway');
+    if (position >= order.length) return reject(socket, 502, 'Bad Gateway');
     const url = req.url ?? '';
-    const target = apiUrls[(attempt + first) % apiUrls.length];
+    const index = order[position];
+    const attempt = pool.begin();
+    const target = apiUrls[index];
     const headers: Record<string, string> = {
       connection: 'Upgrade',
       upgrade: 'websocket',
@@ -94,11 +99,11 @@ export function createUpgradeProxy(
       const open = !settled && !socket.destroyed;
       abort();
       if (!open) return;
+      // Наступні upgrade-и починаються з іншого інстансу, щоб завислий API не перехоплював кожен тикет.
+      pool.failed(index, attempt);
       // Лише поки з'єднання не встановлено, тикет точно не дійшов до API (як у lib/upstream.ts).
-      if (!sent) return proxyUpgrade(req, socket, head, attempt + 1, first);
-      // Інакше інший інстанс отримав би вже погашений тикет: браузер візьме новий. Наступний
-      // upgrade починається з іншого інстансу, щоб завислий API не перехоплював кожен тикет.
-      preferred = (attempt + first + 1) % apiUrls.length;
+      if (!sent) return proxyUpgrade(req, socket, head, order, position + 1);
+      // Інакше інший інстанс отримав би вже погашений тикет: браузер візьме новий.
       if (reason === 'timeout') reject(socket, 504, 'Gateway Timeout');
       else reject(socket, 502, 'Bad Gateway');
     };
@@ -119,6 +124,7 @@ export function createUpgradeProxy(
     upstream.on('response', (res) => {
       // API відмовив до upgrade (тикет недійсний, ліміт): статус і Retry-After — браузеру.
       settled = true;
+      pool.succeeded(index, attempt);
       const retryAfter = res.headers['retry-after'];
       socket.end(
         `HTTP/1.1 ${res.statusCode ?? 502} ${res.statusMessage ?? ''}\r\n` +
@@ -139,7 +145,7 @@ export function createUpgradeProxy(
         return;
       }
       upstreamSocket.setTimeout(0);
-      preferred = (attempt + first) % apiUrls.length;
+      pool.succeeded(index, attempt);
       const lines = [`HTTP/1.1 101 Switching Protocols`];
       for (const name of [
         'upgrade',
@@ -178,6 +184,6 @@ export function createUpgradeProxy(
     const origin = expectedOrigin(req, publicOrigin);
     if (!origin || req.headers.origin !== origin)
       return reject(socket, 403, 'Forbidden');
-    proxyUpgrade(req, socket, head, 0, preferred);
+    proxyUpgrade(req, socket, head, pool.order(), 0);
   };
 }

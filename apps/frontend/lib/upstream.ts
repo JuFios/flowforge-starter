@@ -1,3 +1,4 @@
+import { InstancePool } from './instance-pool';
 import { frontendConfig } from './server-config';
 
 /**
@@ -5,7 +6,8 @@ import { frontendConfig } from './server-config';
  * з'єднання не встановилося (адреса не відповідає, DNS): тоді запит точно не дійшов до API, і
  * повтор на іншому інстансі безпечний навіть для POST. Будь-яка інша помилка після відправлення
  * (обрив, таймаут відповіді) не повторюється: результат невідомий, і вирішує клієнт за семантикою
- * маршруту (README, «Фронтенд: повтор після невизначеної відповіді»).
+ * маршруту (README, «Фронтенд: повтор після невизначеної відповіді»). Порядок перебору веде
+ * `InstancePool`: інстанс, що завис чи обірвав з'єднання, не стоїть першим для наступних запитів.
  */
 const CONNECT_ERRORS = new Set([
   'ECONNREFUSED',
@@ -15,9 +17,6 @@ const CONNECT_ERRORS = new Set([
   'ENETUNREACH',
   'UND_ERR_CONNECT_TIMEOUT',
 ]);
-
-/** Звідки починати перебір: інстанс, що відповів останнім. */
-let preferred = 0;
 
 export class UpstreamUnavailableError extends Error {
   constructor(readonly reason: 'unreachable' | 'timeout' | 'interrupted') {
@@ -40,32 +39,54 @@ export interface UpstreamRequest {
   signal?: AbortSignal;
 }
 
-export async function callApi(request: UpstreamRequest): Promise<Response> {
-  const { apiUrls, apiTimeoutMs } = frontendConfig();
-  const timeout = AbortSignal.timeout(apiTimeoutMs);
-  const signal = request.signal
-    ? AbortSignal.any([request.signal, timeout])
-    : timeout;
-  const start = preferred;
-  for (let attempt = 0; attempt < apiUrls.length; attempt++) {
-    const index = (start + attempt) % apiUrls.length;
-    try {
-      const response = await fetch(new URL(request.path, apiUrls[index]), {
-        method: request.method,
-        headers: request.headers,
-        body: request.body ? new Uint8Array(request.body).buffer : undefined,
-        signal,
-        redirect: 'manual',
-        cache: 'no-store',
-      });
-      preferred = index;
-      return response;
-    } catch (err) {
-      if (timeout.aborted) throw new UpstreamUnavailableError('timeout');
-      if (request.signal?.aborted) throw err;
-      if (connectFailure(err)) continue;
-      throw new UpstreamUnavailableError('interrupted');
+export interface UpstreamOptions {
+  apiUrls: URL[];
+  apiTimeoutMs: number;
+}
+
+export type CallApi = (request: UpstreamRequest) => Promise<Response>;
+
+export function createUpstream(
+  { apiUrls, apiTimeoutMs }: UpstreamOptions,
+  pool = new InstancePool(apiUrls.length),
+): CallApi {
+  return async (request) => {
+    const timeout = AbortSignal.timeout(apiTimeoutMs);
+    const signal = request.signal
+      ? AbortSignal.any([request.signal, timeout])
+      : timeout;
+    for (const index of pool.order()) {
+      const attempt = pool.begin();
+      try {
+        const response = await fetch(new URL(request.path, apiUrls[index]), {
+          method: request.method,
+          headers: request.headers,
+          body: request.body ? new Uint8Array(request.body).buffer : undefined,
+          signal,
+          redirect: 'manual',
+          cache: 'no-store',
+        });
+        pool.succeeded(index, attempt);
+        return response;
+      } catch (err) {
+        if (timeout.aborted) {
+          pool.failed(index, attempt);
+          throw new UpstreamUnavailableError('timeout');
+        }
+        // Браузер пішов сам: це не свідчення про стан інстансу.
+        if (request.signal?.aborted) throw err;
+        pool.failed(index, attempt);
+        if (connectFailure(err)) continue;
+        throw new UpstreamUnavailableError('interrupted');
+      }
     }
-  }
-  throw new UpstreamUnavailableError('unreachable');
+    throw new UpstreamUnavailableError('unreachable');
+  };
+}
+
+let shared: CallApi | undefined;
+
+export function callApi(request: UpstreamRequest): Promise<Response> {
+  shared ??= createUpstream(frontendConfig());
+  return shared(request);
 }
