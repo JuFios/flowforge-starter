@@ -53,6 +53,25 @@ interface QueueUsage {
   maxOutboxEvents: number;
 }
 
+/** Відповідь на прийняту webhook-доставку (нову чи повтор). */
+export interface WebhookAccepted {
+  executionId: string;
+  /**
+   * Історію виконання вже очищено (EXECUTION_RETENTION_DAYS): повтор прийнято без нового
+   * виконання, а GET за цим ID поверне 404.
+   */
+  executionPurged: boolean;
+}
+
+/**
+ * Квитанція доставки. Квитанція переживає очищення історії (дедуплікація за ТЗ 3.3.7), тож
+ * виконання може вже не існувати — це й повідомляє `purged`.
+ */
+export const WEBHOOK_RECEIPT_SQL = `SELECT d."executionId", d."bodyHash", e.id IS NULL AS purged
+  FROM webhook_deliveries d
+  LEFT JOIN executions e ON e.id = d."executionId" AND e."tenantId" = d."tenantId"
+ WHERE d."tenantId"=$1 AND d."workflowId"=$2 AND d."deliveryId"=$3`;
+
 @Injectable()
 export class ExecutionsService {
   private readonly logger = new Logger(ExecutionsService.name);
@@ -180,7 +199,7 @@ export class ExecutionsService {
     target: Workflow,
     parseInput: () => Record<string, unknown>,
     proof: VerifiedDelivery,
-  ): Promise<string> {
+  ): Promise<WebhookAccepted> {
     return this.db.run(target.tenantId, async (em) => {
       // Порядок блокувань однаковий для всіх доставок. Зміна ключів блокує лише тенанта.
       const [keys]: Array<{
@@ -204,17 +223,21 @@ export class ExecutionsService {
       )
         throw new UnauthorizedException('Невірний підпис');
       const params = [workflow.tenantId, workflow.id, proof.deliveryId];
-      const receipt = async (): Promise<string | undefined> => {
-        const [existing]: Array<{ executionId: string; bodyHash: Buffer }> =
-          await em.query(
-            'SELECT "executionId","bodyHash" FROM webhook_deliveries WHERE "tenantId"=$1 AND "workflowId"=$2 AND "deliveryId"=$3',
-            params,
-          );
-        if (existing && !existing.bodyHash.equals(proof.digest))
+      const receipt = async (): Promise<WebhookAccepted | undefined> => {
+        const [existing]: Array<{
+          executionId: string;
+          bodyHash: Buffer;
+          purged: boolean;
+        }> = await em.query(WEBHOOK_RECEIPT_SQL, params);
+        if (!existing) return undefined;
+        if (!existing.bodyHash.equals(proof.digest))
           throw new ConflictException(
             'Ідентифікатор доставки вже використано з іншим тілом',
           );
-        return existing?.executionId;
+        return {
+          executionId: existing.executionId,
+          executionPurged: existing.purged,
+        };
       };
       // Вимкнений workflow (FOR SHARE вище не дає його ввімкнути до COMMIT) нових доставок не
       // приймає, тож квитанція не може з'явитися паралельно, і облік тенанта не потрібен.
@@ -241,7 +264,7 @@ export class ExecutionsService {
         'INSERT INTO webhook_deliveries ("tenantId","workflowId","deliveryId","bodyHash","executionId") VALUES ($1,$2,$3,$4,$5)',
         [...params, proof.digest, execution.id],
       );
-      return execution.id;
+      return { executionId: execution.id, executionPurged: false };
     });
   }
 

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { signedHeaders } from '../helpers/webhook';
 import { DataSource } from 'typeorm';
 import { Execution } from '../../src/entities';
@@ -164,7 +165,10 @@ describe('webhook input is validated only after the signature', () => {
     ]);
     const repeat = await deliver(body, headers);
     expect(repeat.status).toBe(202);
-    expect(await repeat.json()).toEqual({ executionId });
+    expect(await repeat.json()).toEqual({
+      executionId,
+      executionPurged: false,
+    });
     // Нова доставка вимкненим workflow не приймається, а без підпису — як і раніше, 401.
     expect((await deliver({ order: 8 }, sign({ order: 8 }))).status).toBe(404);
     expect((await deliver({ order: 8 })).status).toBe(401);
@@ -183,5 +187,59 @@ describe('webhook input is validated only after the signature', () => {
       'SELECT (SELECT count(*)::int FROM executions) AS executions, (SELECT count(*)::int FROM jobs) AS jobs',
     );
     expect(counts).toEqual([{ executions: 1, jobs: 1 }]);
+  });
+
+  /**
+   * Квитанція переживає очищення історії (ТЗ 3.3.7: повтор не створює друге виконання), а
+   * відповідь на повтор чесно каже, що виконання вже видалено, замість ID, який дає 404.
+   */
+  it('reports a purged execution when a delivery is replayed after history cleanup', async () => {
+    const body = { order: 9 };
+    const raw = JSON.stringify(body);
+    const deliveryId = randomUUID();
+    const resign = (payload: string, at = Math.floor(Date.now() / 1000)) =>
+      signedHeaders(workflowId, secret, payload, deliveryId, at);
+    const first = await deliver(body, resign(raw));
+    expect(first.status).toBe(202);
+    const accepted = (await first.json()) as { executionId: string };
+    expect(accepted).toEqual({
+      executionId: expect.any(String) as unknown,
+      executionPurged: false,
+    });
+    await ds.query(
+      `UPDATE executions SET status = 'succeeded', "finishedAt" = now() - interval '2 days' WHERE id = $1`,
+      [accepted.executionId],
+    );
+    expect(
+      await ds.query('SELECT purge_execution_history(1, 100) AS deleted'),
+    ).toEqual([{ deleted: 1 }]);
+
+    // Відправник повторює ті самі байти з новим часом і підписом.
+    const replay = await deliver(
+      body,
+      resign(raw, Math.floor(Date.now() / 1000) + 1),
+    );
+    expect(replay.status).toBe(202);
+    expect(await replay.json()).toEqual({
+      executionId: accepted.executionId,
+      executionPurged: true,
+    });
+    const other = { order: 10 };
+    expect((await deliver(other, resign(JSON.stringify(other)))).status).toBe(
+      409,
+    );
+    await ds.query('UPDATE workflows SET enabled = false WHERE id = $1', [
+      workflowId,
+    ]);
+    const disabled = await deliver(body, resign(raw));
+    expect(disabled.status).toBe(202);
+    expect(await disabled.json()).toEqual({
+      executionId: accepted.executionId,
+      executionPurged: true,
+    });
+    const counts: unknown = await ds.query(
+      'SELECT (SELECT count(*)::int FROM executions) AS executions, (SELECT count(*)::int FROM jobs) AS jobs, (SELECT count(*)::int FROM webhook_deliveries) AS receipts',
+    );
+    expect(counts).toEqual([{ executions: 0, jobs: 0, receipts: 1 }]);
   });
 });
