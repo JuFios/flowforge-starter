@@ -160,11 +160,24 @@ describe('README commands in a new terminal', () => {
     expect(services).toEqual(
       expect.arrayContaining(['postgres', 'migrate', 'api', 'api-2', 'worker']),
     );
-    const migrating = DOC_FILES.flatMap(allBlocks).filter(
-      (b) =>
-        /docker compose\b.*\bstop\b/.test(b) &&
-        /\bmigrate\b|\bup\b.*--build/.test(b),
-    );
+    const migrates = (b: string) => /\bmigrate\b|\bup\b.*--build/.test(b);
+    // Блоки розділів «Оновлення …» мігрують наявну БД, тож зупинка обов'язкова й без `stop` у
+    // блоці; поза ними — кожен блок, що зупиняє сервіси перед міграцією.
+    const upgrades = DOC_FILES.flatMap((file) =>
+      readFileSync(join(ROOT, file), 'utf8')
+        .split(/\n(?=#{2,3} )/)
+        .filter((section) => /^#{2,3} Оновлення/.test(section))
+        .flatMap(bashBlocks),
+    ).filter(migrates);
+    expect(upgrades.length).toBeGreaterThan(0);
+    const migrating = [
+      ...new Set([
+        ...upgrades,
+        ...DOC_FILES.flatMap(allBlocks).filter(
+          (b) => /docker compose\b.*\bstop\b/.test(b) && migrates(b),
+        ),
+      ]),
+    ];
     expect(migrating.length).toBeGreaterThan(0);
     for (const block of migrating) {
       const calls = runFresh(block);
