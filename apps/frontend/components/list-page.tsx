@@ -33,7 +33,8 @@ function Results({ path, workflows }: { path: string; workflows: boolean }) {
   const [items, setItems] = useState<Item[]>([]),
     [cursor, setCursor] = useState<string | null>(null),
     [loading, busy] = useState(true),
-    [error, fail] = useState('');
+    [error, fail] = useState(''),
+    [note, tell] = useState('');
   const active = useRef<AbortController>();
   const interruptedPage = useRef<{ after: string | null }>();
   const read = useCallback(
@@ -44,11 +45,28 @@ function Results({ path, workflows }: { path: string; workflows: boolean }) {
       interruptedPage.current = { after };
       busy(true);
       fail('');
-      const result = await apiRequest<Page<Item>>(
-        'GET',
-        path + (after ? '&cursor=' + encodeURIComponent(after) : ''),
-        { signal: ctrl.signal },
-      );
+      tell('');
+      const load = (page: string | null) =>
+        apiRequest<Page<Item>>(
+          'GET',
+          path + (page ? '&cursor=' + encodeURIComponent(page) : ''),
+          { signal: ctrl.signal },
+        );
+      let result = await load(after);
+      // Курсор, який API більше не приймає (виданий до оновлення API): 400 повторювався б на кожне
+      // «Повторити», тож список починається з першої сторінки, і користувач бачить чому.
+      let restarted = false;
+      if (
+        after &&
+        !ctrl.signal.aborted &&
+        result.kind === 'rejected' &&
+        result.status === 400
+      ) {
+        after = null;
+        restarted = true;
+        interruptedPage.current = { after };
+        result = await load(after);
+      }
       if (ctrl.signal.aborted) return;
       active.current = undefined;
       if (result.kind !== 'network') interruptedPage.current = undefined;
@@ -59,6 +77,10 @@ function Results({ path, workflows }: { path: string; workflows: boolean }) {
           after ? [...old, ...result.data.items] : result.data.items,
         );
         setCursor(result.data.nextCursor);
+        if (restarted)
+          tell(
+            'Список змінився на сервері, тому його показано знову з першої сторінки.',
+          );
       } else if (result.kind !== 'aborted')
         fail(
           result.kind === 'rejected'
@@ -166,6 +188,11 @@ function Results({ path, workflows }: { path: string; workflows: boolean }) {
       {loading && (
         <p className="list-note" role="status">
           Завантаження…
+        </p>
+      )}
+      {note && !loading && !error && (
+        <p className="list-note" role="status">
+          {note}
         </p>
       )}
       {!loading && !error && !items.length && (
