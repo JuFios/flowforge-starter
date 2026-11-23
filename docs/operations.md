@@ -107,7 +107,7 @@ LOCAL_WORKER
 `DETAIL_MAX_CONCURRENT` менше за 2 × `DETAIL_MAX_PER_TENANT`.
 
 ```bash
-docker compose stop api worker frontend   # старі процеси не працюють під час міграції
+docker compose stop   # усі сервіси проєкту: старі процеси не працюють під час міграції
 docker compose up -d postgres
 # POSTGRES_PASSWORD діє лише для порожнього тому: власнику наявного тому пароль змінюють один раз.
 # Через локальний сокет контейнера старий пароль не потрібен; \password рахує verifier на клієнті,
@@ -466,30 +466,12 @@ npm run build && npm run migration:generate -- "src/database/migrations/$migrati
 (решта конфігурації застосунку CLI не потрібна). `statement_timeout` на міграції не діє: зміна схеми
 великої таблиці легітимно триває довше за запит застосунку.
 
-Для БД, створеної стартовим кодом через `synchronize` (наприклад, том `pgdata` після запуску
-стартового репозиторію в compose), базову міграцію не виконують повторно — таблиці вже є, і крок
-`migrate` упав би. Її позначають як застосовану, решту міграцій застосовують тим самим образом,
-що й compose, а вже потім піднімають систему. Усе — з кореня репозиторію, з `.env` з розділу
-[«Запуск»](#запуск); Node.js на хості не потрібен:
-
-```bash
-docker compose up -d postgres
-docker compose exec postgres psql -U flowforge -d flowforge -c '\password flowforge'  # див. «Оновлення з попередньої версії»
-docker compose exec -T postgres psql -U flowforge -d flowforge -c \
-  "CREATE TABLE IF NOT EXISTS migrations (id SERIAL PRIMARY KEY, \"timestamp\" bigint NOT NULL, name varchar NOT NULL);
-   INSERT INTO migrations (\"timestamp\", name) VALUES (1794920217603, 'InitialSchema1794920217603');"
-docker compose run --rm --build migrate
-docker compose up --build
-```
-
-Те саме з хоста — після кроків [«Локальний запуск поза docker»](#локальний-запуск-поза-docker)
-до `npm run build` включно (залежності встановлено, `DATABASE_URL` у `apps/api/.env` вказує на
-`localhost`): ті самі `psql`-команди, потім `npm run db:migrate` з `apps/api`.
-
-Перевірено на БД, створеній стартовим кодом (і з даними в його форматі: дублікати `step_runs`,
-задачі в черзі, виконання вже видаленого workflow): після цього застосовуються решта міграцій, від
-`AddCorrelationId` до `RecoverCheckpoints`, а `migration:generate --check` не знаходить розбіжностей
-між схемою і сутностями.
+**База стартового коду не оновлюється.** БД, яку створив стартовий код (`main@b17a0b3`, схема
+через `synchronize`, без журналу міграцій), штатні міграції не підтримують: перевірка прав каталогу
+відхиляє функції розширення `uuid-ossp`, доступні `PUBLIC`, а кроки `http` у стані `running` не мали
+ключа ідемпотентності, тож їхній ефект після оновлення не звірити автоматично. Не позначайте
+`InitialSchema` виконаною вручну: розгортайте рішення з порожнім томом `pgdata` (README, «Що не
+встигли або зробили б інакше»).
 
 
 ## Тести
@@ -1073,7 +1055,9 @@ docker compose -f docker-compose.yml -f docker-compose.chaos.yml up -d --build -
 ### Бенчмарк захоплення
 
 ```bash
-(cd apps/api && npm run bench:claim)
+# тестова БД власником схеми — як у README, «Тести»; .env з кореня репозиторію
+(cd apps/api && TEST_DATABASE_URL="$(node scripts/test-database-url.cjs)" &&
+  export TEST_DATABASE_URL && npm run bench:claim)
 ```
 
 `test/bench/claim.bench-spec.ts` — справжній `JobQueueService` у двох Nest-застосунках з окремими пулами БД і спільним циклом подій одного процесу Node.js, по 16

@@ -162,16 +162,7 @@ cd apps/api
 npm ci
 npm test                    # unit (без БД)
 # Тестове підключення власником схеми. Якщо .env відсутній, діють значення CI.
-TEST_DATABASE_URL="$(node <<'NODE'
-const { parseEnv } = require('node:util');
-const { existsSync, readFileSync } = require('node:fs');
-const file = '../../.env';
-const env = existsSync(file) ? parseEnv(readFileSync(file, 'utf8')) : {};
-const password = encodeURIComponent(env.POSTGRES_PASSWORD || 'flowforge');
-const port = env.POSTGRES_PORT || '5432';
-process.stdout.write(`postgres://flowforge:${password}@localhost:${port}/flowforge_test`);
-NODE
-)"
+TEST_DATABASE_URL="$(node scripts/test-database-url.cjs)"
 export TEST_DATABASE_URL
 npm run test:integration    # integration на реальному Postgres (спершу збирає dist: тест падіння воркера запускає dist/worker.js)
 npm run test:all            # обидва набори
