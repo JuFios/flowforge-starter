@@ -4,7 +4,6 @@ import { useEffect, useState, useRef } from 'react';
 import { apiRequest, goToLogin, describeRejection } from '@/lib/client-api';
 import {
   ExecutionStream,
-  REALTIME_REQUEST_TIMEOUT_MS,
   StreamState,
   SocketLike,
 } from '@/lib/execution-stream';
@@ -19,6 +18,9 @@ export function ExecutionPage({ id }: { id: string }) {
     [output, setOutput] = useState(''),
     [waiting, busy] = useState(false);
   const abort = useRef<AbortController>();
+  const retryRequest = useRef<AbortController>();
+  const [unresolvedCycle, rememberCycle] = useState<number>();
+  const [resolvedCycle, markResolved] = useState<number>();
   useEffect(() => {
     const base = 'executions/' + id;
     const stream = new ExecutionStream(
@@ -61,6 +63,10 @@ export function ExecutionPage({ id }: { id: string }) {
                     : r.kind === 'rejected' && r.status === 404
                       ? 'gone'
                       : 'retry',
+                retryAfterMs:
+                  r.kind === 'rejected' && r.retryAfterSeconds !== undefined
+                    ? r.retryAfterSeconds * 1000
+                    : undefined,
               };
         },
         openSocket(ticket) {
@@ -73,6 +79,7 @@ export function ExecutionPage({ id }: { id: string }) {
         },
         setTimeout: (fn, ms) => window.setTimeout(fn, ms),
         clearTimeout: (h) => window.clearTimeout(h as number),
+        now: () => performance.now(),
         random: Math.random,
       },
       {
@@ -83,27 +90,15 @@ export function ExecutionPage({ id }: { id: string }) {
         onSessionExpired: goToLogin,
       },
     );
-    const initial = new AbortController();
-    const initialTimeout = window.setTimeout(
-      () => initial.abort(),
-      REALTIME_REQUEST_TIMEOUT_MS,
-    );
-    void apiRequest<ExecutionSummary>('GET', base + '/summary', {
-      signal: initial.signal,
-    })
-      .then((r) => {
-        if (!initial.signal.aborted && r.kind === 'ok') stream.seed(r.data);
-      })
-      .finally(() => window.clearTimeout(initialTimeout));
+    stream.fetchInitialSummary();
     const online = () => stream.nudge();
     window.addEventListener('online', online);
     stream.start();
     return () => {
       window.removeEventListener('online', online);
-      window.clearTimeout(initialTimeout);
-      initial.abort();
       stream.stop();
       abort.current?.abort();
+      retryRequest.current?.abort();
     };
   }, [id]);
   async function detail(path: string) {
@@ -131,14 +126,47 @@ export function ExecutionPage({ id }: { id: string }) {
           : 'Зв’язок перервано. Повторіть читання.',
     );
   }
+  const failedCycle =
+    data?.status === 'failed' &&
+    Number.isInteger(data.terminalCycles) &&
+    data.terminalCycles > (resolvedCycle ?? -1)
+      ? data.terminalCycles
+      : undefined;
+  const retryCycle = unresolvedCycle ?? failedCycle;
   async function retry() {
+    if (retryCycle === undefined || retryRequest.current) return;
+    const controller = new AbortController();
+    retryRequest.current = controller;
     busy(true);
     fail('');
-    const r = await apiRequest('POST', 'executions/' + id + '/retry');
-    busy(false);
-    if (r.kind === 'session_expired') return goToLogin();
-    if (r.kind === 'rejected') fail(describeRejection(r));
-    if (r.kind === 'network') fail(r.message);
+    try {
+      const r = await apiRequest(
+        'POST',
+        `executions/${id}/retry?expectedTerminalCycle=${retryCycle}`,
+        { signal: controller.signal },
+      );
+      if (controller.signal.aborted) return;
+      if (r.kind === 'session_expired') return goToLogin();
+      if (
+        r.kind === 'ok' ||
+        (r.kind === 'rejected' && r.error === 'retry_cycle_conflict')
+      ) {
+        markResolved(retryCycle);
+        rememberCycle(undefined);
+      }
+      if (r.kind === 'rejected') {
+        if (r.status >= 500 || r.status === 429 || r.status === 408)
+          rememberCycle(retryCycle);
+        fail(describeRejection(r));
+      }
+      if (r.kind === 'network') {
+        rememberCycle(retryCycle);
+        fail('Результат повтору невідомий. Повторіть попередній запит.');
+      }
+    } finally {
+      retryRequest.current = undefined;
+      if (!controller.signal.aborted) busy(false);
+    }
   }
   const connection = {
     connecting: 'Підключення…',
@@ -184,9 +212,11 @@ export function ExecutionPage({ id }: { id: string }) {
               </div>
             </dl>
             {data.error && <p role="alert">{data.error}</p>}
-            {data.status === 'failed' && (
+            {retryCycle !== undefined && (
               <button disabled={waiting} onClick={retry}>
-                Повторити виконання
+                {unresolvedCycle === undefined
+                  ? 'Повторити виконання'
+                  : 'Повторити попередній запит'}
               </button>
             )}
             {error && <p role="alert">{error}</p>}

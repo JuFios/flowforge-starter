@@ -8,9 +8,21 @@ import {
   getCorrelationSource,
 } from './correlation';
 
+/** Назви полів, значення яких — облікові дані (ТЗ 4). */
+const SECRET_FIELDS = [
+  'apiKey',
+  'webhookSecret',
+  'nextWebhookSecret',
+  'nextSecret',
+  'password',
+  'secret',
+  'token',
+];
+
 /**
- * Шляхи, значення яких ніколи не потрапляють у логи. Заголовки автентифікації,
- * підписи, а також типові назви полів із секретами у будь-якому об'єкті першого рівня.
+ * Шляхи, значення яких ніколи не потрапляють у логи. Заголовки автентифікації й підписи, а також
+ * поля з обліковими даними на верхньому, першому й другому рівнях вкладеності будь-якого об'єкта
+ * (наприклад, `err.body.secret` помилки або `req.body.apiKey`, якщо тіло колись потрапить у лог).
  */
 export const REDACT_PATHS = [
   'req.headers["x-api-key"]',
@@ -19,18 +31,9 @@ export const REDACT_PATHS = [
   'req.headers.authorization',
   'req.headers.cookie',
   'res.headers["set-cookie"]',
-  'apiKey',
-  'webhookSecret',
-  'nextWebhookSecret',
-  'password',
-  'secret',
-  'token',
-  '*.apiKey',
-  '*.webhookSecret',
-  '*.nextWebhookSecret',
-  '*.password',
-  '*.secret',
-  '*.token',
+  ...SECRET_FIELDS,
+  ...SECRET_FIELDS.map((field) => '*.' + field),
+  ...SECRET_FIELDS.map((field) => '*.*.' + field),
 ];
 
 const QUIET_ROUTES = new Set(['/health', '/ready', '/metrics']);

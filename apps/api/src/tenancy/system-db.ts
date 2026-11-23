@@ -254,4 +254,18 @@ export class SystemDb {
     );
     return row.deleted;
   }
+
+  /**
+   * Одна сторінка проходу очищення версій. Новий прохід починається не раніше ніж через
+   * `minGapMs` після завершення попереднього (будь-яким воркером); до того — `(0, false)`.
+   */
+  async purgeWorkflowVersions(
+    minGapMs = 0,
+  ): Promise<{ deleted: number; more: boolean }> {
+    const [row]: Array<{ deleted: number; more: boolean }> =
+      await this.ds.query('SELECT * FROM purge_workflow_versions($1)', [
+        minGapMs,
+      ]);
+    return row;
+  }
 }

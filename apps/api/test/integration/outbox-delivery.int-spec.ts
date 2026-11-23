@@ -1,3 +1,4 @@
+import { Resolver } from 'node:dns/promises';
 import { DataSource } from 'typeorm';
 import { WorkerModule } from '../../src/app.module';
 import { OutboxMetrics } from '../../src/outbox/outbox.metrics';
@@ -77,6 +78,36 @@ describe('notification delivery', () => {
     return values.find((v) => v.labels.outcome === name)?.value ?? 0;
   }
 
+  it('retains delivered and explicitly cancelled events from their own terminal timestamps', async () => {
+    const cases = {
+      oldDelivered: await complete(),
+      oldCancelled: await complete(),
+      newDelivered: await complete(),
+      newCancelled: await complete(),
+      pending: await complete(),
+    };
+    for (const [key, row] of Object.entries(cases)) {
+      if (key === 'pending') continue;
+      const status = key.endsWith('Delivered') ? 'delivered' : 'cancelled';
+      await ds.query(
+        `UPDATE outbox_events SET status=$2::text,
+           "deliveredAt"=CASE WHEN $2::text='delivered' THEN now()-make_interval(days=>$3) END,
+           "cancelledAt"=CASE WHEN $2::text='cancelled' THEN now()-make_interval(days=>$3) END
+           WHERE id=$1`,
+        [row.id, status, key.startsWith('old') ? 8 : 6],
+      );
+    }
+    const cleanup = await sender();
+    expect(await cleanup.purgeDelivered()).toBe(2);
+    expect(await cleanup.purgeDelivered()).toBe(0);
+    const rows: Array<{ id: string }> = await ds.query(
+      'SELECT id FROM outbox_events',
+    );
+    expect(new Set(rows.map((row) => row.id))).toEqual(
+      new Set([cases.newDelivered.id, cases.newCancelled.id, cases.pending.id]),
+    );
+  });
+
   beforeAll(async () => {
     ds = await openTestDataSource();
     await receiver.start();
@@ -113,7 +144,7 @@ describe('notification delivery', () => {
     await ds.destroy();
   });
 
-  it('keeps a cancelled event fenced when the old receiver responds after a new PUT', async () => {
+  it('fences a paused attempt when the old receiver responds after a new PUT and delivers the event again', async () => {
     const old = await complete();
     const worker = await sender();
     let release!: () => void;
@@ -137,8 +168,16 @@ describe('notification delivery', () => {
       release();
       await delivery;
     }
-    expect((await event(old.id)).status).toBe('cancelled');
-    expect(await worker.deliverNext()).toBe(false);
+    // Пізня 503 старого отримувача не змінює подію; вона доходить до нового endpoint-а з тим самим ID.
+    expect((await event(old.id)).status).toBe('pending');
+    receiver.respond = (_req, res) => {
+      res.writeHead(200).end();
+    };
+    expect(await worker.deliverNext()).toBe(true);
+    expect((await event(old.id)).status).toBe('delivered');
+    expect(
+      receiver.hits('/new').map((r) => r.headers['x-flowforge-event-id']),
+    ).toEqual([old.id]);
   });
 
   it('reclaims a failed delivery at backoff before the previous lease expires', async () => {
@@ -388,10 +427,23 @@ describe('notification delivery', () => {
     const { port } = new URL(receiver.url('/'));
     await ds.query(
       `UPDATE notification_settings SET url = $2 WHERE "tenantId" = $1`,
-      [tenantId, `http://localhost:${port}/hooks/flowforge`],
+      [tenantId, `http://outbox.test:${port}/hooks/flowforge`],
     );
     const s = await sender();
-    await s.deliverNext();
+    const v4 = jest
+      .spyOn(Resolver.prototype, 'resolve4')
+      .mockImplementation(() => Promise.resolve(['127.0.0.1']));
+    const v6 = jest
+      .spyOn(Resolver.prototype, 'resolve6')
+      .mockImplementation(() => Promise.resolve([]));
+    try {
+      await s.deliverNext();
+      expect(v4).toHaveBeenCalledWith('outbox.test');
+      expect(v6).toHaveBeenCalledWith('outbox.test');
+    } finally {
+      v4.mockRestore();
+      v6.mockRestore();
+    }
     expect(receiver.requests).toEqual([]);
     expect(await event(e.id)).toMatchObject({
       status: 'pending',

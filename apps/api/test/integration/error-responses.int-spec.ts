@@ -145,7 +145,7 @@ describe('error responses and their log records', () => {
     expect(record?.error).toMatchObject({ type: 'PayloadTooLargeError' });
   });
 
-  it('does not copy fragments of a malformed JSON body into the log', async () => {
+  it('uses the fixed malformed JSON error in the response and correlated warning', async () => {
     // Тіло workflow може містити секрети (заголовки http-кроку); JSON.parse повторює в тексті
     // помилки ~10 символів навколо місця помилки — тут це початок токена без лапок.
     const secret = 'Sk9xQ2vLp7Rm';
@@ -156,6 +156,13 @@ describe('error responses and their log records', () => {
       },
     );
     expect(res.status).toBe(400);
+    expect(res.headers.get('x-request-id')).toBe('bad-json-log-1');
+    const body = await res.text();
+    expect(JSON.parse(body)).toMatchObject({
+      statusCode: 400,
+      message: 'Невалідний JSON',
+      correlationId: 'bad-json-log-1',
+    });
     const record = running.logs.find((l) => l.context === 'ExceptionsFilter');
     expect(record).toMatchObject({
       level: 40,
@@ -164,8 +171,9 @@ describe('error responses and their log records', () => {
     });
     expect(record?.error).toMatchObject({
       type: 'BadRequestException',
-      message: expect.stringContaining('is not valid JSON') as unknown,
+      message: 'Невалідний JSON',
     });
+    expect(body).not.toContain(secret.slice(0, 6));
     expect(JSON.stringify(running.logs)).not.toContain(secret.slice(0, 6));
   });
 

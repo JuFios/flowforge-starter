@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ArgumentsHost,
   Catch,
   ExceptionFilter,
@@ -14,6 +15,23 @@ import {
   getCorrelationId,
 } from './correlation';
 import { toSafeError } from './safe-error';
+
+/** Заміна помилки до того, як Nest збереже повідомлення парсера в BadRequestException. */
+export function sanitizeJsonParseError(
+  error: unknown,
+  _request: unknown,
+  _response: unknown,
+  next: (error: unknown) => void,
+): void {
+  if (
+    error instanceof SyntaxError &&
+    (error as { type?: unknown }).type === 'entity.parse.failed'
+  ) {
+    next(new BadRequestException('Невалідний JSON'));
+    return;
+  }
+  next(error);
+}
 
 /**
  * Помилки з http-errors (body-parser: 413 завелике тіло, 415 кодування/кодова сторінка тощо)

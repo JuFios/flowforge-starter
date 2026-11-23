@@ -19,6 +19,7 @@ const valid = {
   loaded: phase,
   aPerSecond: 10,
   aDuringB: 20,
+  outboxFailuresDuringB: 30,
   claimP95Ms: 10,
 };
 describe('fairness load evidence', () => {
@@ -68,6 +69,9 @@ describe('fairness load evidence', () => {
   });
   it('requires the backlog tenant to complete work during the loaded phase', () => {
     expect(problems({ ...valid, aDuringB: 0 } as typeof valid)).not.toEqual([]);
+  });
+  it('requires evidence of failed notification delivery during the loaded phase', () => {
+    expect(problems({ ...valid, outboxFailuresDuringB: 0 })).not.toEqual([]);
   });
   it('cleans only the current backlog after a failed measurement', async () => {
     const sql = jest.fn().mockResolvedValue([{ running: 0, pending: 0 }]);

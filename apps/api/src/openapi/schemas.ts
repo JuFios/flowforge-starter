@@ -17,6 +17,8 @@ export const integer: SchemaObject = { type: 'integer' };
 const bool: SchemaObject = { type: 'boolean' };
 export const uuid: SchemaObject = { type: 'string', format: 'uuid' };
 const date: SchemaObject = { type: 'string', format: 'date-time' };
+/** Довільне значення JSON, зокрема `null` (вихід ще не обчислено або крок повернув null). */
+const anyJson: SchemaObject = { nullable: true };
 export const nullable = (schema: SchemaObject): SchemaObject => ({
   ...schema,
   nullable: true,
@@ -155,7 +157,7 @@ const execution = {
   tenantId: uuid,
   workflowVersionId: nullable(uuid),
   input: { type: 'object', additionalProperties: true },
-  output: {},
+  output: anyJson,
   idempotencyKey: nullable(str),
 };
 const step = {
@@ -214,8 +216,8 @@ const event = {
 const attempt = object({
   attempt: integer,
   senderId: str,
-  revision: integer,
-  keyIds: array(uuid),
+  revision: nullable(integer),
+  keyIds: nullable(array(uuid)),
   startedAt: date,
   finishedAt: nullable(date),
   outcome: nullable(str),
@@ -257,6 +259,7 @@ export const schemas: Record<string, SchemaObject> = {
   ExecutionSummary: object({
     ...listing,
     revision: { ...str, pattern: '^[0-9]+$' },
+    terminalCycles: { ...integer, minimum: 0, maximum: 2_147_483_647 },
     plan: array(object({ id: stepId, type: choice(types) })),
     steps: array(object(stepSummary)),
     inputBytes: integer,
@@ -271,12 +274,12 @@ export const schemas: Record<string, SchemaObject> = {
         executionId: uuid,
         tenantId: uuid,
         idempotencyKey: str,
-        output: {},
+        output: anyJson,
       }),
     ),
   }),
-  StepDetail: object({ ...stepSummary, output: {} }),
-  Output: object({ output: {} }),
+  StepDetail: object({ ...stepSummary, output: anyJson }),
+  Output: object({ output: anyJson }),
   ExecutionId: object({ executionId: uuid }),
   RunInput: {
     type: 'object',
@@ -301,6 +304,7 @@ export const schemas: Record<string, SchemaObject> = {
   Ticket: object({ ticket: str, expiresAt: date }),
   SigningKeys: array(keyView),
   NewKey: object({ id: uuid, secret: str }),
+  Discarded: object({ discarded: integer }),
   Settings: object(settings),
   SettingsResult: object({ ...settings, secret: str }, Object.keys(settings)),
   SettingsInput: closed({ url: text(MAX_URL_LENGTH), enabled: bool }, ['url']),

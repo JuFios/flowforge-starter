@@ -8,6 +8,8 @@ import {
   ParseUUIDPipe,
   ParseIntPipe,
   BadRequestException,
+  HttpException,
+  HttpStatus,
   Post,
   Query,
   Res,
@@ -17,6 +19,7 @@ import { TenantAuthGuard } from '../auth/api-key.guard';
 import { RateLimit } from '../limits/rate-limit.guard';
 import { CurrentTenant } from '../auth/current-tenant.decorator';
 import { Tenant } from '../entities';
+import { DETAIL_RETRY_AFTER_SECONDS } from './detail-limits';
 import { ExecutionReader } from './execution-reader.service';
 import { ExecutionsService } from './executions.service';
 import { parseIdempotencyKey } from './idempotency-key';
@@ -67,14 +70,50 @@ export class ExecutionsController {
   async retry(
     @CurrentTenant() t: Tenant,
     @Param('id', ParseUUIDPipe) id: string,
+    @Query('expectedTerminalCycle') expectedTerminalCycle?: unknown,
   ) {
-    const execution = await this.executions.retry(t.id, id);
+    let cycle: number | undefined;
+    if (expectedTerminalCycle !== undefined) {
+      if (
+        typeof expectedTerminalCycle !== 'string' ||
+        !/^(0|[1-9][0-9]{0,9})$/.test(expectedTerminalCycle) ||
+        Number(expectedTerminalCycle) > 2_147_483_647
+      )
+        throw new BadRequestException(
+          'expectedTerminalCycle має бути цілим числом від 0 до 2147483647',
+        );
+      cycle = Number(expectedTerminalCycle);
+    }
+    const execution = await this.executions.retry(t.id, id, cycle);
     return { executionId: execution.id };
   }
 
   @Get('executions/:id')
-  get(@CurrentTenant() t: Tenant, @Param('id', ParseUUIDPipe) id: string) {
-    return this.reader.detail(t.id, id);
+  async get(
+    @CurrentTenant() t: Tenant,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const disconnect = new AbortController();
+    const close = () => disconnect.abort();
+    res.once('close', close);
+    if (res.destroyed) close();
+    try {
+      const detail = await this.reader.detail(t.id, id, disconnect.signal);
+      detail.getStream().once('close', () => res.off('close', close));
+      return detail;
+    } catch (err) {
+      res.off('close', close);
+      // Тимчасова відмова (частка тенанта, зайнятий пул, дедлайн): клієнт знає, коли повторити.
+      if (
+        err instanceof HttpException &&
+        [HttpStatus.TOO_MANY_REQUESTS, HttpStatus.SERVICE_UNAVAILABLE].includes(
+          err.getStatus(),
+        )
+      )
+        res.setHeader('Retry-After', String(DETAIL_RETRY_AFTER_SECONDS));
+      throw err;
+    }
   }
   @Get('executions/:id/summary')
   summary(@CurrentTenant() t: Tenant, @Param('id', ParseUUIDPipe) id: string) {

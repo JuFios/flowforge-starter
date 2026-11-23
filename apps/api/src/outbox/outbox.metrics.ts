@@ -36,7 +36,7 @@ export class OutboxMetrics {
   readonly claimFailures: Counter;
   /** Підказки `dueAt`, які захоплення знайшло застарілими й перерахувало. */
   readonly dueRepairs: Counter;
-  /** Видалені доставлені події (після OUTBOX_RETENTION_DAYS). */
+  /** Видалені доставлені та скасовані події (після OUTBOX_RETENTION_DAYS). */
   readonly purged: Counter;
   readonly collectErrors: Counter;
   private cached?: { at: number; backlog: Backlog };
@@ -73,7 +73,7 @@ export class OutboxMetrics {
     });
     this.purged = new Counter({
       name: 'flowforge_outbox_purged_total',
-      help: 'Delivered notification events deleted after the retention period',
+      help: 'Delivered and cancelled notification events deleted after the retention period',
       registers,
     });
     // Gauge-і — першими: лічильник помилок нижче чекає на їхній збір (як у глибини черги).

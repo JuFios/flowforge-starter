@@ -10,14 +10,17 @@ import { EntityManager } from 'typeorm';
 import { EnvironmentVariables } from '../config/env.validation';
 import { MissedRunPolicy, Workflow } from '../entities';
 import { ExecutionsService } from '../executions/executions.service';
-import { QueueFullException } from '../limits/limit-exceptions';
+import {
+  OutboxFullException,
+  QueueFullException,
+} from '../limits/limit-exceptions';
 import { runWithCorrelationId } from '../observability/correlation';
 import { toSafeError } from '../observability/safe-error';
 import { SCHEDULE_PAGE, SystemDb } from '../tenancy/system-db';
 import { TenantDb } from '../tenancy/tenant-db';
 import { CronSchedule, InvalidScheduleError } from './cron-schedule';
 import { decideMissed } from './missed-runs';
-import { SchedulerMetrics } from './scheduler.metrics';
+import { ScheduleBlockedReason, SchedulerMetrics } from './scheduler.metrics';
 
 const WORKFLOW_PAGE = 16;
 
@@ -41,7 +44,7 @@ type Attempt =
   | 'fired'
   /** Пропущені моменти відкинуто за політикою `skip`. */
   | 'skipped'
-  /** Черга тенанта повна: курсор стоїть, наступний тік спробує знову. */
+  /** Квота черги або outbox вичерпана: курсор стоїть, наступний тік спробує знову. */
   | 'blocked'
   /** Розклад не обчислюється (успадкований невалідний вираз). */
   | 'invalid';
@@ -49,7 +52,10 @@ type Attempt =
 /** Рядок workflow, заблокований спрацюванням, разом із часом БД. */
 /** Версія заблокованого рядка для умовного запису після відкату постановки. */
 class BlockedSchedule extends Error {
-  constructor(readonly revision: string) {
+  constructor(
+    readonly revision: string,
+    readonly reason: ScheduleBlockedReason,
+  ) {
     super('schedule enqueue rolled back');
   }
 }
@@ -304,7 +310,7 @@ export class SchedulerService
       return result;
     } catch (err) {
       if (!(err instanceof BlockedSchedule)) throw err;
-      this.metrics.blocked.inc({ reason: 'queue_full' });
+      this.metrics.blocked.inc({ reason: err.reason });
       const [rows]: [Array<{ id: string }>, number] = await this.db.run(
         tenantId,
         (em) =>
@@ -317,8 +323,8 @@ export class SchedulerService
       );
       if (rows.length > 0)
         this.logger.warn(
-          { workflowId },
-          'scheduled runs are held: the tenant queue is full',
+          { workflowId, reason: err.reason },
+          'scheduled runs are held by a tenant quota',
         );
       return { attempt: 'blocked', created: false };
     }
@@ -419,8 +425,11 @@ export class SchedulerService
             correlationId,
           );
         } catch (err) {
+          // Повна черга чи квота outbox відкладає спрацювання до звільнення місця (3.3.8).
           if (err instanceof QueueFullException)
-            throw new BlockedSchedule(row.revision);
+            throw new BlockedSchedule(row.revision, 'queue_full');
+          if (err instanceof OutboxFullException)
+            throw new BlockedSchedule(row.revision, 'outbox_full');
           // У контексті спрацювання (кореляційний ID моменту), з workflowId і моментом. Помилка
           // з'єднання перериває тік, і її логує сам тік.
           if (scopedToWorkflow(err)) {

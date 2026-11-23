@@ -18,6 +18,7 @@ const LIMIT_KEYS = [
   'TENANT_MAX_RUNNING',
   'TENANT_MAX_QUEUE_SIZE',
   'TENANT_MAX_WORKFLOWS',
+  'TENANT_MAX_OUTBOX_EVENTS',
   'TENANT_RATE_LIMIT',
   'TENANT_RATE_WINDOW_MS',
   'TENANT_WEBHOOK_RATE_LIMIT',
@@ -162,6 +163,19 @@ describe('README commands in a new terminal', () => {
     );
     expect(docs).toContain(
       'Потрібні Node.js 20.12+ (гілка 20) або 21.7+ (21 і новіші)',
+    );
+  });
+
+  it('documents discarding a disputed outbox backlog before recreating settings and starting workers', () => {
+    const docs = readFileSync(
+      join(__dirname, '../../../../docs/operations.md'),
+      'utf8',
+    );
+    const upgrade = docs
+      .split('\n### Оновлення з першої версії outbox\n')[1]
+      ?.split('\n### ')[0];
+    expect(upgrade).toMatch(
+      /запустіть лише API[\s\S]*`POST \/tenants\/me\/notifications\/events\/discard`[\s\S]*`PUT \/tenants\/me\/notifications`[\s\S]*запустіть воркери/iu,
     );
   });
 });

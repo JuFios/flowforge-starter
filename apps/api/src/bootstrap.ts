@@ -6,6 +6,7 @@ import {
   ValidationPipe,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { sanitizeJsonParseError } from './observability/all-exceptions.filter';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { Logger } from 'nestjs-pino';
 import { CreateTenantDto } from './tenants/tenants.controller';
@@ -121,6 +122,7 @@ export function configureApp(app: INestApplication): INestApplication {
   // тексті: verify позначає запит, 400 — після guard-ів (ExactJsonNumbersInterceptor).
   http.useBodyParser('json', { ...options, verify: markInexactJsonNumbers });
   http.use(deferInvalidUtf8ParseError);
+  http.use(sanitizeJsonParseError);
   http.useBodyParser('urlencoded', { ...options, extended: true });
   // Невідомі поля — 400, а не мовчазне відкидання: тенант бачить, що поле не діє.
   app.useGlobalPipes(

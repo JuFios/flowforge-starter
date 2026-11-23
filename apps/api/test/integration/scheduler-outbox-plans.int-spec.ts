@@ -43,12 +43,14 @@ describe('scheduler and outbox query plans', () => {
     );
     await ds.query(
       `INSERT INTO outbox_events ("tenantId", "executionId", sequence, type, payload, status,
-                                  "deliveredAt", "leaseToken", "leaseUntil")
+                                  "deliveredAt", "leaseToken", "leaseUntil", "cancelledAt")
        SELECT $1, gen_random_uuid(), 1, 'execution.succeeded', '{}',
-              CASE WHEN g % 5000 = 0 THEN 'pending' WHEN g % 5000 = 1 THEN 'sending' ELSE 'delivered' END,
-              CASE WHEN g % 5000 > 1 THEN now() - make_interval(mins => g) END,
+              CASE WHEN g % 5000 = 0 THEN 'pending' WHEN g % 5000 = 1 THEN 'sending'
+                   WHEN g % 5000 = 2 THEN 'cancelled' ELSE 'delivered' END,
+              CASE WHEN g % 5000 > 2 THEN now() - make_interval(mins => g) END,
               CASE WHEN g % 5000 = 1 THEN gen_random_uuid() END,
-              CASE WHEN g % 5000 = 1 THEN now() - interval '1 second' END
+              CASE WHEN g % 5000 = 1 THEN now() - interval '1 second' END,
+              CASE WHEN g % 5000 = 2 THEN now() - make_interval(days => 30) END
          FROM generate_series(1, 50000) g`,
       [tenantId],
     );
@@ -119,6 +121,14 @@ describe('scheduler and outbox query plans', () => {
         ORDER BY o."deliveredAt" LIMIT 1000 FOR UPDATE SKIP LOCKED`,
       [],
       'IDX_outbox_events_delivered',
+    ],
+    [
+      'events discarded by tenants past their retention (purge_delivered_events)',
+      `SELECT o.id FROM outbox_events o WHERE o.status = 'cancelled'
+          AND o."cancelledAt" < now() - make_interval(days => 7)
+        ORDER BY o."cancelledAt" LIMIT 1000 FOR UPDATE SKIP LOCKED`,
+      [],
+      'IDX_outbox_events_cancelled',
     ],
     [
       'a page of the event journal of a tenant',

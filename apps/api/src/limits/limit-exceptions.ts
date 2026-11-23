@@ -47,3 +47,43 @@ export class WorkflowLimitException extends HttpException {
     );
   }
 }
+
+/**
+ * Квота outbox тенанта вичерпана: недоставлені події разом із живими виконаннями досягли
+ * `maxOutboxEvents`. Нове виконання не створено, прийняті події лишаються й доставляються. Без
+ * `Retry-After`: місце звільняє завершення без нової події, доставка або явний `discard`.
+ */
+export class OutboxFullException extends HttpException {
+  constructor(limit: number, undelivered: number) {
+    const action =
+      undelivered === 0
+        ? 'Дочекайтеся завершення виконань. Якщо вони створять сповіщення, місце звільниться після їх доставки або скасування.'
+        : 'Відновіть доставку або скасуйте недоставлені події. Якщо квоту ще займають виконання, дочекайтеся їх завершення.';
+    super(
+      {
+        statusCode: HttpStatus.TOO_MANY_REQUESTS,
+        error: 'outbox_full',
+        message: `Квота сповіщень заповнена. Ліміт для недоставлених подій і незавершених виконань — ${limit}. ${action}`,
+      },
+      HttpStatus.TOO_MANY_REQUESTS,
+    );
+  }
+}
+
+/**
+ * Тенант уже готує чи отримує стільки знімків `GET /executions/:id`, скільки дозволяє його частка
+ * спільного пулу інстансу (DETAIL_MAX_PER_TENANT). `Retry-After` ставить контролер.
+ */
+export class DetailInProgressException extends HttpException {
+  constructor() {
+    super(
+      {
+        statusCode: HttpStatus.TOO_MANY_REQUESTS,
+        error: 'detail_in_progress',
+        message:
+          'попередній запит повних деталей виконання ще триває; дочитайте його або повторіть пізніше',
+      },
+      HttpStatus.TOO_MANY_REQUESTS,
+    );
+  }
+}

@@ -35,6 +35,9 @@ export const POSTURE: {
   functions: Readonly<Record<string, FunctionPosture>>;
 } = {
   tables: {
+    workflow_version_cleanup: {
+      grants: { [SYSTEM_ROLE]: ['SELECT', 'UPDATE'] },
+    },
     workflow_usage: {
       tenantColumn: 'tenantId',
       grants: { [SYSTEM_ROLE]: ['SELECT', 'INSERT', 'UPDATE'] },
@@ -128,6 +131,10 @@ export const POSTURE: {
       tenantColumn: 'tenantId',
       grants: { [SYSTEM_ROLE]: ALL_TABLE },
     },
+    tenant_outbox_usage: {
+      tenantColumn: 'tenantId',
+      grants: { [SYSTEM_ROLE]: ALL_TABLE },
+    },
     limit_defaults: { grants: { [SYSTEM_ROLE]: ALL_TABLE } },
     rate_limit_buckets: { grants: { [SYSTEM_ROLE]: ALL_TABLE } },
     migrations: { grants: {} },
@@ -177,10 +184,18 @@ export const POSTURE: {
       owner: SYSTEM_ROLE,
       execute: [WORKER_ROLE],
     },
+    'purge_workflow_versions(integer)': {
+      owner: SYSTEM_ROLE,
+      execute: [WORKER_ROLE],
+    },
     'queue_depth_by_tenant()': { owner: SYSTEM_ROLE, execute: [WORKER_ROLE] },
     // Тригерні функції обліку: їх викликає лише тригер.
     'tenant_usage_on_job()': { owner: SYSTEM_ROLE, execute: [] },
     'close_cancelled_attempt()': { owner: SYSTEM_ROLE, execute: [] },
+    'close_paused_attempt()': { owner: SYSTEM_ROLE, execute: [] },
+    'outbox_usage()': { owner: SYSTEM_ROLE, execute: [] },
+    'outbox_usage_on_tenant()': { owner: SYSTEM_ROLE, execute: [] },
+    'outbox_attempt_history()': { owner: SYSTEM_ROLE, execute: [] },
     'execution_terminal_cycle()': { owner: SYSTEM_ROLE, execute: [] },
     'outbox_on_execution()': { owner: SYSTEM_ROLE, execute: [] },
     'claim_outbox_event(text,integer,integer)': {

@@ -57,10 +57,10 @@ export class JobRunnerService implements BeforeApplicationShutdown {
   /** Скасовується на початку завершення: цикли перестають брати задачі й виходять із пауз. */
   private stopping = new AbortController();
   private loops: Promise<void>[] = [];
-  private readonly inFlight = new Map<
-    string,
-    { keeper: LeaseKeeper; done: Promise<void> }
-  >();
+  private readonly inFlight = new Set<{
+    keeper: LeaseKeeper;
+    done: Promise<void>;
+  }>();
   private readonly maintenanceTimers = new Set<NodeJS.Timeout>();
   private readonly maintenanceRuns = new Set<Promise<void>>();
   /** Невдалі захоплення поспіль (спільно для всіх циклів); 0 — захоплення працює. */
@@ -98,6 +98,27 @@ export class JobRunnerService implements BeforeApplicationShutdown {
     this.scheduleMaintenance(
       () => this.purgeFinished(),
       () => Math.min(MAX_TIMER_MS, cleanupMs * (0.5 + Math.random())),
+    );
+    let moreVersions = true;
+    this.scheduleMaintenance(
+      async () => {
+        moreVersions = false;
+        // Пауза між проходами — чверть інтервалу очищення: коротша за найменшу паузу циклу
+        // (0,5×), але довша за повторні виклики воркерів, які ще продовжували завершений прохід.
+        const { deleted, more } = await this.queue.purgeWorkflowVersions(
+          Math.floor(cleanupMs / 4),
+        );
+        moreVersions = more;
+        if (deleted > 0)
+          this.logger.log(
+            { deleted },
+            'deleted unreferenced workflow versions',
+          );
+      },
+      () =>
+        moreVersions
+          ? 1_000 + Math.random() * 1_000
+          : Math.min(MAX_TIMER_MS, cleanupMs * (0.5 + Math.random())),
     );
   }
 
@@ -385,9 +406,10 @@ export class JobRunnerService implements BeforeApplicationShutdown {
         }
       },
     );
-    const tracked = done.catch(() => undefined);
-    this.inFlight.set(job.id, { keeper, done: tracked });
-    void tracked.finally(() => this.inFlight.delete(job.id));
+    const attempt = { keeper, done: done.catch(() => undefined) };
+    // Те саме завдання може мати новий lease до завершення старої спроби.
+    this.inFlight.add(attempt);
+    void attempt.done.then(() => this.inFlight.delete(attempt));
     return done;
   }
 

@@ -37,7 +37,7 @@ describe('outbox and scheduler metrics', () => {
     ds = await openTestDataSource();
     await truncateAll(ds);
     await receiver.start();
-    apiApp = await startApp();
+    apiApp = await startApp(undefined, { captureLogs: true });
     worker = await startApp(WorkerModule);
   });
   afterAll(async () => {
@@ -146,5 +146,63 @@ describe('outbox and scheduler metrics', () => {
     expect(
       (await tenantCall(apiApp, apiKey, 'GET', `/workflows/${wf.id}`)).status,
     ).toBe(200);
+  });
+
+  it('reports an outbox quota block with queue capacity and does not advance the cursor', async () => {
+    const scheduler = apiApp.app.get(SchedulerService);
+    scheduler.onApplicationShutdown();
+    const { tenant, apiKey } = await createTenant(ds, 'outbox-quota-cron');
+    const manual = await createWorkflow(ds, tenant.id);
+    await ds.query(
+      'UPDATE tenants SET "maxQueueSize"=100, "maxOutboxEvents"=1 WHERE id=$1',
+      [tenant.id],
+    );
+    const queued = await tenantCall(
+      apiApp,
+      apiKey,
+      'POST',
+      `/workflows/${manual.id}/run`,
+      {},
+    );
+    expect(queued.status).toBe(201);
+    const wf = await createScheduledWorkflow(apiApp, ds, apiKey, {
+      cron: '0 * * * * *',
+    });
+    const cursor = new Date('2025-01-01T00:00:00.000Z');
+    await ds.query(
+      'UPDATE workflows SET "scheduleCursor"=$2, "nextFireAt"=$2 WHERE id=$1',
+      [wf.id, cursor],
+    );
+    const port = apiApp.app.get(MetricsServer).port as number;
+    const read = async () =>
+      (await fetch(`http://127.0.0.1:${port}/metrics`)).text();
+    const outbox = 'flowforge_schedule_blocked_total{reason="outbox_full"}';
+    const queue = 'flowforge_schedule_blocked_total{reason="queue_full"}';
+    const before = await read();
+    await scheduler.tick();
+    const after = await read();
+    expect(sample(after, outbox)).toBe((sample(before, outbox) ?? 0) + 1);
+    expect(sample(after, queue)).toBe(sample(before, queue));
+    expect(apiApp.logs).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ workflowId: wf.id, reason: 'outbox_full' }),
+      ]),
+    );
+    const workflows: Array<{
+      scheduleCursor: Date;
+      scheduleBlockedSince: Date;
+    }> = await ds.query(
+      'SELECT "scheduleCursor", "scheduleBlockedSince" FROM workflows WHERE id=$1',
+      [wf.id],
+    );
+    expect(workflows[0]).toMatchObject({
+      scheduleCursor: cursor,
+      scheduleBlockedSince: expect.any(Date) as unknown,
+    });
+    expect(
+      await ds.query('SELECT id FROM executions WHERE "workflowId"=$1', [
+        wf.id,
+      ]),
+    ).toEqual([]);
   });
 });

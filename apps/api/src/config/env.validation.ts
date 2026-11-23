@@ -5,6 +5,7 @@ import {
   MAX_RESPONSE_BYTES,
   outboundSettings,
 } from './outbound';
+import { MAX_DETAIL_BYTES } from '../executions/detail-limits';
 import { isIP } from 'node:net';
 import { plainToInstance, Type } from 'class-transformer';
 import {
@@ -142,6 +143,31 @@ function IsNotLessThan(other: string, extra = 0): PropertyDecorator {
     });
 }
 
+/**
+ * Значення не менше за `factor` × значення іншої властивості. Правило спільних пулів інстансу API
+ * (docs/operations.md, «Спільні пули API»): частка одного тенанта — не більше половини пулу.
+ */
+function IsAtLeastTimes(other: string, factor: number): PropertyDecorator {
+  return (target, propertyName) =>
+    registerDecorator({
+      name: 'isAtLeastTimes',
+      target: target.constructor,
+      propertyName: propertyName as string,
+      constraints: [other, factor],
+      validator: {
+        validate(value: unknown, args: ValidationArguments) {
+          const bound = (args.object as Record<string, unknown>)[other];
+          return (
+            typeof value !== 'number' ||
+            typeof bound !== 'number' ||
+            value >= bound * factor
+          );
+        },
+        defaultMessage: () => `має бути не менше за ${factor} × ${other}`,
+      },
+    });
+}
+
 /** Іменовані підмережі, які розуміє Express `trust proxy`. */
 const TRUST_PROXY_NAMES = new Set(['loopback', 'linklocal', 'uniquelocal']);
 
@@ -253,14 +279,37 @@ export class EnvironmentVariables extends DatabaseEnvironment {
   REALTIME_TICKET_TTL_MS = 30_000;
   @Type(() => Number)
   @IsInt()
-  @Min(1)
+  @Min(2)
   @Max(10000)
+  @IsAtLeastTimes('REALTIME_MAX_CONNECTIONS_PER_TENANT', 2)
   REALTIME_MAX_CONNECTIONS = 256;
   @Type(() => Number)
   @IsInt()
   @Min(1)
   @Max(1000)
   REALTIME_MAX_CONNECTIONS_PER_TENANT = 32;
+
+  /**
+   * Спільний пул знімків `GET /executions/:id` інстансу API: одночасні знімки, частка тенанта й
+   * диск тимчасових файлів. Частка одного тенанта — не більше половини кожного ресурсу.
+   */
+  @Type(() => Number)
+  @IsInt()
+  @Min(2)
+  @Max(256)
+  @IsAtLeastTimes('DETAIL_MAX_PER_TENANT', 2)
+  DETAIL_MAX_CONCURRENT = 8;
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(16)
+  DETAIL_MAX_PER_TENANT = 1;
+  @Type(() => Number)
+  @IsInt()
+  @Min(2 * MAX_DETAIL_BYTES)
+  @Max(Number.MAX_SAFE_INTEGER)
+  @IsAtLeastTimes('DETAIL_MAX_PER_TENANT', 2 * MAX_DETAIL_BYTES)
+  DETAIL_DISK_BUDGET_BYTES = 1024 * 1024 * 1024;
 
   /**
    * Службовий порт API лише для GET /metrics. Не публікується назовні (docker-compose),
@@ -463,7 +512,8 @@ export class EnvironmentVariables extends DatabaseEnvironment {
   JOB_CLEANUP_INTERVAL_MS = 3_600_000;
 
   /**
-   * Інтервал тіку планувальника: найбільше запізнення вчасного спрацювання (README 3.3.8). Тік
+   * Інтервал тіку планувальника: без перешкод вчасний момент обробляється на найближчому тіку;
+   * зайнятий рядок, повна черга чи квота outbox і простій відкладають спрацювання (README 3.3.8). Тік
    * обробляє лише належні розклади (індекс за `nextFireAt`), тож короткий інтервал не множить
    * роботу на кількість розкладів. Верхня межа — хвилина, найдрібніший крок 5-польного cron:
    * довший тік виконував би щохвилинні розклади пачками.

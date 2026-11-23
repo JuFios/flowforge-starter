@@ -5,7 +5,6 @@ import {
   ExecutionStream,
   newer,
   POLL_INTERVAL_MS,
-  REALTIME_REQUEST_TIMEOUT_MS,
   WATCHDOG_MS,
   type SocketLike,
   type StreamDeps,
@@ -39,6 +38,7 @@ function summary(
     scheduledAt: null,
     correlationId: null,
     revision,
+    terminalCycles: 0,
     outputBytes: null,
     inputBytes: 2,
     plan: [],
@@ -111,6 +111,7 @@ function harness(
     clearTimeout: (handle) => {
       timers.delete(handle as number);
     },
+    now: () => now,
     random: () => 0.5,
   };
   const stream = new ExecutionStream(ID, deps, {
@@ -220,38 +221,39 @@ test('refreshes the live workflow name at the same revision without rolling back
   h.stream.stop();
 });
 
-test('times out a stalled ticket and fallback poll, and discards their late responses', async () => {
+test('retries a ticket and fallback poll after the HTTP adapter reports a deadline', async () => {
   let releaseTicket: (result: TicketResult) => void = () => undefined;
   let releasePoll: (result: SummaryResult) => void = () => undefined;
-  const stuckTicket = new Promise<TicketResult>((resolve) => {
+  const firstTicket = new Promise<TicketResult>((resolve) => {
     releaseTicket = resolve;
   });
-  const stuckPoll = new Promise<SummaryResult>((resolve) => {
+  const firstPoll = new Promise<SummaryResult>((resolve) => {
     releasePoll = resolve;
   });
   let ticketCalls = 0;
   let pollCalls = 0;
   const h = harness({
     tickets: async () =>
-      ++ticketCalls === 1 ? stuckTicket : { ok: false, reason: 'retry' },
+      ++ticketCalls === 1 ? firstTicket : { ok: false, reason: 'retry' },
     summaries: async () =>
-      ++pollCalls === 1 ? stuckPoll : { ok: true, summary: summary('7') },
+      ++pollCalls === 1 ? firstPoll : { ok: true, summary: summary('7') },
   });
 
   h.stream.start();
-  await h.advance(REALTIME_REQUEST_TIMEOUT_MS - 1);
+  await h.advance(30_000);
   expect(h.aborts[0].aborted).toBe(false);
-  await h.advance(1);
-  expect(h.aborts[0].aborted).toBe(true);
+  expect(h.tickets).toBe(1);
+  releaseTicket({ ok: false, reason: 'retry' });
+  await h.flush();
   await h.advance(2_000);
   expect(h.states.at(-1)).toBe('polling');
   expect(h.summaryCalls).toBe(1);
-  releaseTicket({ ok: true, ticket: 'late' });
-  await h.advance(REALTIME_REQUEST_TIMEOUT_MS + POLL_INTERVAL_MS);
-  expect(h.summaryCalls).toBe(2);
-  expect(h.stream.snapshot()?.revision).toBe('7');
-  releasePoll({ ok: true, summary: summary('99') });
+  await h.advance(30_000);
+  expect(h.summaryCalls).toBe(1);
+  releasePoll({ ok: false, reason: 'retry' });
   await h.flush();
+  await h.advance(POLL_INTERVAL_MS);
+  expect(h.summaryCalls).toBe(2);
   expect(h.stream.snapshot()?.revision).toBe('7');
   expect(h.sockets).toHaveLength(0);
   h.stream.stop();
@@ -317,6 +319,59 @@ test('falls back to HTTP polling after three failed connections and stops pollin
   const calls = h.summaryCalls;
   await h.advance(POLL_INTERVAL_MS * 5);
   expect(h.summaryCalls).toBe(calls);
+});
+
+test('shares the Retry-After deadline across initial and fallback reads and cancels delayed polls', async () => {
+  let reconnect = false;
+  const h = harness({
+    summaries: async () => ({
+      ok: false,
+      reason: 'retry',
+      retryAfterMs: 60_000,
+    }),
+    tickets: async () =>
+      reconnect
+        ? { ok: true, ticket: 'restored' }
+        : { ok: false, reason: 'retry' },
+  });
+  h.stream.fetchInitialSummary();
+  h.stream.start();
+  await h.flush();
+  await h.advance(59_999);
+  expect(h.summaryCalls).toBe(1);
+  await h.advance(1);
+  expect(h.summaryCalls).toBe(2);
+  h.stream.nudge();
+  await h.advance(59_999);
+  expect(h.summaryCalls).toBe(2);
+  reconnect = true;
+  h.stream.nudge();
+  await h.flush();
+  h.sockets[0].send({ type: 'snapshot', execution: summary('6') });
+  await h.advance(1);
+  expect(h.summaryCalls).toBe(2);
+  expect(h.states.at(-1)).toBe('live');
+  h.stream.stop();
+  expect(h.timers.size).toBe(0);
+});
+
+test('stops a scheduled retry when the execution page unmounts', async () => {
+  const h = harness({
+    summaries: async () => ({
+      ok: false,
+      reason: 'retry',
+      retryAfterMs: 60_000,
+    }),
+    tickets: async () => ({ ok: false, reason: 'retry' }),
+  });
+  h.stream.start();
+  await h.flush();
+  await h.advance(2_000);
+  expect(h.summaryCalls).toBe(1);
+  h.stream.stop();
+  await h.advance(120_000);
+  expect(h.summaryCalls).toBe(1);
+  expect(h.timers.size).toBe(0);
 });
 
 test('treats close code 4401 as a revoked session and 4404 as a gone execution', async () => {

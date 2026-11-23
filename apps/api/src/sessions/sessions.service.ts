@@ -86,7 +86,15 @@ export class SessionsService {
           'SELECT EXISTS(SELECT 1 FROM realtime_tickets WHERE "tenantId"=$1 OFFSET 99) AS full',
           [tenantId],
         );
-        if (full) throw new HttpException('Ліміт одночасних тикетів', 429);
+        if (full)
+          throw new HttpException(
+            {
+              statusCode: 429,
+              error: 'ticket_limit',
+              message: 'Ліміт одночасних тикетів',
+            },
+            429,
+          );
         const [result] = await em.query<Array<{ expiresAt: Date }>>(
           `INSERT INTO realtime_tickets ("tenantId","executionId","sessionId","tokenHash","expiresAt")
         VALUES ($1,$2,$3,$4,clock_timestamp()+$5 * interval '1 millisecond') RETURNING "expiresAt"`,

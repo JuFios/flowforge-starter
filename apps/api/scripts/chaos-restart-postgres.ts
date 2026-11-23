@@ -1,5 +1,5 @@
 /**
- * Chaos-сценарій: під навантаженням двічі перезапускає Postgres (`docker compose restart postgres`)
+ * Chaos-сценарій: під навантаженням двічі аварійно зупиняє й запускає Postgres
  * і перевіряє, що воркери й API пережили це без перезапуску процесів, кожне виконання
  * завершилось, жоден завершений крок не виконано вдруге, а зовнішній ефект кожного http-кроку
  * стався рівно один раз (один ефект на Idempotency-Key).
@@ -9,8 +9,10 @@
  * Налаштування — див. chaos-common.ts.
  */
 import { spawnSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import {
   captureCheckpoints,
+  captureGatedPrefix,
   CheckpointObservation,
   collectOutcome,
   COMPOSE,
@@ -23,6 +25,7 @@ import {
   log,
   openDatabase,
   outcomeRows,
+  releaseEffect,
   sinkStats,
   sleep,
 } from './chaos-common';
@@ -74,71 +77,78 @@ function countLogLines(id: string, since: string, text: string): number {
     .filter((l) => l.includes(text)).length;
 }
 
-/** Скільки чекати, поки воркер вибраного кроку дійде до запису чекпоінта (HTTP до sink — 300 мс). */
-const CANDIDATE_WAIT_MS = 3_000;
-
-/**
- * Утримуємо один HTTP-чекпоінт до моменту, коли воркер справді чекає на його запис, і саме тоді
- * перезапускаємо Postgres. Якщо воркер вибраного кроку не дійшов до запису за CANDIDATE_WAIT_MS
- * (повільна чи повторювана спроба HTTP), блокування відпускається й береться інший крок: довге
- * утримання рядка без очікувача лише забрало б lease у воркера й нічого б не перевірило.
- */
+/** Sink приймає HTTP-ефект і чекає дозволу віддати відповідь. У цей час фікстура
+ * блокує рядок конкретного чекпоінта. Після відповіді sink воркер мусить реально
+ * чекати на запис, перш ніж PostgreSQL отримає SIGKILL. */
 async function restartAtCheckpoint(
-  batch: string[],
+  executionId: string,
+  token: string,
   observed: Map<string, CheckpointObservation>,
 ): Promise<{ checkpoint: string; started: number }> {
   const db = await openDatabase();
-  const deadline = Date.now() + 30_000;
-  let candidates = 0;
+  const gate = db.createQueryRunner();
+  let crashed = false;
   try {
+    await gate.startTransaction();
+    await gate.query("SET LOCAL statement_timeout = '3s'");
+    const deadline = Date.now() + 30_000;
+    let checkpoint: string | undefined;
     while (Date.now() < deadline) {
-      const gate = db.createQueryRunner();
-      try {
-        await gate.startTransaction();
-        await gate.query("SET LOCAL statement_timeout = '3s'");
-        const rows = (await gate.query(
-          `SELECT id FROM step_runs WHERE "executionId"=ANY($1)
-           AND "stepId"='charge' AND status='running'
-           AND EXISTS (SELECT FROM step_runs WHERE "executionId"=ANY($1)
-             AND "stepId"='charge' AND status='succeeded')
-           LIMIT 1 FOR UPDATE SKIP LOCKED`,
-          [batch],
-        )) as { id: string }[];
-        const checkpoint = rows[0]?.id;
-        if (checkpoint) {
-          candidates++;
-          const until = Date.now() + CANDIDATE_WAIT_MS;
-          while (Date.now() < until) {
-            const [row] = (await gate.query(
-              `SELECT EXISTS(SELECT FROM pg_stat_activity
-               WHERE pg_backend_pid()=ANY(pg_blocking_pids(pid))) AS waiting`,
-            )) as { waiting: boolean }[];
-            if (row.waiting) {
-              await captureCheckpoints(batch, observed);
-              log(
-                `restarting postgres during write to checkpoint ${checkpoint}`,
-              );
-              const started = Date.now();
-              docker([...COMPOSE, 'restart', 'postgres']);
-              return { checkpoint, started };
-            }
-            await sleep(25);
-          }
-        }
-        if (gate.isTransactionActive) await gate.rollbackTransaction();
-      } finally {
-        await gate.release();
+      const rows = (await gate.query(
+        `SELECT s.id FROM step_runs s WHERE s."executionId"=$1
+          AND s."stepId"='charge' AND s.status='running'
+          FOR UPDATE OF s SKIP LOCKED`,
+        [executionId],
+      )) as { id: string }[];
+      checkpoint = rows[0]?.id;
+      if (checkpoint) break;
+      await sleep(25);
+    }
+    if (!checkpoint)
+      throw new Error('the gated HTTP checkpoint did not appear');
+    const [{ pid }]: Array<{ pid: number }> = (await gate.query(
+      'SELECT pg_backend_pid() AS pid',
+    )) as Array<{ pid: number }>;
+    await captureGatedPrefix(db, executionId, observed);
+    while (!(await releaseEffect(token))) {
+      if (Date.now() >= deadline)
+        throw new Error('the receiver did not hold the gated HTTP response');
+      await sleep(25);
+    }
+    const until = Date.now() + 3_000;
+    while (Date.now() < until) {
+      // pg_stat_activity кешує знімок у транзакції. У кожного спостереження окремий запит.
+      const [row]: Array<{ waiting: boolean }> = await db.query(
+        `SELECT EXISTS(SELECT FROM pg_stat_activity
+          WHERE $1=ANY(pg_blocking_pids(pid))
+            AND wait_event_type = 'Lock'
+            AND query LIKE 'UPDATE step_runs SET status = ''succeeded''%') AS waiting`,
+        [pid],
+      );
+      if (row.waiting) {
+        log(`stopping postgres during write to checkpoint ${checkpoint}`);
+        const started = Date.now();
+        // SIGKILL не звільняє блокування бар’єра до переривання запису.
+        docker([...COMPOSE, 'kill', '--signal', 'SIGKILL', 'postgres']);
+        crashed = true;
+        docker([...COMPOSE, 'start', 'postgres']);
+        return { checkpoint, started };
       }
       await sleep(25);
     }
-    throw new Error(
-      candidates === 0
-        ? 'no running HTTP checkpoint appeared in the batch: workers made no progress'
-        : `no worker blocked on any of ${candidates} selected HTTP checkpoints`,
-    );
+    throw new Error('the worker did not block on the gated HTTP checkpoint');
   } finally {
-    // Після рестарту сервер уже скасував транзакцію. На решті шляхів закриття виділеного пулу звільняє її блокування.
-    await db.destroy();
+    // Після SIGKILL сесія вже відключена; на звичайній відмові відкат звільняє рядок.
+    try {
+      if (!crashed && gate.isTransactionActive)
+        await gate.rollbackTransaction();
+    } finally {
+      try {
+        await gate.release();
+      } finally {
+        await db.destroy();
+      }
+    }
   }
 }
 
@@ -159,10 +169,15 @@ async function main(): Promise<void> {
 
   let downtimeMs = 0;
   for (let round = 0; round < RESTARTS; round++) {
-    const batch = await enqueueRound(round, RESTARTS);
+    const token = randomUUID();
+    const batch = await enqueueRound(round, RESTARTS, {
+      token,
+      beforeGatedRun: (running) => captureCheckpoints(running, observed, true),
+    });
     ids.push(...batch);
     const { checkpoint, started: t0 } = await restartAtCheckpoint(
-      batch,
+      batch[batch.length - 1],
+      token,
       observed,
     );
     await waitHealthy([postgres], 60_000);
@@ -176,9 +191,9 @@ async function main(): Promise<void> {
           'SELECT attempts, status FROM step_runs WHERE id=$1',
           [checkpoint],
         );
-      if (step.status !== 'succeeded' || step.attempts < 2)
+      if (step?.status !== 'succeeded' || step.attempts < 2)
         throw new Error(
-          `round ${round + 1}: observed HTTP checkpoint did not retry and succeed`,
+          `round ${round + 1}: HTTP checkpoint ${checkpoint}, status=${step?.status ?? 'missing'}, attempts=${step?.attempts ?? 0}; expected succeeded after a retry`,
         );
     } finally {
       await verification.destroy();

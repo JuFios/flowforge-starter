@@ -58,6 +58,7 @@ export function docker(args: string[]): string {
   return execFileSync('docker', args, {
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
+    timeout: 30_000,
   }).trim();
 }
 
@@ -99,11 +100,16 @@ export async function sinkStats(): Promise<SinkStats> {
 export async function enqueueRound(
   round: number,
   rounds: number,
+  checkpointGate?: {
+    token: string;
+    beforeGatedRun(ids: string[]): Promise<void>;
+  },
 ): Promise<string[]> {
   const count =
     Math.floor((EXECUTIONS * (round + 1)) / rounds) -
     Math.floor((EXECUTIONS * round) / rounds);
-  if (!count) throw new Error('each fault round requires its own workload');
+  if (count < (checkpointGate ? 2 : 1))
+    throw new Error('each fault round requires its own workload');
   const { apiKey } = await call<{ apiKey: string }>(
     'POST',
     '/tenants',
@@ -111,25 +117,28 @@ export async function enqueueRound(
     { name: `chaos-${Date.now()}` },
   );
   const auth = { 'x-api-key': apiKey };
-  const wf = await call<{ id: string }>('POST', '/workflows', auth, {
-    name: 'chaos',
-    steps: [
-      { id: 'start', type: 'log', message: 'chaos {{ input.n }}' },
-      {
-        id: 'charge',
-        type: 'http',
-        method: 'POST',
-        url: 'http://sink:8080/effect',
-      },
-      { id: 'wait', type: 'delay', ms: 2_000 },
-      { id: 'finish', type: 'log', message: 'done {{ input.n }}' },
-    ],
-  });
+  const createWorkflow = (effectPath: string) =>
+    call<{ id: string }>('POST', '/workflows', auth, {
+      name: 'chaos',
+      steps: [
+        { id: 'start', type: 'log', message: 'chaos {{ input.n }}' },
+        {
+          id: 'charge',
+          type: 'http',
+          method: 'POST',
+          url: 'http://sink:8080' + effectPath,
+        },
+        { id: 'wait', type: 'delay', ms: 2_000 },
+        { id: 'finish', type: 'log', message: 'done {{ input.n }}' },
+      ],
+    });
+  const wf = await createWorkflow('/effect');
   log(`enqueueing ${count} executions for round ${round + 1}`);
   const ids: string[] = [];
-  for (let n = 0; n < count; n += 20) {
+  const regular = checkpointGate ? count - 1 : count;
+  for (let n = 0; n < regular; n += 20) {
     const batch = await Promise.all(
-      Array.from({ length: Math.min(20, count - n) }, (_, i) =>
+      Array.from({ length: Math.min(20, regular - n) }, (_, i) =>
         call<{ id: string }>('POST', `/workflows/${wf.id}/run`, auth, {
           n: n + i,
         }),
@@ -137,7 +146,32 @@ export async function enqueueRound(
     );
     ids.push(...batch.map((e) => e.id));
   }
+  if (checkpointGate) {
+    const gated = await createWorkflow('/effect/' + checkpointGate.token);
+    await checkpointGate.beforeGatedRun(ids);
+    const execution = await call<{ id: string }>(
+      'POST',
+      `/workflows/${gated.id}/run`,
+      auth,
+      { n: regular },
+    );
+    ids.push(execution.id);
+  }
   return ids;
+}
+
+/** Відповідь sink відкрита, доки фікстура не заблокує рядок чекпоінта. */
+export async function releaseEffect(gate: string): Promise<boolean> {
+  const response = await fetch(
+    new URL('/release-effect/' + gate, SINK_STATS_URL),
+    {
+      method: 'POST',
+      signal: AbortSignal.timeout(2_000),
+    },
+  );
+  if (response.status === 409) return false;
+  if (response.status === 204) return true;
+  throw new Error(`release HTTP checkpoint gate: HTTP ${response.status}`);
 }
 
 export function openDatabase(): Promise<DataSource> {
@@ -251,10 +285,22 @@ async function callCounts(): Promise<Record<string, number>> {
 export async function captureCheckpoints(
   ids: string[],
   observed: Map<string, CheckpointObservation>,
+  requireHttp = false,
 ): Promise<void> {
   const db = await openDatabase();
   try {
-    const completed = await completedSteps(db, ids);
+    let completed = await completedSteps(db, ids);
+    if (requireHttp) {
+      const deadline = Date.now() + 30_000;
+      while (!completed.some((step) => step.stepId === 'charge')) {
+        if (Date.now() >= deadline)
+          throw new Error(
+            'no completed HTTP checkpoint to compare after restart',
+          );
+        await sleep(100);
+        completed = await completedSteps(db, ids);
+      }
+    }
     const counts = await callCounts();
     for (const step of completed) {
       if (observed.has(step.id)) continue;
@@ -266,6 +312,21 @@ export async function captureCheckpoints(
   } finally {
     await db.destroy();
   }
+}
+
+/** Попередній log кроку, чий HTTP-запис буде перервано, вже збережений. */
+export async function captureGatedPrefix(
+  db: DataSource,
+  executionId: string,
+  observed: Map<string, CheckpointObservation>,
+): Promise<void> {
+  const steps = await completedSteps(db, [executionId]);
+  const start = steps.find((step) => step.stepId === 'start');
+  if (!start || start.attempts !== 1)
+    throw new Error(
+      'expected a completed start checkpoint before the gated HTTP write',
+    );
+  observed.set(start.id, { ...start, calls: 1 });
 }
 
 export function replayedCheckpoints(

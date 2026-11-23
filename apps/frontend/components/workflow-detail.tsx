@@ -6,6 +6,13 @@ import { WorkflowView } from '@/lib/types';
 import { apiRequest, describeRejection, goToLogin } from '@/lib/client-api';
 import { parseRunInput } from '@/lib/workflow-schema';
 import { WorkflowEditor } from './workflow-editor';
+
+interface RunIntent {
+  key: string;
+  source: string;
+  uncertain: boolean;
+}
+
 export function WorkflowDetail({ wf }: { wf: WorkflowView }) {
   const router = useRouter();
   const [editing, edit] = useState(false),
@@ -13,8 +20,8 @@ export function WorkflowDetail({ wf }: { wf: WorkflowView }) {
     [input, setInput] = useState('{}'),
     [message, note] = useState(''),
     [pending, busy] = useState(false);
-  const key = useRef<string>(),
-    locked = useRef(false);
+  const [unresolvedRun, rememberRun] = useState<RunIntent>();
+  const locked = useRef(false);
   const editButton = useRef<HTMLButtonElement>(null);
   const cancelEdit = useRef(false);
   useEffect(() => {
@@ -25,12 +32,19 @@ export function WorkflowDetail({ wf }: { wf: WorkflowView }) {
   }, [editing]);
   async function run() {
     if (locked.current) return;
-    const parsed = parseRunInput(input);
-    if (!parsed.ok) {
-      note(parsed.error);
-      return;
+    let intent = unresolvedRun;
+    if (!intent) {
+      const parsed = parseRunInput(input);
+      if (!parsed.ok) {
+        note(parsed.error);
+        return;
+      }
+      intent = {
+        key: crypto.randomUUID(),
+        source: parsed.source,
+        uncertain: false,
+      };
     }
-    key.current ??= crypto.randomUUID();
     note('');
     locked.current = true;
     busy(true);
@@ -38,21 +52,39 @@ export function WorkflowDetail({ wf }: { wf: WorkflowView }) {
       const r = await apiRequest<{ id: string }>(
         'POST',
         'workflows/' + wf.id + '/run',
-        { rawJson: parsed.source, idempotencyKey: key.current },
+        { rawJson: intent.source, idempotencyKey: intent.key },
       );
       if (r.kind === 'ok') {
+        rememberRun(undefined);
         location.assign('/executions/' + r.data.id);
         return;
       }
       if (r.kind === 'session_expired') return goToLogin();
       if (r.kind === 'rejected') {
-        if (r.status < 500) key.current = undefined;
+        if (r.status >= 500 || r.status === 408)
+          rememberRun({ ...intent, uncertain: true });
+        else if (intent.uncertain || r.status === 429) rememberRun(intent);
+        else rememberRun(undefined);
         note(describeRejection(r));
-      } else note('Результат запуску невідомий. Повторіть з тим самим ключем.');
+      } else {
+        rememberRun({ ...intent, uncertain: true });
+        note('Результат запуску невідомий. Повторіть попередній запуск.');
+      }
     } finally {
       locked.current = false;
       busy(false);
     }
+  }
+  function abandonRun() {
+    if (
+      locked.current ||
+      !window.confirm(
+        'Попередній запуск міг створити виконання. Припинити його відновлення?',
+      )
+    )
+      return;
+    rememberRun(undefined);
+    note('');
   }
   async function remove() {
     if (locked.current) return;
@@ -176,14 +208,26 @@ export function WorkflowDetail({ wf }: { wf: WorkflowView }) {
                     className="code-input"
                     spellCheck={false}
                     value={input}
-                    onChange={(e) => {
-                      key.current = undefined;
-                      setInput(e.target.value);
-                    }}
+                    onChange={(e) => setInput(e.target.value)}
                     disabled={pending}
                   />
                 </label>
-                <button disabled={pending}>Запустити</button>
+                {unresolvedRun && (
+                  <p>Повтор використає вхідні дані попереднього запуску.</p>
+                )}
+                <button disabled={pending}>
+                  {unresolvedRun ? 'Повторити попередній запуск' : 'Запустити'}
+                </button>
+                {unresolvedRun && (
+                  <button
+                    type="button"
+                    className="secondary"
+                    onClick={abandonRun}
+                    disabled={pending}
+                  >
+                    Припинити відновлення
+                  </button>
+                )}
               </form>
             </section>
           </div>

@@ -2,6 +2,7 @@ import { fork } from 'node:child_process';
 import { once } from 'node:events';
 import { join } from 'node:path';
 import { DataSource } from 'typeorm';
+import { OUTBOX_ATTEMPT_HISTORY } from '../../src/tenancy/limits';
 import { createTenant, openTestDataSource, truncateAll } from '../helpers/db';
 
 describe('delivery history HTTP response size and API memory', () => {
@@ -14,7 +15,7 @@ describe('delivery history HTTP response size and API memory', () => {
     await ds.destroy();
   });
   it.each([100, 10_000, 100_000])(
-    'measures %i attempts in a separate API process',
+    'measures retained history after %i attempts in a separate API process',
     async (count) => {
       await truncateAll(ds);
       const { tenant, apiKey } = await createTenant(ds);
@@ -56,10 +57,13 @@ describe('delivery history HTTP response size and API memory', () => {
           };
           await read();
           await ds.transaction(async (em) => {
+            // Відтворюємо стан після обрізання журналу за квотою. Загальний лічильник
+            // може бути великим, але API читає лише першу й останні збережені спроби.
             await em.query(
               `INSERT INTO outbox_attempts ("eventId","tenantId",attempt,"senderId",outcome)
-            SELECT $1,$2,g,'bench','http_error' FROM generate_series(1,$3::int) g`,
-              [id, tenant.id, count],
+               SELECT $1,$2,attempt,'bench','http_error'
+                 FROM (SELECT 1 AS attempt UNION ALL SELECT generate_series($3::int,$4::int)) retained`,
+              [id, tenant.id, count - OUTBOX_ATTEMPT_HISTORY + 2, count],
             );
             await em.query('UPDATE outbox_events SET attempts=$2 WHERE id=$1', [
               id,
@@ -75,9 +79,11 @@ describe('delivery history HTTP response size and API memory', () => {
           const before = await memory('baseline');
           const bytes = await read();
           const after = await memory('sample');
+          expect(bytes).toBeLessThan(8 * 1024);
           console.log(
             JSON.stringify({
               count,
+              retained: OUTBOX_ATTEMPT_HISTORY,
               query,
               bytes,
               baseRss: before.rss,

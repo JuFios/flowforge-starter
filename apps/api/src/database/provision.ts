@@ -163,6 +163,7 @@ export interface LimitDefaults {
   webhookRateLimit: number;
   webhookRateWindowMs: number;
   maxWorkflows: number;
+  maxOutboxEvents: number;
 }
 
 /** Змінна env кожного значення за замовчуванням і її межі. */
@@ -180,6 +181,7 @@ const LIMIT_ENV: Record<
     LIMIT_BOUNDS.rateWindowMs,
   ],
   maxWorkflows: ['TENANT_MAX_WORKFLOWS', LIMIT_BOUNDS.maxWorkflows],
+  maxOutboxEvents: ['TENANT_MAX_OUTBOX_EVENTS', LIMIT_BOUNDS.maxOutboxEvents],
 };
 
 /** Значення за замовчуванням з env (`TENANT_*`), а без змінної — вбудовані; поза межами — помилка. */
@@ -208,7 +210,8 @@ export async function provisionLimitDefaults(
   await query(
     `UPDATE limit_defaults
         SET "maxRunning" = $1, "maxQueueSize" = $2, "rateLimit" = $3, "rateWindowMs" = $4,
-            "webhookRateLimit" = $5, "webhookRateWindowMs" = $6, "maxWorkflows" = $7
+            "webhookRateLimit" = $5, "webhookRateWindowMs" = $6, "maxWorkflows" = $7,
+            "maxOutboxEvents" = $8
       WHERE id`,
     [
       limits.maxRunning,
@@ -218,6 +221,7 @@ export async function provisionLimitDefaults(
       limits.webhookRateLimit,
       limits.webhookRateWindowMs,
       limits.maxWorkflows,
+      limits.maxOutboxEvents,
     ],
   );
 }

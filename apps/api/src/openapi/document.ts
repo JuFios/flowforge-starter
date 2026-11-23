@@ -54,6 +54,12 @@ interface Contract {
   body?: string;
   params?: ParameterObject[];
   errors?: number[];
+  /** Опис відповіді 200 на ідемпотентний повтор того самого запиту (успіх — 201). */
+  replay?: string;
+  /** Параметр шляху не дає 404 (повтор відкликання відсутнього ключа — 204). */
+  noNotFound?: true;
+  /** Тимчасова відмова 503 несе `Retry-After` (спільний пул інстансу зайнятий). */
+  retryUnavailable?: true;
 }
 const contracts: Record<string, Contract> = {
   'get /health': { title: 'Перевірити процес', auth: [], result: 'Health' },
@@ -126,7 +132,9 @@ const contracts: Record<string, Contract> = {
     result: 'Execution',
     body: 'RunInput',
     params: [param('Idempotency-Key', 'header', { ...str, maxLength: 255 })],
-    errors: [422],
+    // 409 — ключ щойно звільнило очищення історії виконань між пошуком і вставкою.
+    errors: [409, 422],
+    replay: 'Ідемпотентний повтор того самого запиту',
   },
   'get /executions': {
     title: 'Переглянути сторінку виконань без вхідних і вихідних даних',
@@ -142,6 +150,8 @@ const contracts: Record<string, Contract> = {
     title: 'Прочитати повне виконання з результатами кроків',
     auth: tenant,
     result: 'ExecutionDetail',
+    errors: [503],
+    retryUnavailable: true,
   },
   'get /executions/{id}/summary': {
     title: 'Прочитати поточний знімок стану і план кроків',
@@ -164,6 +174,15 @@ const contracts: Record<string, Contract> = {
     result: 'ExecutionId',
     code: 202,
     errors: [409],
+    params: [
+      param('expectedTerminalCycle', 'query', {
+        ...integer,
+        minimum: 0,
+        maximum: 2_147_483_647,
+        description:
+          'Значення terminalCycles зі знімка failed. Передавайте той самий номер під час повтору запиту. Якщо цикл змінився або він уже не failed, API повертає 409 (retry_cycle_conflict). Без параметра повторюється поточний failed.',
+      }),
+    ],
   },
   'post /executions/{id}/realtime-tickets': {
     title: 'Отримати одноразовий тикет на одну підписку цього виконання',
@@ -190,7 +209,7 @@ const contracts: Record<string, Contract> = {
         true,
       ),
     ],
-    errors: [409, 422],
+    errors: [409],
   },
   ['get ' + keys]: {
     title: 'Переглянути ID ключів вхідних webhook',
@@ -204,10 +223,12 @@ const contracts: Record<string, Contract> = {
     errors: [409],
   },
   ['delete ' + keys + '/{keyId}']: {
-    title: 'Відкликати ключ вхідних webhook',
+    title:
+      'Відкликати ключ вхідних webhook. Повтор для відсутнього ключа — 204',
     auth: key,
     code: 204,
     errors: [409],
+    noNotFound: true,
   },
   ['get ' + notes]: {
     title: 'Прочитати підписку на сповіщення',
@@ -222,9 +243,17 @@ const contracts: Record<string, Contract> = {
     body: 'SettingsInput',
   },
   ['delete ' + notes]: {
-    title: 'Видалити налаштування сповіщень',
+    title:
+      'Видалити налаштування сповіщень. Недоставлені події чекають наступного налаштування',
     auth: key,
     code: 204,
+    errors: [404],
+  },
+  ['post ' + notes + '/events/discard']: {
+    title: 'Відмовитися від недоставлених подій, створених до запиту',
+    auth: key,
+    code: 200,
+    result: 'Discarded',
   },
   ['post ' + notes + '/secrets']: {
     title: 'Видати наступний секрет підпису сповіщень один раз',
@@ -267,9 +296,10 @@ const descriptions: Record<number, string> = {
   409: 'Конфлікт поточного стану',
   413: 'Перевищено межу тіла',
   415: 'Непідтримуване кодування тіла',
+  500: 'Внутрішня помилка; тіло без внутрішніх деталей, з correlationId',
   422: 'Ключ повторно використано з іншими даними',
   428: 'Браузерний запит має містити актуальну editRevision',
-  429: 'rate_limited повертає Retry-After. queue_full та workflow_limit_reached не мають визначеного часу повтору.',
+  429: 'rate_limited і detail_in_progress повертають Retry-After. queue_full, outbox_full, workflow_limit_reached і ticket_limit не мають визначеного часу повтору.',
   503: 'Залежність недоступна',
 };
 const json = (name: string) => ({ 'application/json': { schema: ref(name) } });
@@ -331,40 +361,54 @@ export function buildDocument(app: INestApplication) {
       const headers: NonNullable<ResponseObject['headers']> = {
         'X-Request-Id': { schema: str, description: 'Ідентифікатор кореляції' },
       };
+      // Заголовки ліміту частоти гарантовано несе відповідь, що пройшла ліміт; помилки розбору тіла
+      // (400, 413, 415) і відмови автентифікації виникають раніше й можуть їх не мати.
+      const limited: NonNullable<ResponseObject['headers']> = { ...headers };
       if (c.auth.length)
         for (const name of ['Limit', 'Remaining', 'Reset'])
-          headers['X-RateLimit-' + name] = {
+          limited['X-RateLimit-' + name] = {
             schema: integer,
             description: 'Вікно частоти запитів',
           };
-      success.headers = headers;
+      success.headers = limited;
       op.responses = { [c.code ?? (method === 'post' ? 201 : 200)]: success };
-      if (path === '/workflows/{id}/run')
-        op.responses[200] = {
-          ...success,
-          description: 'Ідемпотентний повтор того самого запиту',
-        };
+      if (c.replay) op.responses[200] = { ...success, description: c.replay };
+      // Парсери читають надіслане тіло до вибору маршруту незалежно від HTTP-методу.
       const errors = new Set([
         ...(c.errors ?? []),
         ...(c.auth.length ? [c.auth === admin ? 403 : 401, 429] : []),
-        ...(params.length ? [404] : []),
-        ...(params.length || c.body || c.params ? [400] : []),
-        ...(c.body ? [413, 415] : []),
+        ...(params.length && !c.noNotFound ? [404] : []),
+        400,
+        413,
+        415,
+        500,
       ]);
       for (const code of errors)
         op.responses[code] = {
           description: descriptions[code],
-          content: json(code === 503 ? 'Health' : 'Error'),
+          content: json(
+            code === 503 && c.result === 'Health' ? 'Health' : 'Error',
+          ),
           headers:
             code === 429
               ? {
                   ...headers,
                   'Retry-After': {
                     schema: integer,
-                    description: 'Секунди до закінчення вікна rate_limited',
+                    description:
+                      'Секунди до повтору: до закінчення вікна rate_limited або для detail_in_progress',
                   },
                 }
-              : headers,
+              : code === 503 && c.retryUnavailable
+                ? {
+                    ...headers,
+                    'Retry-After': {
+                      schema: integer,
+                      description:
+                        'Секунди до повтору, поки спільний пул зайнятий',
+                    },
+                  }
+                : headers,
         };
     }
   return doc;

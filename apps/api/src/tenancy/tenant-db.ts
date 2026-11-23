@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, EntityManager } from 'typeorm';
+import type { IsolationLevel } from 'typeorm/driver/types/IsolationLevel';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -51,12 +52,28 @@ export class TenantDb {
     });
   }
 
+  /** Короткий знімок для кількох читань, що мають описувати той самий стан. */
+  async snapshot<T>(
+    tenantId: string,
+    fn: (em: EntityManager) => Promise<T>,
+  ): Promise<T> {
+    assertTenantId(tenantId);
+    return this.transaction(async (tx) => {
+      await tx.em.query('SET TRANSACTION READ ONLY');
+      await tx.enter(tenantId);
+      return fn(tx.em);
+    }, 'REPEATABLE READ');
+  }
+
   /**
    * Транзакція з контекстом, що задається один раз (`enter`) і не змінюється: основа `run`.
    * Спроба перейти до іншого тенанта в тій самій транзакції — помилка.
    */
-  transaction<T>(fn: (tx: TenantTransaction) => Promise<T>): Promise<T> {
-    return this.ds.transaction(async (em) => {
+  transaction<T>(
+    fn: (tx: TenantTransaction) => Promise<T>,
+    isolation?: IsolationLevel,
+  ): Promise<T> {
+    const work = async (em: EntityManager) => {
       let current: string | undefined;
       let requested: string | undefined;
       let setting: Promise<void> | undefined;
@@ -79,6 +96,9 @@ export class TenantDb {
         },
       };
       return fn(tx);
-    });
+    };
+    return isolation
+      ? this.ds.transaction(isolation, work)
+      : this.ds.transaction(work);
   }
 }

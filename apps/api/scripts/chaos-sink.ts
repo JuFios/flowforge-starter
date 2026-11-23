@@ -9,16 +9,21 @@
  *   POST /notifications — прийняти сповіщення FlowForge; перша доставка кожної події «губить»
  *                    підтвердження (з'єднання обривається після прийому тіла)
  *   GET  /notifications — усі прийняті доставки: заголовки й сирі байти тіла (base64)
+ *   POST /unavailable — 503 для вимірювання роботи черги під час відмови доставки
  */
 import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 
 const PORT = Number(process.env.SINK_PORT ?? 8080);
 const DELAY_MS = Number(process.env.SINK_DELAY_MS ?? 300);
+const EFFECT_GATE_MS = 12_000;
+const EFFECT_GATE_LIMIT = 16;
+const EFFECT_GATE = /^\/[a-z-]+\/([0-9a-f-]{36})$/;
 
 const effects = new Map<string, number>(); // ключ → скільки разів запит із ним приходив
 let requests = 0;
 let missingKey = 0;
+const effectGates = new Map<string, () => void>();
 
 interface Delivery {
   id: string;
@@ -37,6 +42,27 @@ const header = (value: string | string[] | undefined) =>
 
 createServer((req, res) => {
   const path = (req.url ?? '').split('?')[0];
+  const effectGate = EFFECT_GATE.exec(path)?.[1];
+  if (
+    req.method === 'POST' &&
+    path.startsWith('/release-effect/') &&
+    effectGate
+  ) {
+    req.resume();
+    const release = effectGates.get(effectGate);
+    if (!release) {
+      res.writeHead(409).end();
+      return;
+    }
+    release();
+    res.writeHead(204).end();
+    return;
+  }
+  if (req.method === 'POST' && path === '/unavailable') {
+    req.resume();
+    req.on('end', () => res.writeHead(503).end());
+    return;
+  }
   if (req.method === 'GET' && path === '/header-digest') {
     const value = header(req.headers['x-test-marker']);
     res.writeHead(200, { 'content-type': 'application/json' });
@@ -98,7 +124,10 @@ createServer((req, res) => {
     });
     return;
   }
-  if (req.method === 'POST' && path === '/effect') {
+  if (
+    req.method === 'POST' &&
+    (path === '/effect' || (path.startsWith('/effect/') && effectGate))
+  ) {
     req.resume();
     req.on('end', () => {
       requests++;
@@ -108,11 +137,37 @@ createServer((req, res) => {
         res.writeHead(400).end();
         return;
       }
-      effects.set(key, (effects.get(key) ?? 0) + 1);
-      setTimeout(() => {
+      const previous = effects.get(key) ?? 0;
+      effects.set(key, previous + 1);
+      const respond = () => {
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(JSON.stringify({ key }));
-      }, DELAY_MS);
+      };
+      if (!effectGate || previous > 0) {
+        setTimeout(respond, DELAY_MS);
+        return;
+      }
+      if (
+        effectGates.has(effectGate) ||
+        effectGates.size >= EFFECT_GATE_LIMIT
+      ) {
+        res.writeHead(503).end();
+        return;
+      }
+      const cleanup = () => {
+        clearTimeout(timer);
+        effectGates.delete(effectGate);
+        res.off('close', cleanup);
+      };
+      const timer = setTimeout(() => {
+        cleanup();
+        res.writeHead(503).end();
+      }, EFFECT_GATE_MS);
+      res.once('close', cleanup);
+      effectGates.set(effectGate, () => {
+        cleanup();
+        respond();
+      });
     });
     return;
   }

@@ -7,7 +7,10 @@ import { MetricsService } from '../observability/metrics.service';
 export class LimitsMetrics {
   /** Запити, відхилені лімітом частоти (`tenant`, `webhook`, `admin`, `auth-failures`). */
   readonly rateLimited: Counter<'throttler'>;
-  /** Постановки, відхилені лімітом черги, за джерелом (`api`, `webhook`, `cron`, `retry`). */
+  /**
+   * Постановки, відхилені лімітом черги (`queue_full`) чи квотою outbox (`outbox_full`), за джерелом
+   * (`api`, `webhook`, `cron`, `retry`, `redeliver`).
+   */
   readonly enqueueRejected: Counter<'reason' | 'trigger'>;
 
   constructor(metrics: MetricsService) {
@@ -20,7 +23,7 @@ export class LimitsMetrics {
     });
     this.enqueueRejected = new Counter({
       name: 'flowforge_enqueue_rejected_total',
-      help: 'Executions not created because the tenant queue was full',
+      help: 'Executions or redeliveries not accepted because the tenant queue or outbox quota was full',
       labelNames: ['reason', 'trigger'],
       registers,
     });
