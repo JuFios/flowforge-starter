@@ -480,6 +480,16 @@ export const schemas: Record<string, SchemaObject> = {
     output: about(anyJson, 'Результат виконання; null до завершення'),
   }),
   ExecutionId: object({ executionId: about(uuid, 'ID виконання') }),
+  WebhookAccepted: object({
+    executionId: about(
+      uuid,
+      'ID виконання доставки; повтор тієї самої доставки повертає той самий ID',
+    ),
+    executionPurged: about(
+      bool,
+      'true — історію цього виконання вже очищено (EXECUTION_RETENTION_DAYS): повтор прийнято без нового виконання, а GET за цим ID поверне 404',
+    ),
+  }),
   RunInput: {
     type: 'object',
     additionalProperties: true,

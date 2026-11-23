@@ -302,7 +302,7 @@ const contracts: Record<string, Contract> = {
   'post /hooks/{workflowId}': {
     title: 'Прийняти підписану доставку в межах п’яти хвилин',
     auth: webhook,
-    result: 'ExecutionId',
+    result: 'WebhookAccepted',
     body: 'RunInput',
     code: 202,
     limits: ['queue_full', 'outbox_full'],

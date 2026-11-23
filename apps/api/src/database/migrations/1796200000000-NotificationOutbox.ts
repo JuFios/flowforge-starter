@@ -68,6 +68,79 @@ const TENANT_TABLES = [
 ] as const;
 
 /**
+ * Захоплення спроби доставки (крос-тенантне, лише ідентифікатори й fencing-токен), перша версія.
+ * Експортовано для `down` міграції, що її замінює.
+ */
+export const CLAIM_OUTBOX_EVENT_V1 = `CREATE FUNCTION public.claim_outbox_event(
+        p_sender text, p_lease_ms integer, p_in_flight integer)
+      RETURNS TABLE (id uuid, "tenantId" uuid, "leaseToken" uuid, attempt integer,
+                     "correlationId" varchar, repaired integer)
+      LANGUAGE plpgsql VOLATILE ${DEFINER} AS $$
+      DECLARE
+        s record;
+        e record;
+        busy integer;
+        fixed integer := 0;
+        lease interval := make_interval(secs => LEAST(GREATEST(p_lease_ms, 1000), 600000) / 1000.0);
+      BEGIN
+        FOR s IN
+          -- Тенанти, що вже вичерпали ліміт спроб у роботі, у вікно кандидатів не потрапляють:
+          -- інакше 16 тенантів із завислими endpoint-ами займали б усе вікно до спливання lease.
+          SELECT n."tenantId" FROM public.notification_settings n
+           WHERE n.enabled AND n."dueAt" <= now()
+             AND (SELECT count(*) FROM public.outbox_events b
+                   WHERE b."tenantId" = n."tenantId" AND b.status = 'sending'
+                     AND b."leaseUntil" > now()) < GREATEST(p_in_flight, 1)
+           ORDER BY n."lastClaimedAt" NULLS FIRST, n."tenantId"
+           LIMIT 16
+           FOR NO KEY UPDATE SKIP LOCKED
+        LOOP
+          SELECT count(*) INTO busy FROM public.outbox_events o
+           WHERE o."tenantId" = s."tenantId" AND o.status = 'sending' AND o."leaseUntil" > now();
+          CONTINUE WHEN busy >= GREATEST(p_in_flight, 1);
+          -- Спроба, чий відправник зник (lease минув), — першою: вона найдовше чекає.
+          SELECT o.id, o.attempts INTO e FROM public.outbox_events o
+           WHERE o."tenantId" = s."tenantId" AND o.status = 'sending' AND o."leaseUntil" <= now()
+           ORDER BY o."leaseUntil" LIMIT 1 FOR UPDATE SKIP LOCKED;
+          IF FOUND THEN
+            UPDATE public.outbox_attempts a SET outcome = 'lease_expired', "finishedAt" = now()
+             WHERE a."eventId" = e.id AND a.attempt = e.attempts AND a."finishedAt" IS NULL;
+          ELSE
+            SELECT o.id, o.attempts INTO e FROM public.outbox_events o
+             WHERE o."tenantId" = s."tenantId" AND o.status = 'pending' AND o."nextAttemptAt" <= now()
+             ORDER BY o."nextAttemptAt" LIMIT 1 FOR UPDATE SKIP LOCKED;
+          END IF;
+          IF NOT FOUND THEN
+            -- Підказка застаріла (спробу щойно записали чи подію доставили): перерахувати.
+            UPDATE public.notification_settings n SET "dueAt" = LEAST(
+                (SELECT min(o."nextAttemptAt") FROM public.outbox_events o
+                  WHERE o."tenantId" = s."tenantId" AND o.status = 'pending'),
+                (SELECT min(o."leaseUntil") FROM public.outbox_events o
+                  WHERE o."tenantId" = s."tenantId" AND o.status = 'sending'))
+             WHERE n."tenantId" = s."tenantId";
+            fixed := fixed + 1;
+            CONTINUE;
+          END IF;
+          UPDATE public.outbox_events o
+             SET status = 'sending', "leaseToken" = gen_random_uuid(),
+                 "leaseUntil" = clock_timestamp() + lease, attempts = o.attempts + 1
+           WHERE o.id = e.id
+           RETURNING o.id, o."tenantId", o."leaseToken", o.attempts, o."correlationId"
+            INTO id, "tenantId", "leaseToken", attempt, "correlationId";
+          INSERT INTO public.outbox_attempts ("eventId", "tenantId", attempt, "senderId")
+          VALUES (id, "tenantId", attempt, left(p_sender, 64));
+          UPDATE public.notification_settings n SET "lastClaimedAt" = clock_timestamp()
+           WHERE n."tenantId" = s."tenantId";
+          repaired := fixed;
+          RETURN NEXT;
+          RETURN;
+        END LOOP;
+        id := NULL; "tenantId" := NULL; "leaseToken" := NULL; attempt := NULL;
+        "correlationId" := NULL; repaired := fixed;
+        RETURN NEXT;
+      END $$`;
+
+/**
  * Вихідні події через транзакційний outbox (README 3.3.9).
  *
  * - `notification_settings` — endpoint і ключі підпису тенанта (поточний і наступний, як у
@@ -214,74 +287,7 @@ export class NotificationOutbox1796200000000 implements MigrationInterface {
       FOR EACH ROW EXECUTE FUNCTION public.outbox_on_execution()`);
 
     // Захоплення спроби доставки (крос-тенантне, лише ідентифікатори й fencing-токен).
-    await runner.query(`CREATE FUNCTION public.claim_outbox_event(
-        p_sender text, p_lease_ms integer, p_in_flight integer)
-      RETURNS TABLE (id uuid, "tenantId" uuid, "leaseToken" uuid, attempt integer,
-                     "correlationId" varchar, repaired integer)
-      LANGUAGE plpgsql VOLATILE ${DEFINER} AS $$
-      DECLARE
-        s record;
-        e record;
-        busy integer;
-        fixed integer := 0;
-        lease interval := make_interval(secs => LEAST(GREATEST(p_lease_ms, 1000), 600000) / 1000.0);
-      BEGIN
-        FOR s IN
-          -- Тенанти, що вже вичерпали ліміт спроб у роботі, у вікно кандидатів не потрапляють:
-          -- інакше 16 тенантів із завислими endpoint-ами займали б усе вікно до спливання lease.
-          SELECT n."tenantId" FROM public.notification_settings n
-           WHERE n.enabled AND n."dueAt" <= now()
-             AND (SELECT count(*) FROM public.outbox_events b
-                   WHERE b."tenantId" = n."tenantId" AND b.status = 'sending'
-                     AND b."leaseUntil" > now()) < GREATEST(p_in_flight, 1)
-           ORDER BY n."lastClaimedAt" NULLS FIRST, n."tenantId"
-           LIMIT 16
-           FOR NO KEY UPDATE SKIP LOCKED
-        LOOP
-          SELECT count(*) INTO busy FROM public.outbox_events o
-           WHERE o."tenantId" = s."tenantId" AND o.status = 'sending' AND o."leaseUntil" > now();
-          CONTINUE WHEN busy >= GREATEST(p_in_flight, 1);
-          -- Спроба, чий відправник зник (lease минув), — першою: вона найдовше чекає.
-          SELECT o.id, o.attempts INTO e FROM public.outbox_events o
-           WHERE o."tenantId" = s."tenantId" AND o.status = 'sending' AND o."leaseUntil" <= now()
-           ORDER BY o."leaseUntil" LIMIT 1 FOR UPDATE SKIP LOCKED;
-          IF FOUND THEN
-            UPDATE public.outbox_attempts a SET outcome = 'lease_expired', "finishedAt" = now()
-             WHERE a."eventId" = e.id AND a.attempt = e.attempts AND a."finishedAt" IS NULL;
-          ELSE
-            SELECT o.id, o.attempts INTO e FROM public.outbox_events o
-             WHERE o."tenantId" = s."tenantId" AND o.status = 'pending' AND o."nextAttemptAt" <= now()
-             ORDER BY o."nextAttemptAt" LIMIT 1 FOR UPDATE SKIP LOCKED;
-          END IF;
-          IF NOT FOUND THEN
-            -- Підказка застаріла (спробу щойно записали чи подію доставили): перерахувати.
-            UPDATE public.notification_settings n SET "dueAt" = LEAST(
-                (SELECT min(o."nextAttemptAt") FROM public.outbox_events o
-                  WHERE o."tenantId" = s."tenantId" AND o.status = 'pending'),
-                (SELECT min(o."leaseUntil") FROM public.outbox_events o
-                  WHERE o."tenantId" = s."tenantId" AND o.status = 'sending'))
-             WHERE n."tenantId" = s."tenantId";
-            fixed := fixed + 1;
-            CONTINUE;
-          END IF;
-          UPDATE public.outbox_events o
-             SET status = 'sending', "leaseToken" = gen_random_uuid(),
-                 "leaseUntil" = clock_timestamp() + lease, attempts = o.attempts + 1
-           WHERE o.id = e.id
-           RETURNING o.id, o."tenantId", o."leaseToken", o.attempts, o."correlationId"
-            INTO id, "tenantId", "leaseToken", attempt, "correlationId";
-          INSERT INTO public.outbox_attempts ("eventId", "tenantId", attempt, "senderId")
-          VALUES (id, "tenantId", attempt, left(p_sender, 64));
-          UPDATE public.notification_settings n SET "lastClaimedAt" = clock_timestamp()
-           WHERE n."tenantId" = s."tenantId";
-          repaired := fixed;
-          RETURN NEXT;
-          RETURN;
-        END LOOP;
-        id := NULL; "tenantId" := NULL; "leaseToken" := NULL; attempt := NULL;
-        "correlationId" := NULL; repaired := fixed;
-        RETURN NEXT;
-      END $$`);
+    await runner.query(CLAIM_OUTBOX_EVENT_V1);
     // Очищення доставлених подій (з їхніми спробами); недоставлені не видаляються ніколи.
     await runner.query(`CREATE FUNCTION public.purge_delivered_events(p_days integer, p_batch integer)
       RETURNS integer LANGUAGE sql VOLATILE ${DEFINER} AS $$

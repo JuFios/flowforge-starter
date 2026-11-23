@@ -6,7 +6,10 @@ import { hashApiKey } from '../../src/auth/api-key.guard';
 import { testDatabaseUrl } from '../helpers/test-env';
 import { DataSource } from 'typeorm';
 import { migrate } from '../../src/database/migrate';
-import { ExecutionsService } from '../../src/executions/executions.service';
+import {
+  ExecutionsService,
+  WEBHOOK_RECEIPT_SQL,
+} from '../../src/executions/executions.service';
 import { Execution, Job } from '../../src/entities';
 import { RunningApp, startApp } from '../helpers/app';
 import {
@@ -209,13 +212,10 @@ describe('webhook upgrade, concurrent acceptance and revocation', () => {
       replies.map((r) => r.json() as Promise<{ executionId: string }>),
     );
     expect(results[0]).toEqual(results[1]);
-    const tx =
-      'SELECT "executionId" FROM webhook_deliveries WHERE "tenantId"=$1 AND "workflowId"=$2 AND "deliveryId"=$3';
-    const plan: unknown = await db.query('EXPLAIN (FORMAT JSON) ' + tx, [
-      tenant.id,
-      workflow.id,
-      'order-42',
-    ]);
+    const plan: unknown = await db.query(
+      'EXPLAIN (FORMAT JSON) ' + WEBHOOK_RECEIPT_SQL,
+      [tenant.id, workflow.id, 'order-42'],
+    );
     expect(JSON.stringify(plan)).toContain('webhook_deliveries_pkey');
     const initial = await db
       .getRepository(Job)

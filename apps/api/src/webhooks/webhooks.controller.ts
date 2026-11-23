@@ -1,5 +1,8 @@
 import { Controller, HttpCode, Post, Req } from '@nestjs/common';
-import { ExecutionsService } from '../executions/executions.service';
+import {
+  ExecutionsService,
+  type WebhookAccepted,
+} from '../executions/executions.service';
 import { RateLimit } from '../limits/rate-limit.guard';
 import { parseWebhookBody } from './webhook-body';
 import {
@@ -14,13 +17,11 @@ export class WebhooksController {
 
   @Post(':workflowId')
   @HttpCode(202)
-  async receive(@Req() req: WebhookRequest) {
-    return {
-      executionId: await this.executions.enqueueWebhook(
-        req.webhookWorkflow,
-        () => parseWebhookBody(req),
-        req.delivery,
-      ),
-    };
+  receive(@Req() req: WebhookRequest): Promise<WebhookAccepted> {
+    return this.executions.enqueueWebhook(
+      req.webhookWorkflow,
+      () => parseWebhookBody(req),
+      req.delivery,
+    );
   }
 }
