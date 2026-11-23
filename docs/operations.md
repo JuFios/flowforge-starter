@@ -5,7 +5,7 @@
 ## Запуск
 
 ```bash
-cp .env.example .env
+test -f .env || (umask 077; cp .env.example .env)
 docker compose up --build
 ```
 
@@ -359,16 +359,12 @@ WebSocket підтримує зміну API-інстансу й відкритт
 `change-me-admin`. У `NODE_ENV=production` валідація
 відхиляє `ADMIN_TOKEN`, що містить `change-me`/`changeme`, `example`, `placeholder`, `default`,
 `password`, `secret`, `qwerty`, `12345` або має менше 8 різних символів; саме значення в помилці не
-друкується. docker-compose бере `apps/api/.env.example` як основу (без секретів), задає
-`NODE_ENV=production`, а секрети — з кореневого `.env`, кожному сервісу лише його. Варіанти, що розглядались: окремий `NODE_ENV` для compose
-(приклад-токен працював би й далі в образі, який виглядає як production) і прибрати токен із
-прикладу зовсім (локальний запуск поза docker перестав би працювати «з коробки»). Обрано
-кореневий `.env`, якого немає в git: стандартний для compose механізм, секрет задає лише
-користувач, а production-образ не стартує з публічно відомим значенням. Обмеження: перевірка
-відсікає приклади й очевидні заглушки, але не оцінює ентропію довільного значення.
+друкується. Compose читає несекретні налаштування з `apps/api/.env.example`, бере
+`NODE_ENV` з оточення або кореневого `.env` (типово `development`) і передає кожному сервісу лише потрібні секрети.
+У режимі `production` перевірка відсікає приклади й очевидні заглушки, але не оцінює ентропію довільного значення.
 
-`apps/frontend/.env.example`: `API_URL` — адреса API для сервера Next.js
-(`http://api:3000` у compose, `http://localhost:3000` локально).
+`API_URLS` у `apps/frontend/.env.example` задає через кому внутрішні адреси API для HTTP- і WebSocket-проксі.
+У Compose це `http://api:3000,http://api-2:3000`, для локального запуску з одним API — `http://localhost:3000`.
 
 
 ## Міграції БД
@@ -397,7 +393,12 @@ setting() {
 }
 pg_port="$(setting POSTGRES_PORT)"
 export MIGRATION_DATABASE_URL="postgres://flowforge:$(setting POSTGRES_PASSWORD)@localhost:${pg_port:-5432}/flowforge"
-npm run db:migrate          # застосувати й звірити інваріанти безпеки (одна транзакція)
+```
+
+У тому самому терміналі виберіть потрібну операцію. Для штатного застосування міграцій та налаштування ролей виконайте:
+
+```bash
+npm run db:migrate &&
 # створити/оновити ролі flowforge_api і flowforge_worker та значення лімітів за замовчуванням
 API_DB_PASSWORD="$(setting API_DB_PASSWORD)" WORKER_DB_PASSWORD="$(setting WORKER_DB_PASSWORD)" \
   TENANT_MAX_RUNNING="$(setting TENANT_MAX_RUNNING)" TENANT_MAX_QUEUE_SIZE="$(setting TENANT_MAX_QUEUE_SIZE)" \
@@ -405,14 +406,28 @@ API_DB_PASSWORD="$(setting API_DB_PASSWORD)" WORKER_DB_PASSWORD="$(setting WORKE
   TENANT_RATE_LIMIT="$(setting TENANT_RATE_LIMIT)" TENANT_RATE_WINDOW_MS="$(setting TENANT_RATE_WINDOW_MS)" \
   TENANT_WEBHOOK_RATE_LIMIT="$(setting TENANT_WEBHOOK_RATE_LIMIT)" TENANT_WEBHOOK_RATE_WINDOW_MS="$(setting TENANT_WEBHOOK_RATE_WINDOW_MS)" \
   npm run db:provision
-npm run migration:revert    # відкотити останню
-npm run migration:show      # стан
-# нова міграція з різниці між сутностями і БД (потім додати її в migrations/index.ts):
+```
+
+Переглянути стан міграцій:
+
+```bash
+npm run migration:show
+```
+
+Відкотити останню застосовану міграцію в БД розробки:
+
+```bash
+npm run migration:revert
+```
+
+Згенерувати нову міграцію за різницею між сутностями і БД розробки (потім додати її в `migrations/index.ts`):
+
+```bash
 migration_name=DescribeSchemaChange
 npm run build && npm run migration:generate -- "src/database/migrations/$migration_name"
 ```
 
-Наявні міграції:
+Наявні міграції в порядку застосування:
 
 - `InitialSchema` — базова міграція схеми стартового репозиторію (як її будував `synchronize`).
   UUID генеруються вбудованою `gen_random_uuid()` (Postgres 13+), тож розширення й права на
@@ -442,13 +457,14 @@ npm run build && npm run migration:generate -- "src/database/migrations/$migrati
   `UQ_executions_idempotency_key` (`tenantId`, ключ) для заголовка `Idempotency-Key` запуску.
 - `HistoryIndexes` — `IDX_jobs_execution` (задача виконання: повтор, очищення історії) і частковий
   `IDX_executions_finished` (очищення історії).
+- `RecoverCheckpoints` звіряє старі кроки із зафіксованою версією. Якщо неможливо встановити, яке визначення вже мало зовнішній ефект, міграція зберігає історію кроків і завершує виконання з помилкою. Для такого виконання `/retry` повертає 409. Перед новим запуском оператор звіряє збережені результати з отримувачем. Для вже успішного виконання міграція закриває залишену в черзі задачу.
 - `TenantIsolation` — ізоляція тенантів у Postgres (3.3.4): групові ролі `flowforge_api_role`,
   `flowforge_worker_role` (без BYPASSRLS) і `flowforge_system` (BYPASSRLS, власник SECURITY
   DEFINER-функцій; усі три NOLOGIN, створюються ідемпотентно й не видаляються `down`, бо спільні для
   кластера; наявну роль з іншими атрибутами чи з сесіями міграція не змінює, а відмовляє); `step_runs."tenantId"` (заповнюється з виконання); композитні FK `jobs`/`step_runs` →
   `executions (id, "tenantId")` і `executions` → `workflow_versions (id, "tenantId")`, FK
   `"tenantId"` → `tenants`; `FORCE ROW LEVEL SECURITY` і політика `tenant_isolation` на шести
-  тенантних таблицях; права ролей (README, «Операції → права»); `REVOKE CREATE ON SCHEMA public`.
+  тенантних таблицях; права ролей (див. [матрицю прав](architecture.md#334-ізоляція-тенантів-у-глибину)); `REVOKE CREATE ON SCHEMA public`.
   Перед змінами перевіряє цілісність даних (задачі й кроки без виконання, рядки невідомого тенанта,
   посилання між тенантами) і зупиняється з кількістю порушень; історія видаленого workflow і
   завершені виконання без знімку (дозволені раніше) лишаються валідними.
@@ -458,10 +474,25 @@ npm run build && npm run migration:generate -- "src/database/migrations/$migrati
 - `ScheduledTenants` додає пошук тенантів з увімкненими розкладами та частковий індекс за тенантом і workflow.
 - `ScheduledOccurrences` зберігає час спрацювання cron і забезпечує його унікальність для workflow.
 - `JobUsageTransitions` оновлює облік тенанта за одну зміну рядка при завершенні, повторній постановці або додаванні задачі. При вилученні задачі з черги перерахунок найранішого часу серіалізовано за тенантом.
+- `FairPromotion` обмежує просування готових тенантів у функції захоплення задач.
 - `ClaimBusyReport` (нова ревізія `claim_job`): дозрілий тенант, якого промоція пропустила через `SKIP LOCKED`, дає busy, а не «черга порожня»; рівно вичерпаний бюджет промоції без решти дозрілих одразу переходить до вибору задачі.
 - `RateLimitLockTime` (нова ревізія `rate_limit_hit`): межа вікна ліміту частоти перевіряється за моментом після блокування рядка відра.
 - `RateLimitInsertTime` відкриває вікно після захоплення або створення відра, зокрема після відкату конкурентної вставки.
-- `RecoverCheckpoints` звіряє старі кроки із зафіксованою версією. Якщо неможливо встановити, яке визначення вже мало зовнішній ефект, міграція зберігає історію кроків і завершує виконання з помилкою. Для такого виконання `/retry` повертає 409. Перед новим запуском оператор звіряє збережені результати з отримувачем. Для вже успішного виконання міграція закриває залишену в черзі задачу.
+- `WebhookDeliveries` зберігає квитанції доставки webhook для дедуплікації.
+- `ScheduleProgress` зберігає курсор розкладу, політику пропусків і час наступного спрацювання; додає пошук тенантів із належними до виконання розкладами.
+- `NotificationOutbox` створює налаштування сповіщень, події та журнал спроб доставки.
+- `SerializeOutbox` узгоджує створення й завершення доставки зі змінами налаштувань тенанта.
+- `CloseCancelledAttempts` закриває відкриту спробу при скасуванні події.
+- `WorkflowQuota` веде облік кількості workflow та застосовує квоту тенанта.
+- `ExecutionPages` додає індекси для сторінок виконань з фільтрами за статусом і workflow.
+- `BrowserSessions` додає браузерні сесії, одноразові WebSocket-тикети й функції їх перевірки та очищення.
+- `ExecutionRevision` зберігає ревізію виконання й сповіщає про зміни виконання та його кроків.
+- `WorkflowEditRevision` додає ревізію редагування workflow.
+- `OutboxPause` зберігає події під час паузи сповіщень і час скасування для очищення історії.
+- `OutboxQuota` додає квоту outbox, облік навантаження на тенанта й обмеження історії спроб.
+- `WorkflowVersionCleanup` додає порційне очищення невикористаних версій workflow зі спільним курсором.
+- `WorkflowVersionCleanupPace` задає мінімальну паузу між повними проходами очищення версій.
+- `OutboxClaimExpiredLease` відновлює доставку після спливання оренди, зокрема коли відкритої спроби вже немає.
 
 Команди беруть `MIGRATION_DATABASE_URL` і `DB_CONNECT_TIMEOUT_MS` з оточення або з `apps/api/.env`
 (решта конфігурації застосунку CLI не потрібна). `statement_timeout` на міграції не діє: зміна схеми
@@ -915,13 +946,40 @@ endpoint, який колись відповість 2xx. Видалення ч�
 
 Після переходу на захищений транспорт (19.11.2026) обидва сценарії пройшли на окремому Compose з PostgreSQL 16 і двома воркерами. На 200 виконань із SIGKILL отримувач побачив 208 запитів та 200 ефектів. На окремі 200 виконань із двома рестартами PostgreSQL отримувач побачив 216 запитів та 200 ефектів. В обох прогонах усі виконання успішні, жодного зміненого завершеного чекпоінту та жодної dead job. Команди нижче.
 
+### Підготовка тестового стека
+
+Відкрийте окремий Bash-термінал у корені репозиторію. У прикладі потрібні вільні порти 13000, 13001, 15432 і 18080 та вільні підмережі `172.30.111.0/24` і `10.213.111.0/24`. Якщо вони зайняті, змініть значення нижче разом з адресами в цих підмережах. Compose створить мережі й том PostgreSQL у новому проєкті. Усі сценарії запускайте в цьому терміналі після успішного `up --wait`.
+
+```bash
+set -e
+export COMPOSE_PROJECT_NAME="flowforge-chaos-$(node -p 'require("node:crypto").randomUUID()')"
+export FLOWFORGE_SUBNET=172.30.111.0/24 FRONTEND_IP=172.30.111.10
+export CHAOS_SUBNET=10.213.111.0/24 CHAOS_SINK_IP=10.213.111.10
+export API_PORT=13000 FRONTEND_PORT=13001 POSTGRES_PORT=15432 CHAOS_SINK_PORT=18080
+export COMPOSE_ENV_FILES="$PWD/.env.example"
+export PUBLISH_ADDRESS=127.0.0.1 NODE_ENV=development COOKIE_SECURE=false
+export PUBLIC_ORIGIN="http://localhost:$FRONTEND_PORT" FRONTEND_ORIGIN="http://localhost:$FRONTEND_PORT"
+export API_URL="http://localhost:$API_PORT" API_ORIGIN="http://localhost:$API_PORT"
+export SINK_URL="http://localhost:$CHAOS_SINK_PORT" SINK_STATS_URL="http://localhost:$CHAOS_SINK_PORT/stats"
+# Тимчасові облікові дані лише для цього проєкту й локальних тестових клієнтів.
+for key in POSTGRES_PASSWORD API_DB_PASSWORD WORKER_DB_PASSWORD ADMIN_TOKEN; do
+  export "$key=$(node -p 'require("node:crypto").randomBytes(24).toString("hex")')"
+done
+export DATABASE_URL="postgres://flowforge:$POSTGRES_PASSWORD@localhost:$POSTGRES_PORT/flowforge"
+export COMPOSE_FILE="$PWD/docker-compose.yml:$PWD/docker-compose.chaos.yml"
+(cd apps/api && npm ci && npm run chaos:sink:build)
+docker compose up -d --build --wait
+chaos_ready="$COMPOSE_PROJECT_NAME"
+```
+
+Після всіх сценаріїв і браузерних тестів приберіть одноразовий стек і його том командою
+`docker compose -p "${chaos_ready:?}" down -v` з кореня репозиторію та закрийте цей термінал.
+
 ### Вбивство воркерів під навантаженням (3.3.1–3.3.3)
 
 ```bash
-# з кореня репозиторію; .env з ADMIN_TOKEN — як у «Запуск»
-(cd apps/api && npm ci && npm run chaos:sink:build)
-docker compose -f docker-compose.yml -f docker-compose.chaos.yml up -d --build --wait
-(cd apps/api && npm run chaos)
+(cd apps/api && export COMPOSE_PROJECT_NAME="${chaos_ready:?Спочатку підніміть тестовий стек}" &&
+  npm run chaos)
 ```
 
 Оверлей `docker-compose.chaos.yml` додає `sink`: зовнішній отримувач, який поводиться як
@@ -955,8 +1013,8 @@ docker compose -f docker-compose.yml -f docker-compose.chaos.yml up -d --build -
 ### Перезапуск Postgres під навантаженням (3.3.1–3.3.2)
 
 ```bash
-# стек з оверлеєм — як вище
-(cd apps/api && npm run chaos:postgres)
+(cd apps/api && export COMPOSE_PROJECT_NAME="${chaos_ready:?Спочатку підніміть тестовий стек}" &&
+  npm run chaos:postgres)
 ```
 
 Скрипт `apps/api/scripts/chaos-restart-postgres.ts` ставить те саме навантаження (200 виконань
@@ -992,8 +1050,8 @@ docker compose -f docker-compose.yml -f docker-compose.chaos.yml up -d --build -
 ### Сповіщення: рестарт Postgres і втрачені підтвердження (3.3.9)
 
 ```bash
-# стек з оверлеєм — як у «Вбивство воркерів під навантаженням»
-(cd apps/api && npm run chaos:notifications)
+(cd apps/api && export COMPOSE_PROJECT_NAME="${chaos_ready:?Спочатку підніміть тестовий стек}" &&
+  npm run chaos:notifications)
 ```
 
 Сценарій (`scripts/chaos-notifications.ts`) налаштовує сповіщення тенанта на `sink`, запускає 50
@@ -1007,8 +1065,8 @@ docker compose -f docker-compose.yml -f docker-compose.chaos.yml up -d --build -
 ### Навантажувальний сценарій справедливого планування (3.3.5)
 
 ```bash
-# стек з оверлеєм — як вище
-(cd apps/api && npm run load:fairness)
+(cd apps/api && export COMPOSE_PROJECT_NAME="${chaos_ready:?Спочатку підніміть тестовий стек}" &&
+  npm run load:fairness)
 ```
 
 Скрипт `apps/api/scripts/load-fairness.ts` (стек з `sink`: відповідь через 300 мс, 2 воркери × 4

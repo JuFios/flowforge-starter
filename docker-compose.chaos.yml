@@ -1,18 +1,14 @@
-# Оверлей для chaos-сценарію (README, «Chaos- і навантажувальні сценарії»):
-#   (cd apps/api && npm ci && npm run chaos:sink:build)
-#   docker compose -f docker-compose.yml -f docker-compose.chaos.yml up -d --build --wait
-#   (cd apps/api && npm run chaos)
-#   (cd apps/api && npm run chaos:notifications)
+# Для локального запуску див. docs/operations.md, «Підготовка тестового стека».
 services:
   # Зовнішній отримувач http-кроків, що поважає Idempotency-Key і рахує ефекти.
   sink:
     networks:
       chaos-receiver:
-        ipv4_address: 10.213.45.10
+        ipv4_address: ${CHAOS_SINK_IP:-10.213.45.10}
     image: node:20-alpine
     command: ["node", "/sink/chaos-sink.js"]
     volumes: ["./apps/api/dist/scripts:/sink:ro"]
-    ports: ["127.0.0.1:8080:8080"]
+    ports: ["127.0.0.1:${CHAOS_SINK_PORT:-8080}:8080"]
     healthcheck:
       test:
         [
@@ -28,7 +24,7 @@ services:
     networks: [default, chaos-receiver]
     environment:
       HTTP_FIXTURE_ORIGIN: "http://sink:8080"
-      HTTP_FIXTURE_ADDRESS: "10.213.45.10"
+      HTTP_FIXTURE_ADDRESS: "${CHAOS_SINK_IP:-10.213.45.10}"
     depends_on:
       sink: { condition: service_healthy }
 
@@ -41,7 +37,7 @@ services:
       # Коротший lease: задачі вбитого воркера повертаються за секунди, а не за 30 с.
       JOB_LEASE_MS: "5000"
       HTTP_FIXTURE_ORIGIN: "http://sink:8080"
-      HTTP_FIXTURE_ADDRESS: "10.213.45.10"
+      HTTP_FIXTURE_ADDRESS: "${CHAOS_SINK_IP:-10.213.45.10}"
     depends_on:
       sink: { condition: service_healthy }
 
@@ -49,4 +45,4 @@ networks:
   chaos-receiver:
     ipam:
       config:
-        - subnet: 10.213.45.0/24
+        - subnet: ${CHAOS_SUBNET:-10.213.45.0/24}

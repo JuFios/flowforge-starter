@@ -105,17 +105,17 @@ function runFresh(block: string): string[] {
 
 describe('README commands in a new terminal', () => {
   it('passes the owner password and the role secrets to the migration commands', () => {
-    const [block] = blocks('Міграції БД', 'docs/operations.md').filter((b) =>
-      b.includes('MIGRATION_DATABASE_URL'),
+    const commands = blocks('Міграції БД', 'docs/operations.md');
+    const setup = commands.find((block) =>
+      block.includes('export MIGRATION_DATABASE_URL='),
     );
-    expect(block).toBeDefined();
-    // Шаблон імені нової міграції (`<Name>`) — не команда для виконання.
-    const seen = runFresh(
-      block
-        .split('\n')
-        .filter((line) => !/<\w+>/.test(line))
-        .join('\n'),
+    const apply = commands.find((block) =>
+      block.includes('npm run db:migrate'),
     );
+    expect(setup).toBeDefined();
+    expect(apply).toBeDefined();
+    const seen = runFresh([setup, apply].join('\n'));
+    expect(seen.join('\n')).not.toMatch(/migration:(?:revert|generate)/);
     expect(seen).toContain('run db:migrate POSTGRES_PASSWORD');
     expect(seen).toContain(
       'run db:provision POSTGRES_PASSWORD API_DB_PASSWORD WORKER_DB_PASSWORD ' +
