@@ -566,6 +566,58 @@ describe('notification settings', () => {
     expect(receiver.hits('/new')).toHaveLength(1);
   });
 
+  /**
+   * Подія `sending` з простроченою орендою перезахоплюється за будь-якого стану журналу спроб:
+   * відкрита спроба (штатний випадок), закрита чи відсутня, або журнал випереджає лічильник.
+   * Інакше подія не доставлялася б і займала б місце тенанта у вікні кандидатів.
+   */
+  it.each([
+    ['with its attempt still open', null, ['lease_expired', 'delivered']],
+    [
+      'with its attempt already closed',
+      `UPDATE outbox_attempts SET outcome = 'timeout', "finishedAt" = now() WHERE "eventId" = $1`,
+      ['timeout', 'delivered'],
+    ],
+    [
+      'without any attempt row',
+      'DELETE FROM outbox_attempts WHERE "eventId" = $1',
+      ['delivered'],
+    ],
+    [
+      'with the attempt log ahead of its counter',
+      `INSERT INTO outbox_attempts ("eventId", "tenantId", attempt, "senderId")
+         SELECT id, "tenantId", attempts + 1, 'stray' FROM outbox_events WHERE id = $1`,
+      ['lease_expired', 'lease_expired', 'delivered'],
+    ],
+  ])(
+    'reclaims an expired lease %s and delivers the event once',
+    async (_, diverge, outcomes) => {
+      await setup(a);
+      const id = await completed(a);
+      await ds.query(`SELECT id FROM claim_outbox_event('lost', 30000, 1)`);
+      expect(await status(id)).toBe('sending');
+      if (diverge) await ds.query(diverge, [id]);
+      await ds.query(
+        `UPDATE outbox_events SET "leaseUntil" = now() - interval '1 second' WHERE id = $1`,
+        [id],
+      );
+      await ds.query(
+        `UPDATE notification_settings SET "dueAt" = now() - interval '1 second' WHERE "tenantId" = $1`,
+        [a.tenant.id],
+      );
+      expect(await sender.deliverNext()).toBe(true);
+      expect(await status(id)).toBe('delivered');
+      expect(receiver.hits('/notify')).toHaveLength(1);
+      const attempts: Array<{ outcome: string; finished: boolean }> =
+        await ds.query(
+          'SELECT outcome, "finishedAt" IS NOT NULL AS finished FROM outbox_attempts WHERE "eventId" = $1 ORDER BY attempt',
+          [id],
+        );
+      expect(attempts.map((row) => row.outcome)).toEqual(outcomes);
+      expect(attempts.every((row) => row.finished)).toBe(true);
+    },
+  );
+
   it('delivers a paused attempt when settings are recreated concurrently with removal', async () => {
     await setup(a, '/old');
     const id = await completed(a);
