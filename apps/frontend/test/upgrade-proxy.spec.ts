@@ -1,8 +1,16 @@
 import { expect, test } from '@playwright/test';
 import { createServer as createHttpServer } from 'node:http';
 import { connect, type Socket } from 'node:net';
+import { InstancePool, readyProbe } from '../lib/instance-pool';
 import { createUpgradeProxy } from '../lib/upgrade-proxy';
-import { closedPort, listen, resettingApi, silentApi, track } from './fake-api';
+import {
+  closedPort,
+  listen,
+  resettingApi,
+  silentApi,
+  slowRouteApi,
+  track,
+} from './fake-api';
 
 /**
  * Проксі `/realtime` без браузера: вбудовані інстанси API і сирий клієнт. Тикет одноразовий, тож
@@ -27,12 +35,17 @@ async function upgradingApi() {
   return { url: await listen(server), tickets };
 }
 
-async function proxyTo(apiUrls: URL[]): Promise<URL> {
+/** Проксі з пулом, чиї перевірки `/ready` тест може дочекатися. */
+async function proxyTo(
+  apiUrls: URL[],
+  pool = new InstancePool(apiUrls.length, readyProbe(apiUrls, 200)),
+): Promise<URL> {
   const proxy = createUpgradeProxy({
     apiUrls,
     publicOrigin: ORIGIN,
     connectTimeoutMs: 1_000,
     responseTimeoutMs: 300,
+    pool,
   });
   const server = createHttpServer();
   server.on('upgrade', (req, socket: Socket, head: Buffer) => {
@@ -80,15 +93,39 @@ test('does not resend a ticket to another instance after the first one received 
 test('starts the next upgrade at another instance after one hung on a ticket', async () => {
   const slow = await silentApi();
   const other = await upgradingApi();
-  const proxy = await proxyTo([slow.url, other.url]);
+  const pool = new InstancePool(2, readyProbe([slow.url, other.url], 200));
+  const proxy = await proxyTo([slow.url, other.url], pool);
   expect(await (await upgrade(proxy)).status).toBe(
     'HTTP/1.1 504 Gateway Timeout',
   );
+  await pool.settled();
   expect(await (await upgrade(proxy)).status).toBe(
     'HTTP/1.1 101 Switching Protocols',
   );
-  expect(slow.requests).toHaveLength(1);
+  // Upgrade із тикетом і перевірка `/ready`, яку завислий інстанс не пройшов.
+  expect(slow.paths()).toEqual([`/realtime?ticket=${TICKET}`, '/ready']);
   expect(other.tickets).toEqual([TICKET]);
+});
+
+test('keeps a live instance first after a ticket it answered too slowly', async () => {
+  const live = await slowRouteApi();
+  const other = await upgradingApi();
+  const pool = new InstancePool(2, readyProbe([live.url, other.url], 200));
+  const proxy = await proxyTo([live.url, other.url], pool);
+  for (let round = 0; round < 2; round++) {
+    expect(await (await upgrade(proxy)).status).toBe(
+      'HTTP/1.1 504 Gateway Timeout',
+    );
+    await pool.settled();
+  }
+  // Живий інстанс (`/ready` відповідає) лишається першим: повільний запит його не позначає.
+  expect(live.paths).toEqual([
+    `/realtime?ticket=${TICKET}`,
+    '/ready',
+    `/realtime?ticket=${TICKET}`,
+    '/ready',
+  ]);
+  expect(other.tickets).toEqual([]);
 });
 
 test('does not resend a ticket after the connection breaks mid-request', async () => {

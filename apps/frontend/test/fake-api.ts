@@ -1,5 +1,9 @@
 import { test } from '@playwright/test';
-import { createServer as createHttpServer, type Server } from 'node:http';
+import {
+  createServer as createHttpServer,
+  type IncomingMessage,
+  type Server,
+} from 'node:http';
 import {
   createServer as createTcpServer,
   type AddressInfo,
@@ -102,6 +106,49 @@ export async function stallingBodyApi() {
       'content-length': '64',
     });
     res.write('{"items":[');
+  });
+  return { url: await listen(server), paths };
+}
+
+/**
+ * Справний інстанс із великим тілом (32 МіБ), яке не вміщується в буфери сокета й потоку: клієнт,
+ * що не читає, тримає решту тіла в API, і читання після кінця бюджету проксі обривається.
+ */
+export async function largeBodyApi() {
+  const paths: string[] = [];
+  const body = Buffer.alloc(32 * 1024 * 1024, 0x20);
+  const server = createHttpServer((req, res) => {
+    paths.push(req.url ?? '');
+    track(req.socket);
+    req.resume();
+    res.on('error', () => undefined);
+    res.writeHead(200, {
+      'content-type': 'application/json',
+      'content-length': String(body.length),
+    });
+    res.end(body);
+  });
+  return { url: await listen(server), paths };
+}
+
+/**
+ * Живий інстанс із повільним маршрутом: `/ready` відповідає одразу, а інші запити й upgrade — ні
+ * (як великий знімок виконання, що готується довше за таймаут проксі).
+ */
+export async function slowRouteApi() {
+  const paths: string[] = [];
+  const server = createHttpServer((req, res) => {
+    paths.push(req.url ?? '');
+    track(req.socket);
+    req.resume();
+    if (req.url !== '/ready') return;
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end('{"status":"ok"}');
+  });
+  server.on('upgrade', (req: IncomingMessage, socket: Socket) => {
+    paths.push(req.url ?? '');
+    track(socket);
+    socket.on('error', () => undefined);
   });
   return { url: await listen(server), paths };
 }

@@ -1,12 +1,19 @@
 /**
  * Вибір інстансу API для проксі фронтенду: HTTP (`lib/upstream.ts`) і WebSocket upgrade
- * (`lib/upgrade-proxy.ts`). Пасивний запобіжник замість активних health-check-ів.
+ * (`lib/upgrade-proxy.ts`). Пасивний запобіжник із підтвердженням через `/ready`.
  *
  * - Першим пробується інстанс, що відповів останнім (`preferred`).
- * - Невизначена відмова (таймаут, обрив, помилка з'єднання) робить інстанс підозрілим на cooldown.
- *   Підозрілий стоїть у порядку перебору після всіх справних, тому завислий API, що приймає
- *   з'єднання й мовчить, не перехоплює кожен наступний запит, поки поруч є справний. Але і не
- *   виключається зовсім: коли інші не відповідають, підозрілий усе одно пробується.
+ * - Відмова з'єднання одразу робить інстанс підозрілим на cooldown: на неї не впливає зміст запиту.
+ * - Таймаут чи обрив запиту, що вже пішов до API, самі інстанс не позначають. Повільна відповідь
+ *   може бути наслідком самого запиту (великий знімок виконання) чи повільного клієнта, а це
+ *   контролює тенант. Замість цього проксі перевіряє інстанс окремим `GET /ready`
+ *   (`PROBE_TIMEOUT_MS`), не більше однієї перевірки на інстанс одночасно. Підозрілим інстанс
+ *   стає, лише якщо `/ready` не відповів 2xx. Так порядок перебору не залежить від запитів
+ *   тенанта. `/ready`, а не `/health`: інстанс, у якого вичерпано пул з'єднань із БД, на
+ *   `/health` відповідає, але запитів не обслуговує.
+ * - Підозрілий стоїть у порядку перебору після всіх справних, тому завислий API не перехоплює
+ *   кожен наступний запит, поки поруч є справний. Але й не виключається зовсім: коли інші не
+ *   відповідають, підозрілий усе одно пробується.
  * - Будь-яка відповідь (HTTP-статус чи 101) знімає підозру. Інстанс, що відмовив знову після
  *   спливання cooldown, отримує вдвічі довший, до `maxCooldownMs`.
  *
@@ -21,12 +28,40 @@
  */
 export const BASE_COOLDOWN_MS = 30_000;
 export const MAX_COOLDOWN_MS = 300_000;
+/**
+ * Скільки чекати відповіді `/ready`. Довше за власний таймаут ping БД у `/ready` API (2 с): повільна
+ * БД дає 503 від самого API, а не хибну позначку справного інстансу за таймаутом перевірки.
+ */
+export const PROBE_TIMEOUT_MS = 3_000;
+
+/** Перевірка інстансу за індексом: true — він відповідає й готовий обслуговувати запити. */
+export type InstanceProbe = (index: number) => Promise<boolean>;
 
 export interface InstancePoolOptions {
   baseCooldownMs?: number;
   maxCooldownMs?: number;
   /** Годинник для cooldown (у тестах — керований). */
   now?: () => number;
+}
+
+/** `GET /ready` інстансу з власним таймаутом. Будь-яка помилка чи статус поза 2xx — false. */
+export function readyProbe(
+  apiUrls: readonly URL[],
+  timeoutMs = PROBE_TIMEOUT_MS,
+): InstanceProbe {
+  return async (index) => {
+    try {
+      const res = await fetch(new URL('/ready', apiUrls[index]), {
+        signal: AbortSignal.timeout(timeoutMs),
+        redirect: 'manual',
+        cache: 'no-store',
+      });
+      await res.body?.cancel().catch(() => undefined);
+      return res.ok;
+    } catch {
+      return false;
+    }
+  };
 }
 
 export class InstancePool {
@@ -41,12 +76,15 @@ export class InstancePool {
   private readonly failures: number[];
   /** До якого моменту інстанс підозрілий (0 — справний). */
   private readonly suspectUntil: number[];
+  /** Перевірка `/ready`, що зараз триває, для кожного інстансу. */
+  private readonly probing: Array<Promise<void> | undefined>;
   private readonly baseCooldownMs: number;
   private readonly maxCooldownMs: number;
   private readonly now: () => number;
 
   constructor(
     readonly size: number,
+    private readonly probe: InstanceProbe,
     options: InstancePoolOptions = {},
   ) {
     if (!Number.isInteger(size) || size < 1)
@@ -58,6 +96,7 @@ export class InstancePool {
     this.answeredAt = new Array<number>(size).fill(0);
     this.failures = new Array<number>(size).fill(0);
     this.suspectUntil = new Array<number>(size).fill(0);
+    this.probing = new Array<Promise<void> | undefined>(size).fill(undefined);
   }
 
   /** Порядок перебору: справні по колу від `preferred`, далі підозрілі — хто раніше відбуде cooldown. */
@@ -73,7 +112,7 @@ export class InstancePool {
     return healthy.concat(suspect);
   }
 
-  /** Номер спроби; передається в `succeeded` чи `failed` з її результатом. */
+  /** Номер спроби; передається в `succeeded`, `failed` чи `check` з її результатом. */
   begin(): number {
     return ++this.sequence;
   }
@@ -88,12 +127,12 @@ export class InstancePool {
   }
 
   /**
-   * Невизначена відмова. Спроба, почата до останньої позначки, — той самий інцидент; почата до
-   * новішої відповіді — застаріле свідчення.
+   * Відмова, на яку зміст запиту не впливає (з'єднання не встановилося), або непройдена перевірка
+   * `/ready`. Спроба, почата до останньої позначки, — той самий інцидент; почата до новішої
+   * відповіді — застаріле свідчення.
    */
   failed(index: number, attempt: number): void {
-    if (attempt <= this.markedAt[index] || attempt < this.answeredAt[index])
-      return;
+    if (this.stale(index, attempt)) return;
     this.markedAt[index] = this.sequence;
     this.failures[index] = Math.min(this.failures[index] + 1, 32);
     this.suspectUntil[index] =
@@ -106,6 +145,34 @@ export class InstancePool {
       const next = this.order().find((other) => other !== index);
       if (next !== undefined) this.preferred = next;
     }
+  }
+
+  /**
+   * Запит, що міг дійти до API, не отримав відповіді (таймаут чи обрив). Причиною може бути сам
+   * запит, тож інстанс перевіряється окремим `/ready`. Позначка — лише за непройденою перевіркою;
+   * її свідчення — сама перевірка: інстанс, що відповів на новіший запит, вона вже не позначить.
+   */
+  check(index: number, attempt: number): void {
+    if (this.stale(index, attempt) || this.probing[index]) return;
+    const probeAttempt = this.begin();
+    const probing = this.probe(index)
+      .catch(() => false)
+      .then((ready) => {
+        if (!ready) this.failed(index, probeAttempt);
+      })
+      .finally(() => {
+        this.probing[index] = undefined;
+      });
+    this.probing[index] = probing;
+  }
+
+  /** Завершення всіх перевірок `/ready`, що зараз тривають (для тестів і діагностики). */
+  async settled(): Promise<void> {
+    await Promise.all(this.probing);
+  }
+
+  private stale(index: number, attempt: number): boolean {
+    return attempt <= this.markedAt[index] || attempt < this.answeredAt[index];
   }
 }
 
@@ -124,7 +191,7 @@ export function sharedInstancePool(apiUrls: readonly URL[]): InstancePool {
   const key = apiUrls.map((url) => url.origin).join(',');
   let pool = pools.get(key);
   if (!pool) {
-    pool = new InstancePool(apiUrls.length);
+    pool = new InstancePool(apiUrls.length, readyProbe(apiUrls));
     pools.set(key, pool);
   }
   return pool;

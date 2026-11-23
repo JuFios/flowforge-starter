@@ -1,15 +1,19 @@
 import { expect, test } from '@playwright/test';
 import { InstancePool, sharedInstancePool } from '../lib/instance-pool';
 
-/** Порядок перебору інстансів API проксі фронтенду з керованим годинником. */
+/**
+ * Порядок перебору інстансів API проксі фронтенду з керованим годинником. Перевірка `/ready`
+ * підставна: тест сам вирішує, коли й з яким результатом вона завершиться.
+ */
 function pool(size: number) {
   const clock = { now: 1_000_000 };
-  const instances = new InstancePool(size, {
-    baseCooldownMs: 30_000,
-    maxCooldownMs: 120_000,
-    now: () => clock.now,
-  });
-  return { instances, clock };
+  const probes: Array<{ index: number; answer: (ready: boolean) => void }> = [];
+  const instances = new InstancePool(
+    size,
+    (index) => new Promise<boolean>((answer) => probes.push({ index, answer })),
+    { baseCooldownMs: 30_000, maxCooldownMs: 120_000, now: () => clock.now },
+  );
+  return { instances, clock, probes };
 }
 
 test('starts at the instance that answered last and keeps the rest in rotation', () => {
@@ -87,6 +91,62 @@ test('ignores a late failure of a request sent before a newer answer', () => {
   expect(instances.order()).toEqual([0, 1]);
 });
 
+test('marks an instance after a timeout only when it also fails /ready', async () => {
+  const { instances, probes } = pool(2);
+  instances.check(0, instances.begin());
+  expect(probes.map((p) => p.index)).toEqual([0]);
+  // Поки перевірка триває, порядок не змінюється.
+  expect(instances.order()).toEqual([0, 1]);
+  probes[0].answer(true);
+  await instances.settled();
+  expect(instances.order()).toEqual([0, 1]);
+
+  instances.check(0, instances.begin());
+  probes[1].answer(false);
+  await instances.settled();
+  expect(instances.order()).toEqual([1, 0]);
+});
+
+test('treats a probe that throws as a failed one', async () => {
+  const instances = new InstancePool(2, () =>
+    Promise.reject(new Error('probe broke')),
+  );
+  instances.check(0, instances.begin());
+  await instances.settled();
+  expect(instances.order()).toEqual([1, 0]);
+});
+
+test('runs one /ready check per instance at a time', async () => {
+  const { instances, probes } = pool(2);
+  for (let n = 0; n < 3; n++) instances.check(0, instances.begin());
+  instances.check(1, instances.begin());
+  expect(probes.map((p) => p.index)).toEqual([0, 1]);
+  for (const probe of probes) probe.answer(true);
+  await instances.settled();
+  instances.check(0, instances.begin());
+  expect(probes.map((p) => p.index)).toEqual([0, 1, 0]);
+  probes[2].answer(true);
+  await instances.settled();
+});
+
+test('does not check an instance for a request sent before a newer answer', async () => {
+  const { instances, probes } = pool(2);
+  const early = instances.begin();
+  instances.succeeded(0, instances.begin());
+  instances.check(0, early);
+  expect(probes).toEqual([]);
+  await instances.settled();
+});
+
+test('ignores a failed check when the instance answered a request sent during it', async () => {
+  const { instances, probes } = pool(2);
+  instances.check(0, instances.begin());
+  instances.succeeded(0, instances.begin());
+  probes[0].answer(false);
+  await instances.settled();
+  expect(instances.order()).toEqual([0, 1]);
+});
+
 test('shares one pool per API list within the process', () => {
   const urls = [new URL('http://api:3000'), new URL('http://api-2:3000')];
   const pool = sharedInstancePool(urls);
@@ -95,5 +155,5 @@ test('shares one pool per API list within the process', () => {
 });
 
 test('rejects an empty instance list', () => {
-  expect(() => new InstancePool(0)).toThrow();
+  expect(() => new InstancePool(0, () => Promise.resolve(true))).toThrow();
 });

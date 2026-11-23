@@ -1,4 +1,4 @@
-import { InstancePool, sharedInstancePool } from './instance-pool';
+import { InstancePool, readyProbe, sharedInstancePool } from './instance-pool';
 import { frontendConfig } from './server-config';
 
 /**
@@ -7,7 +7,9 @@ import { frontendConfig } from './server-config';
  * повтор на іншому інстансі безпечний навіть для POST. Будь-яка інша помилка після відправлення
  * (обрив, таймаут відповіді) не повторюється: результат невідомий, і вирішує клієнт за семантикою
  * маршруту (README, «Фронтенд: повтор після невизначеної відповіді»). Порядок перебору веде
- * `InstancePool`: інстанс, що завис чи обірвав з'єднання, не стоїть першим для наступних запитів.
+ * `InstancePool`: інстанс, що не прийняв з'єднання або не пройшов перевірку `/ready` після
+ * таймауту чи обриву, не стоїть першим для наступних запитів. Тіло відповіді передається потоком
+ * і стан інстансу не змінює: його швидкість залежить і від клієнта.
  */
 const CONNECT_ERRORS = new Set([
   'ECONNREFUSED',
@@ -48,7 +50,7 @@ export type CallApi = (request: UpstreamRequest) => Promise<Response>;
 
 export function createUpstream(
   { apiUrls, apiTimeoutMs }: UpstreamOptions,
-  pool = new InstancePool(apiUrls.length),
+  pool = new InstancePool(apiUrls.length, readyProbe(apiUrls)),
 ): CallApi {
   return async (request) => {
     const timeout = AbortSignal.timeout(apiTimeoutMs);
@@ -57,7 +59,6 @@ export function createUpstream(
       : timeout;
     for (const index of pool.order()) {
       const attempt = pool.begin();
-      const started = Date.now();
       try {
         const response = await fetch(new URL(request.path, apiUrls[index]), {
           method: request.method,
@@ -68,57 +69,23 @@ export function createUpstream(
           cache: 'no-store',
         });
         pool.succeeded(index, attempt);
-        return watchBody(response, () => {
-          if (!request.signal?.aborted) pool.failed(index, attempt);
-        });
+        return response;
       } catch (err) {
-        if (timeout.aborted) {
-          // Бюджет спільний для всіх спроб. Інстанс, якому дісталося менше половини (решту з'їв
-          // таймаут з'єднання з попереднім), за таймаут не відповідає.
-          if (Date.now() - started >= apiTimeoutMs / 2)
-            pool.failed(index, attempt);
-          throw new UpstreamUnavailableError('timeout');
-        }
         // Браузер пішов сам: це не свідчення про стан інстансу.
-        if (request.signal?.aborted) throw err;
-        pool.failed(index, attempt);
-        if (connectFailure(err)) continue;
-        throw new UpstreamUnavailableError('interrupted');
+        if (request.signal?.aborted && !timeout.aborted) throw err;
+        if (!timeout.aborted && connectFailure(err)) {
+          pool.failed(index, attempt);
+          continue;
+        }
+        // Запит міг дійти до API: причиною може бути він сам, тож стан інстансу вирішує `/ready`.
+        pool.check(index, attempt);
+        throw new UpstreamUnavailableError(
+          timeout.aborted ? 'timeout' : 'interrupted',
+        );
       }
     }
     throw new UpstreamUnavailableError('unreachable');
   };
-}
-
-/**
- * Тіло читається вже після `succeeded`: обрив чи таймаут посеред тіла (заголовки прийшли, далі
- * тиша) теж позначає інстанс. Скасування з боку браузера — ні.
- */
-function watchBody(response: Response, onFailure: () => void): Response {
-  if (!response.body) return response;
-  const reader = response.body.getReader();
-  const body = new ReadableStream<Uint8Array>({
-    async pull(controller) {
-      let part: ReadableStreamReadResult<Uint8Array>;
-      try {
-        part = await reader.read();
-      } catch (err) {
-        onFailure();
-        controller.error(err);
-        return;
-      }
-      if (part.done) controller.close();
-      else controller.enqueue(part.value);
-    },
-    cancel(reason) {
-      return reader.cancel(reason);
-    },
-  });
-  return new Response(body, {
-    status: response.status,
-    statusText: response.statusText,
-    headers: response.headers,
-  });
 }
 
 let shared: CallApi | undefined;

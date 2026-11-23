@@ -2,7 +2,7 @@ import { IncomingMessage, request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import type { Socket } from 'node:net';
 import type { Duplex } from 'node:stream';
-import { InstancePool } from './instance-pool';
+import { InstancePool, readyProbe } from './instance-pool';
 
 /** Найдовший шлях upgrade: `/realtime?ticket=` + токен. */
 const MAX_UPGRADE_URL = 256;
@@ -46,7 +46,8 @@ export function createUpgradeProxy(
   const { apiUrls, publicOrigin, connectTimeoutMs, responseTimeoutMs } =
     options;
   /** Той самий запобіжник, що й для HTTP (`lib/instance-pool.ts`): завислий API не стоїть першим. */
-  const pool = options.pool ?? new InstancePool(apiUrls.length);
+  const pool =
+    options.pool ?? new InstancePool(apiUrls.length, readyProbe(apiUrls));
 
   function proxyUpgrade(
     req: IncomingMessage,
@@ -99,11 +100,15 @@ export function createUpgradeProxy(
       const open = !settled && !socket.destroyed;
       abort();
       if (!open) return;
-      // Наступні upgrade-и починаються з іншого інстансу, щоб завислий API не перехоплював кожен тикет.
-      pool.failed(index, attempt);
-      // Лише поки з'єднання не встановлено, тикет точно не дійшов до API (як у lib/upstream.ts).
-      if (!sent) return proxyUpgrade(req, socket, head, order, position + 1);
-      // Інакше інший інстанс отримав би вже погашений тикет: браузер візьме новий.
+      // Лише поки з'єднання не встановлено, тикет точно не дійшов до API (як у lib/upstream.ts):
+      // інстанс позначається одразу, а upgrade іде на наступний.
+      if (!sent) {
+        pool.failed(index, attempt);
+        return proxyUpgrade(req, socket, head, order, position + 1);
+      }
+      // Інакше інший інстанс отримав би вже погашений тикет: браузер візьме новий. Чи обходити
+      // інстанс наступним upgrade-ам, вирішує перевірка `/ready`, а не цей запит.
+      pool.check(index, attempt);
       if (reason === 'timeout') reject(socket, 504, 'Gateway Timeout');
       else reject(socket, 502, 'Bad Gateway');
     };
