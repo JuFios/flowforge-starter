@@ -1,12 +1,16 @@
 import { expect, test } from '@playwright/test';
-import { createServer as createHttpServer, type Server } from 'node:http';
-import {
-  connect,
-  createServer as createTcpServer,
-  type AddressInfo,
-  type Socket,
-} from 'node:net';
+import { createServer as createHttpServer } from 'node:http';
+import { connect, type Socket } from 'node:net';
+import { InstancePool, readyProbe } from '../lib/instance-pool';
 import { createUpgradeProxy } from '../lib/upgrade-proxy';
+import {
+  closedPort,
+  listen,
+  resettingApi,
+  silentApi,
+  slowRouteApi,
+  track,
+} from './fake-api';
 
 /**
  * Проксі `/realtime` без браузера: вбудовані інстанси API і сирий клієнт. Тикет одноразовий, тож
@@ -15,62 +19,12 @@ import { createUpgradeProxy } from '../lib/upgrade-proxy';
 const ORIGIN = 'http://front.test';
 const TICKET = 'ticket_0123456789';
 
-type Closable = { close(cb?: () => void): unknown };
-const opened: Closable[] = [];
-const sockets: Socket[] = [];
-
-test.afterEach(async () => {
-  for (const socket of sockets.splice(0)) socket.destroy();
-  await Promise.all(
-    opened.splice(0).map((s) => new Promise<void>((r) => s.close(() => r()))),
-  );
-});
-
-function listen<T extends Server | ReturnType<typeof createTcpServer>>(
-  server: T,
-): Promise<URL> {
-  opened.push(server);
-  return new Promise((resolve) =>
-    server.listen(0, '127.0.0.1', () =>
-      resolve(
-        new URL(`http://127.0.0.1:${(server.address() as AddressInfo).port}`),
-      ),
-    ),
-  );
-}
-
-/** Інстанс, що приймає з'єднання, читає запит і нічого не відповідає. */
-async function silentApi() {
-  const requests: string[] = [];
-  const closed: Promise<void>[] = [];
-  const server = createTcpServer((socket) => {
-    sockets.push(socket);
-    closed.push(new Promise((r) => socket.once('close', () => r())));
-    socket.on('data', (chunk) => requests.push(chunk.toString('latin1')));
-    socket.on('error', () => undefined);
-  });
-  return { url: await listen(server), requests, closed };
-}
-
-/** Інстанс, що обриває з'єднання, щойно отримав запит. */
-async function resettingApi() {
-  const requests: string[] = [];
-  const server = createTcpServer((socket) => {
-    socket.on('error', () => undefined);
-    socket.once('data', (chunk) => {
-      requests.push(chunk.toString('latin1'));
-      socket.destroy();
-    });
-  });
-  return { url: await listen(server), requests };
-}
-
 /** Інстанс, що приймає upgrade і записує, який тикет отримав. */
 async function upgradingApi() {
   const tickets: string[] = [];
   const server = createHttpServer();
   server.on('upgrade', (req, socket: Socket) => {
-    sockets.push(socket);
+    track(socket);
     tickets.push(
       new URL(req.url ?? '', 'http://x').searchParams.get('ticket') ?? '',
     );
@@ -81,30 +35,21 @@ async function upgradingApi() {
   return { url: await listen(server), tickets };
 }
 
-/** Адреса, на якій ніхто не слухає (з'єднання відхиляється). */
-async function closedPort(): Promise<URL> {
-  const server = createTcpServer();
-  const url = await new Promise<URL>((resolve) =>
-    server.listen(0, '127.0.0.1', () =>
-      resolve(
-        new URL(`http://127.0.0.1:${(server.address() as AddressInfo).port}`),
-      ),
-    ),
-  );
-  await new Promise<void>((r) => server.close(() => r()));
-  return url;
-}
-
-async function proxyTo(apiUrls: URL[]): Promise<URL> {
+/** Проксі з пулом, чиї перевірки `/ready` тест може дочекатися. */
+async function proxyTo(
+  apiUrls: URL[],
+  pool = new InstancePool(apiUrls.length, readyProbe(apiUrls, 200)),
+): Promise<URL> {
   const proxy = createUpgradeProxy({
     apiUrls,
     publicOrigin: ORIGIN,
     connectTimeoutMs: 1_000,
     responseTimeoutMs: 300,
+    pool,
   });
   const server = createHttpServer();
   server.on('upgrade', (req, socket: Socket, head: Buffer) => {
-    sockets.push(socket);
+    track(socket);
     socket.on('error', () => socket.destroy());
     req.headers['x-forwarded-for'] = '127.0.0.1';
     proxy(req, socket, head);
@@ -117,7 +62,7 @@ async function upgrade(
   proxy: URL,
 ): Promise<{ socket: Socket; status: Promise<string> }> {
   const socket = connect(Number(proxy.port), proxy.hostname);
-  sockets.push(socket);
+  track(socket);
   socket.on('error', () => undefined);
   await new Promise<void>((r) => socket.once('connect', () => r()));
   const status = new Promise<string>((resolve) => {
@@ -148,15 +93,39 @@ test('does not resend a ticket to another instance after the first one received 
 test('starts the next upgrade at another instance after one hung on a ticket', async () => {
   const slow = await silentApi();
   const other = await upgradingApi();
-  const proxy = await proxyTo([slow.url, other.url]);
+  const pool = new InstancePool(2, readyProbe([slow.url, other.url], 200));
+  const proxy = await proxyTo([slow.url, other.url], pool);
   expect(await (await upgrade(proxy)).status).toBe(
     'HTTP/1.1 504 Gateway Timeout',
   );
+  await pool.settled();
   expect(await (await upgrade(proxy)).status).toBe(
     'HTTP/1.1 101 Switching Protocols',
   );
-  expect(slow.requests).toHaveLength(1);
+  // Upgrade із тикетом і перевірка `/ready`, яку завислий інстанс не пройшов.
+  expect(slow.paths()).toEqual([`/realtime?ticket=${TICKET}`, '/ready']);
   expect(other.tickets).toEqual([TICKET]);
+});
+
+test('keeps a live instance first after a ticket it answered too slowly', async () => {
+  const live = await slowRouteApi();
+  const other = await upgradingApi();
+  const pool = new InstancePool(2, readyProbe([live.url, other.url], 200));
+  const proxy = await proxyTo([live.url, other.url], pool);
+  for (let round = 0; round < 2; round++) {
+    expect(await (await upgrade(proxy)).status).toBe(
+      'HTTP/1.1 504 Gateway Timeout',
+    );
+    await pool.settled();
+  }
+  // Живий інстанс (`/ready` відповідає) лишається першим: повільний запит його не позначає.
+  expect(live.paths).toEqual([
+    `/realtime?ticket=${TICKET}`,
+    '/ready',
+    `/realtime?ticket=${TICKET}`,
+    '/ready',
+  ]);
+  expect(other.tickets).toEqual([]);
 });
 
 test('does not resend a ticket after the connection breaks mid-request', async () => {

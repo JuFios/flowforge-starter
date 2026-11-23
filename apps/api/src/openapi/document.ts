@@ -42,7 +42,7 @@ function page(maximum: number): ParameterObject[] {
     param('cursor', 'query', {
       ...str,
       description:
-        'Непрозорий курсор попередньої відповіді з тими самими фільтрами.',
+        'Непрозорий курсор попередньої відповіді того самого списку з тими самими фільтрами. Курсор іншого списку чи фільтра — 400 `cursor does not match the filter`.',
     }),
   ];
 }

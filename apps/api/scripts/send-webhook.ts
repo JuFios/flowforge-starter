@@ -1,9 +1,35 @@
 import { createHmac } from 'node:crypto';
 import { open } from 'node:fs/promises';
 
-async function main(): Promise<void> {
-  const [endpoint, deliveryId, file] = process.argv.slice(2);
-  const secret = process.env.WEBHOOK_SECRET;
+/** Найбільша відповідь 202, яку скрипт читає: `{ executionId, executionPurged }` значно менша. */
+const MAX_RESPONSE_BYTES = 4096;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Відповідь 202 означає, що доставку прийнято. Проблема з тілом відповіді прийняття не скасовує, і
+ * повідомлення мусить це сказати: повтор тими самими байтами й ID безпечний і поверне той самий
+ * executionId.
+ */
+class AcceptedDeliveryError extends Error {
+  constructor(why: string) {
+    super(`delivery accepted (HTTP 202), but ${why}`);
+  }
+}
+
+export interface WebhookDelivery {
+  endpoint: string | undefined;
+  deliveryId: string | undefined;
+  file: string | undefined;
+  secret: string | undefined;
+}
+
+/** Підписує й надсилає доставку; повертає рядок для друку. */
+export async function sendWebhook({
+  endpoint,
+  deliveryId,
+  file,
+  secret,
+}: WebhookDelivery): Promise<string> {
   if (
     !secret ||
     !endpoint ||
@@ -72,7 +98,7 @@ async function main(): Promise<void> {
     throw new Error('HTTP ' + response.status);
   }
   const reader = response.body?.getReader();
-  if (!reader) throw new Error('empty response');
+  if (!reader) throw new AcceptedDeliveryError('the response is empty');
   const chunks: Uint8Array[] = [];
   let size = 0;
   try {
@@ -80,30 +106,53 @@ async function main(): Promise<void> {
       const part = await reader.read();
       if (part.done) break;
       size += part.value.length;
-      if (size > 4096) throw new Error('invalid response size');
+      if (size > MAX_RESPONSE_BYTES)
+        throw new AcceptedDeliveryError('the response is larger than 4 KiB');
       chunks.push(part.value);
     }
+  } catch (error) {
+    if (error instanceof AcceptedDeliveryError) throw error;
+    throw new AcceptedDeliveryError('reading the response failed');
   } finally {
-    await reader.cancel();
+    await reader.cancel().catch(() => undefined);
   }
-  const result = JSON.parse(Buffer.concat(chunks, size).toString('utf8')) as {
+  let result: unknown;
+  try {
+    result = JSON.parse(Buffer.concat(chunks, size).toString('utf8'));
+  } catch {
+    throw new AcceptedDeliveryError('the response is not JSON');
+  }
+  if (typeof result !== 'object' || result === null || Array.isArray(result))
+    throw new AcceptedDeliveryError('the response is not a JSON object');
+  const { executionId, executionPurged } = result as {
     executionId?: unknown;
     executionPurged?: unknown;
   };
-  if (
-    typeof result.executionId !== 'string' ||
-    !/^[\da-f-]{36}$/i.test(result.executionId) ||
-    typeof result.executionPurged !== 'boolean'
-  )
-    throw new Error('invalid execution ID');
+  if (typeof executionId !== 'string' || !UUID.test(executionId))
+    throw new AcceptedDeliveryError('the response has no valid executionId');
+  // Прапорця немає у відповідях API до його появи: ID відомий, позначки очищення просто немає.
+  if (executionPurged !== undefined && typeof executionPurged !== 'boolean')
+    throw new AcceptedDeliveryError('executionPurged is not a boolean');
   // Повтор після очищення історії: доставку прийнято, але виконання за цим ID вже немає.
-  console.log(
+  return [
     response.status,
-    result.executionId,
-    ...(result.executionPurged ? ['(execution history purged)'] : []),
+    executionId,
+    ...(executionPurged === true ? ['(execution history purged)'] : []),
+  ].join(' ');
+}
+
+if (require.main === module) {
+  const [endpoint, deliveryId, file] = process.argv.slice(2);
+  sendWebhook({
+    endpoint,
+    deliveryId,
+    file,
+    secret: process.env.WEBHOOK_SECRET,
+  }).then(
+    (line) => console.log(line),
+    (error: unknown) => {
+      console.error(error instanceof Error ? error.message : 'delivery failed');
+      process.exitCode = 1;
+    },
   );
 }
-void main().catch((error: unknown) => {
-  console.error(error instanceof Error ? error.message : 'delivery failed');
-  process.exitCode = 1;
-});

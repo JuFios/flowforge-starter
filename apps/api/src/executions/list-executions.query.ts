@@ -11,6 +11,14 @@ import {
 import { MAX_CURSOR_LENGTH, QueryInt } from '../common/keyset-cursor';
 import { ExecutionStatus } from '../entities/execution.entity';
 
+/** Статуси фільтра списку виконань. */
+export const EXECUTION_STATUSES: readonly ExecutionStatus[] = [
+  'pending',
+  'running',
+  'succeeded',
+  'failed',
+];
+
 export class ListExecutionsQuery {
   @IsOptional()
   @QueryInt()
@@ -20,7 +28,7 @@ export class ListExecutionsQuery {
   limit?: number;
 
   @IsOptional()
-  @IsIn(['pending', 'running', 'succeeded', 'failed'])
+  @IsIn(EXECUTION_STATUSES)
   status?: ExecutionStatus;
 
   @IsOptional()

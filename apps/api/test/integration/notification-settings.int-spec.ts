@@ -748,9 +748,9 @@ describe('notification settings', () => {
       ['2024-02-29T24:00:00', 400],
       ['0000-01-01T00:00:00', 400],
     ] as const) {
-      const cursor = Buffer.from(`${date}.000000Z|${a.tenant.id}`).toString(
-        'base64url',
-      );
+      const cursor = Buffer.from(
+        `${date}.000000Z|${a.tenant.id}|events:`,
+      ).toString('base64url');
       expect(
         (
           await call(

@@ -1,6 +1,7 @@
 import {
   cursorAtSql,
   decodeKeysetCursor,
+  eventsCursorScope,
   KeysetPosition,
   Page,
   toPage,
@@ -273,7 +274,8 @@ export class NotificationsService {
     query: ListEventsQuery,
   ): Promise<Page<EventView>> {
     const limit = query.limit ?? 50;
-    const after = query.cursor ? decodeKeysetCursor(query.cursor) : null;
+    const scope = eventsCursorScope(query.status);
+    const after = query.cursor ? decodeKeysetCursor(query.cursor, scope) : null;
     const params: unknown[] = [tenantId, limit + 1];
     const where = ['"tenantId" = $1'];
     if (query.status) {
@@ -296,7 +298,7 @@ export class NotificationsService {
           params,
         ),
     );
-    return toPage(rows, limit);
+    return toPage(rows, limit, scope);
   }
 
   /** Верхня межа фіксує набір номерів спроб на початку обходу. */

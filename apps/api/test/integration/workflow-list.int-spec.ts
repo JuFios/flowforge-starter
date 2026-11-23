@@ -201,7 +201,7 @@ describe('paged workflow list', () => {
     ['cursor=not-a-cursor'],
     // Правильна форма, неможлива дата (30 лютого).
     [
-      `cursor=${Buffer.from('2026-02-30T10:00:00.000000Z|00000000-0000-4000-8000-000000000000').toString('base64url')}`,
+      `cursor=${Buffer.from('2026-02-30T10:00:00.000000Z|00000000-0000-4000-8000-000000000000|workflows').toString('base64url')}`,
     ],
     [`cursor=${'A'.repeat(300)}`],
     ['unknown=1'],

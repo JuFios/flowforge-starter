@@ -1,6 +1,7 @@
 import {
   cursorAtSql,
   decodeKeysetCursor,
+  executionsCursorScope,
   toPage,
 } from '../common/keyset-cursor';
 import { ListExecutionsQuery } from './list-executions.query';
@@ -465,7 +466,7 @@ export class ExecutionsService {
 
   async list(tenantId: string, query: ListExecutionsQuery = {}) {
     const workflowId = query.workflowId?.toLowerCase();
-    const scope = `${query.status ?? ''}:${workflowId ?? ''}`;
+    const scope = executionsCursorScope(query.status, workflowId);
     const after = query.cursor
       ? decodeKeysetCursor(query.cursor, scope)
       : undefined;
