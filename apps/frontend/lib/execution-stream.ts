@@ -236,7 +236,7 @@ export class ExecutionStream {
         this.stopPolling();
         this.setState('live');
         this.apply(snapshot, true);
-      } else if (message.type === 'gone') this.gone();
+      }
     };
     socket.onerror = () => undefined;
     socket.onclose = (ev) => {
@@ -247,7 +247,7 @@ export class ExecutionStream {
         this.stop();
         return this.events.onSessionExpired();
       }
-      if (ev.code === 4404 || ev.code === 4403) return this.gone();
+      if (ev.code === 4404) return this.gone();
       this.scheduleReconnect();
     };
   }

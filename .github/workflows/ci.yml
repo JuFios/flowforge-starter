@@ -210,7 +210,7 @@ jobs:
         working-directory: apps/api
         run: npm run chaos:notifications
       # Справедливе планування (ТЗ 3.3.5): тенант B під backlog-ом 20 000 задач тенанта A — критерії
-      # у README, «Навантажувальний сценарій справедливого планування»; провал будь-якого — помилка.
+      # у docs/operations.md, «Навантажувальний сценарій справедливого планування»; провал будь-якого — помилка.
       - name: Measure fair scheduling under the backlog of another tenant
         working-directory: apps/api
         run: npm run load:fairness

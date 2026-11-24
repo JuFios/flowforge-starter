@@ -6,7 +6,7 @@ import { dbNow, scheduledTimes, tenantCall } from '../helpers/schedule';
 import { signedHeaders } from '../helpers/webhook';
 
 /**
- * Порядок блокувань (README, «Порядок блокувань»): спрацювання розкладу (workflow → облік тенанта
+ * Порядок блокувань (docs/architecture.md, «Порядок блокувань»): спрацювання розкладу (workflow → облік тенанта
  * → задача) не утворює циклу з webhook-ом (тенант → workflow → облік), запуском через API (облік),
  * редагуванням (workflow) і видаленням того самого workflow.
  */

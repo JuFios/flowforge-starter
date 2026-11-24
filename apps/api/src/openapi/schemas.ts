@@ -278,7 +278,7 @@ const bounds = ([minimum, maximum]: readonly number[]): SchemaObject => ({
   minimum,
   maximum,
 });
-/** Пояснення лімітів тенанта (README, «Контракт лімітів»). */
+/** Пояснення лімітів тенанта (docs/architecture.md, «Контракт лімітів»). */
 const LIMITS_TEXT: Record<string, string> = {
   maxRunning: 'Скільки задач тенанта виконуються одночасно',
   maxConcurrentExecutions: 'Скільки задач тенанта виконуються одночасно',

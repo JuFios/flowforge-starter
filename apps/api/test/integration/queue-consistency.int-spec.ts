@@ -8,7 +8,7 @@ import { createTenant, openTestDataSource, truncateAll } from '../helpers/db';
 import { api, Receiver, sleep, waitFor } from '../helpers/queue';
 
 /**
- * Облік тенантів під змішаним конкурентним навантаженням (README, «Порядок блокувань»): два
+ * Облік тенантів під змішаним конкурентним навантаженням (docs/architecture.md, «Порядок блокувань»): два
  * воркери, постановка через API, повтори, reaper проти воркерів (lease відбирається посеред
  * кроку), очищення, примусові ROLLBACK змін задач і транзакції, що тримають рядок обліку.
  *

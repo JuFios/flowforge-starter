@@ -15,7 +15,7 @@ import { api, Receiver, sleep, startWorker, waitFor } from '../helpers/queue';
 import { TEST_ADMIN_TOKEN } from '../helpers/test-env';
 
 /**
- * Кожна операція з матриці прав (docs/operations.md, «Операції → права») справді виконується справжніми
+ * Кожна операція з матриці прав (docs/architecture.md, «Операції → права») справді виконується справжніми
  * runtime-ролями на непорожніх даних: матриця не лише збігається з каталогом (db-acl), а й
  * достатня для роботи API, воркера, reaper-а й очищення.
  */

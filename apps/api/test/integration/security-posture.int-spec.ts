@@ -13,8 +13,8 @@ const REPORTER = clusterScopedName('ff_reporter_test');
 const SCRATCH_DB = clusterScopedName('ff_posture_test');
 
 /**
- * `db:migrate` не підтримує каталог, який сформував хтось, крім FlowForge (README 3.3.4, «Модель
- * загроз»), а виявляє його й відмовляє, нічого не змінивши. Сценарії — різні варіанти одного
+ * `db:migrate` не підтримує каталог, який сформував хтось, крім FlowForge (docs/architecture.md, «Модель
+ * загроз і непідтримуваний стан»), а виявляє його й відмовляє, нічого не змінивши. Сценарії — різні варіанти одного
  * класу «чужий грант / політика / роль»: стороння роль будь-якого імені, PUBLIC, default privileges.
  */
 describe('db:migrate refuses a catalog that FlowForge did not shape', () => {

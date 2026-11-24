@@ -1,7 +1,7 @@
 import { limitDefaultsFromEnv } from '../../src/database/provision';
 import { BUILT_IN_LIMIT_DEFAULTS } from '../../src/tenancy/limits';
 
-/** Значення лімітів тенантів за замовчуванням, які db:provision бере з env (README, «Контракт лімітів»). */
+/** Значення лімітів тенантів за замовчуванням, які db:provision бере з env (docs/architecture.md, «Контракт лімітів»). */
 describe('tenant limit defaults from the environment', () => {
   it('uses the built-in values without variables', () => {
     expect(limitDefaultsFromEnv({})).toEqual(BUILT_IN_LIMIT_DEFAULTS);
