@@ -112,11 +112,22 @@ export class CheckpointService {
     if (!row) throw new Error(`execution ${job.executionId} is not visible`);
     if (row.oversize)
       throw new StepError('step context exceeds the byte limit', false);
-    const history = await em.find(StepRun, {
+    return {
+      input: row.input,
+      steps: row.steps,
+      history: await this.history(em, job),
+    };
+  }
+
+  /**
+   * Чекпоінти виконання задачі за порядком кроків, з явним предикатом тенанта (перший шар
+   * ізоляції, `tenant-predicates.int-spec.ts`), у транзакції `em` викликача.
+   */
+  history(em: EntityManager, job: Job): Promise<StepRun[]> {
+    return em.find(StepRun, {
       where: { executionId: job.executionId, tenantId: job.tenantId },
       order: { stepIndex: 'ASC' },
     });
-    return { input: row.input, steps: row.steps, history };
   }
 
   /**
