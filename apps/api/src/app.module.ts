@@ -28,6 +28,7 @@ import { ExecutionsController } from './executions/executions.controller';
 import { ExecutionGateway } from './realtime/execution-gateway.service';
 import { ExecutionFeed } from './realtime/execution-feed.service';
 import { ExecutionWatches } from './realtime/execution-watches.service';
+import { WorkSignals } from './engine/work-signals.service';
 import { ExecutionReader } from './executions/execution-reader.service';
 import { ExecutionsService } from './executions/executions.service';
 import { LimitsModule } from './limits/limits.module';
@@ -127,7 +128,11 @@ export class AppModule {}
 
 /** Окремий процес-воркер. HTTP лише службовий: /health, /ready, /metrics. */
 @Module({
-  imports: [...coreImports, TenancyModule.forRoot('worker')],
+  imports: [
+    ...coreImports,
+    TenancyModule.forRoot('worker'),
+    RuntimeDatabaseUrlModule,
+  ],
   controllers: [MetricsController],
   providers: [
     JobQueueService,
@@ -138,6 +143,7 @@ export class AppModule {}
     QueueDepthMetrics,
     OutboxSender,
     OutboxMetrics,
+    WorkSignals,
   ],
 })
 export class WorkerModule {}

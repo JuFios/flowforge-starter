@@ -166,6 +166,8 @@ export const POSTURE: {
     },
     'touch_step_execution()': { owner: MIGRATION_OWNER, execute: [] },
     'notify_session_revoked()': { owner: MIGRATION_OWNER, execute: [] },
+    'notify_jobs_ready()': { owner: MIGRATION_OWNER, execute: [] },
+    'notify_outbox_ready()': { owner: MIGRATION_OWNER, execute: [] },
     'auth_tenant(text)': { owner: SYSTEM_ROLE, execute: [API_ROLE] },
     'webhook_tenant(uuid)': { owner: SYSTEM_ROLE, execute: [API_ROLE] },
     'due_schedule_tenants(uuid,integer)': {

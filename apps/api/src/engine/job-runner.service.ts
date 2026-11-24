@@ -1,8 +1,14 @@
-import { BeforeApplicationShutdown, Injectable, Logger } from '@nestjs/common';
+import {
+  BeforeApplicationShutdown,
+  Injectable,
+  Logger,
+  Optional,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { randomUUID } from 'crypto';
 import { setMaxListeners } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
+import { IdleLoops } from '../common/idle-loops';
 import { EnvironmentVariables, MAX_TIMER_MS } from '../config/env.validation';
 import { Job, StepRun } from '../entities';
 import {
@@ -23,6 +29,7 @@ import { LeaseKeeper } from './lease-keeper';
 import { QueueMetrics } from './queue.metrics';
 import { StepError, StepExecutor } from './step-executor';
 import { StepContext } from './template';
+import { JOBS_READY, WorkSignals } from './work-signals.service';
 
 /** Причина скасування кроку, коли воркер завершується і пільговий час вичерпано. */
 class ShutdownAbort extends Error {
@@ -56,6 +63,10 @@ export class JobRunnerService implements BeforeApplicationShutdown {
   readonly workerId = `worker-${randomUUID().slice(0, 8)}`;
   /** Скасовується на початку завершення: цикли перестають брати задачі й виходять із пауз. */
   private stopping = new AbortController();
+  /** Простій циклів: опитує один черговий, решта чекають на роботу (common/idle-loops.ts). */
+  private idleLoops = new IdleLoops(this.stopping.signal);
+  /** Відписка від підказок LISTEN поточного запуску. */
+  private detachSignals?: () => void;
   private loops: Promise<void>[] = [];
   private readonly inFlight = new Set<{
     keeper: LeaseKeeper;
@@ -77,14 +88,33 @@ export class JobRunnerService implements BeforeApplicationShutdown {
     private readonly checkpoints: CheckpointService,
     private readonly config: ConfigService<EnvironmentVariables, true>,
     private readonly metrics: QueueMetrics,
+    @Optional() private readonly signals?: WorkSignals,
   ) {}
 
   start(
     concurrency = this.config.get('WORKER_CONCURRENCY', { infer: true }),
   ): void {
     this.stopping = new AbortController();
+    this.idleLoops = new IdleLoops(this.stopping.signal);
     // Кожен цикл може одночасно чекати зі своїм слухачем abort.
-    if (concurrency > 0) setMaxListeners(concurrency, this.stopping.signal);
+    if (concurrency > 0) setMaxListeners(concurrency + 1, this.stopping.signal);
+    if (this.signals && concurrency > 0) {
+      // Нова готова задача або відновлений LISTEN (сповіщення за час розриву загублено) — будимо
+      // чергового циклу одразу, не чекаючи інтервалу опитування.
+      const idle = this.idleLoops;
+      const ready = () => idle.signal();
+      const available = (up: boolean) => {
+        if (up) idle.signal();
+      };
+      const events = this.signals.events;
+      events.on(JOBS_READY, ready);
+      events.on('available', available);
+      this.detachSignals = () => {
+        events.off(JOBS_READY, ready);
+        events.off('available', available);
+      };
+      this.signals.start();
+    }
     this.logger.log(`${this.workerId} started, concurrency=${concurrency}`);
     for (let i = 0; i < concurrency; i++) this.loops.push(this.loop());
     const leaseMs = this.config.get('JOB_LEASE_MS', { infer: true });
@@ -198,6 +228,7 @@ export class JobRunnerService implements BeforeApplicationShutdown {
   async beforeApplicationShutdown(): Promise<void> {
     if (this.stopping.signal.aborted) return;
     this.stopping.abort();
+    this.detachSignals?.();
     for (const timer of this.maintenanceTimers) clearTimeout(timer);
     this.maintenanceTimers.clear();
     const grace = this.config.get('WORKER_SHUTDOWN_GRACE_MS', { infer: true });
@@ -237,10 +268,14 @@ export class JobRunnerService implements BeforeApplicationShutdown {
     }
   }
 
-  /** Пауза опитування з відхиленням ±50%: воркери не стукають у БД синхронно. */
+  /**
+   * Порожня черга: черговий цикл чекає інтервал опитування з відхиленням ±50% (воркери не стукають
+   * у БД синхронно) або підказку про нову задачу, решта — доки їх не розбудить цикл, що отримав
+   * задачу (docs/architecture.md, «Черговий цикл і пробудження»).
+   */
   private idle(): Promise<void> {
     const base = this.config.get('WORKER_POLL_INTERVAL_MS', { infer: true });
-    return this.pause(base * (0.5 + Math.random()));
+    return this.idleLoops.idle(base * (0.5 + Math.random()));
   }
 
   /** Повертає в чергу задачі зниклих воркерів. Помилка не зупиняє воркер — наступний прохід повторить. */
@@ -296,6 +331,8 @@ export class JobRunnerService implements BeforeApplicationShutdown {
         continue;
       }
       this.metrics.observeClaim(job);
+      // Задачу отримано: наступний цикл перевірить, чи є ще (ланцюгове пробудження).
+      this.idleLoops.worked();
       try {
         await this.process(job);
       } catch {
