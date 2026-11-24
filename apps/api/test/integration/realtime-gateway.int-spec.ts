@@ -2,6 +2,7 @@ import WebSocket = require('ws');
 import { DataSource } from 'typeorm';
 import type { RunningApp } from '../helpers/app';
 import type { ExecutionReader } from '../../src/executions/execution-reader.service';
+import { holdTestTable } from '../helpers/hold-test-table';
 import { waitFor } from '../helpers/wait-for';
 import {
   createExecution,
@@ -21,6 +22,8 @@ describe('realtime gateway handshake and lifecycle', () => {
   let ds: DataSource;
   let app: RunningApp;
   let readerToken: typeof ExecutionReader;
+  let databaseToken: typeof DataSource;
+  let shutdownProbe: { release(): Promise<void>; pool: DataSource } | undefined;
   const sockets: WebSocket[] = [];
 
   beforeAll(async () => {
@@ -35,6 +38,7 @@ describe('realtime gateway handshake and lifecycle', () => {
         readerToken = (
           await import('../../src/executions/execution-reader.service')
         ).ExecutionReader;
+        databaseToken = (await import('typeorm')).DataSource;
       });
     } finally {
       if (saved === undefined)
@@ -45,8 +49,14 @@ describe('realtime gateway handshake and lifecycle', () => {
 
   beforeEach(() => truncateAll(ds));
 
-  afterEach(() => {
+  afterEach(async () => {
     for (const socket of sockets.splice(0)) socket.terminate();
+    const probe = shutdownProbe;
+    shutdownProbe = undefined;
+    if (probe) {
+      await probe.release();
+      expect(probe.pool.isInitialized).toBe(false);
+    }
   });
 
   afterAll(async () => {
@@ -191,5 +201,19 @@ describe('realtime gateway handshake and lifecycle', () => {
     );
     expect(reads).toHaveBeenCalledTimes(1);
     reads.mockRestore();
+  });
+
+  it('ends the API fixture even if a socket snapshot is still reading from Postgres', async () => {
+    const { execution, token } = await setup();
+    const value = await ticket(token, execution.id);
+    const pool = app.app.get(databaseToken);
+    const gate = await holdTestTable(ds, 'step_runs');
+    try {
+      expect((await connect(value)).opened).toBe(true);
+      await gate.waitForQuery('SELECT e.id,e."workflowId"');
+      shutdownProbe = { release: gate.release, pool };
+    } finally {
+      if (!shutdownProbe) await gate.release();
+    }
   });
 });

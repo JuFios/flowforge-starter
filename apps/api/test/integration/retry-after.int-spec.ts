@@ -1,6 +1,7 @@
 import { DataSource } from 'typeorm';
 import type { RunningApp } from '../helpers/app';
 import { createTenant, openTestDataSource, truncateAll } from '../helpers/db';
+import { holdTestTable } from '../helpers/hold-test-table';
 // Лише тип: модуль хелперів імпортує застосунок, а його конфігурація читається під час імпорту.
 import type * as QueueHelpers from '../helpers/queue';
 
@@ -17,6 +18,7 @@ describe('Retry-After on 429 and 503', () => {
   let q: typeof QueueHelpers;
   let receiver: QueueHelpers.Receiver;
   let apiKey: string;
+  let shutdownProbe: { release(): Promise<void>; pool: DataSource } | undefined;
   const saved = process.env.JOB_BACKOFF_MAX_MS;
 
   beforeAll(async () => {
@@ -54,8 +56,14 @@ describe('Retry-After on 429 and 503', () => {
     ({ apiKey } = await createTenant(ds));
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     receiver.requests.length = 0;
+    const probe = shutdownProbe;
+    shutdownProbe = undefined;
+    if (probe) {
+      await probe.release();
+      expect(probe.pool.isInitialized).toBe(false);
+    }
   });
 
   afterAll(async () => {
@@ -136,5 +144,16 @@ describe('Retry-After on 429 and 503', () => {
     // 500 з Retry-After: звичайний backoff першої спроби — до base·2 = 100 мс.
     const delay = await firstRetryDelay(500, '3');
     expect(delay).toBeLessThanOrEqual(200);
+  });
+
+  it('ends the worker fixture even if the next due work query is still in Postgres', async () => {
+    const pool = worker.app.get(DataSource);
+    const gate = await holdTestTable(ds, 'notification_settings');
+    try {
+      await gate.waitForQuery('SELECT * FROM next_due_work()');
+      shutdownProbe = { release: gate.release, pool };
+    } finally {
+      if (!shutdownProbe) await gate.release();
+    }
   });
 });
