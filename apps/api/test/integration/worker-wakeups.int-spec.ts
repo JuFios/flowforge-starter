@@ -10,10 +10,9 @@ import { api, Receiver, sleep, waitFor } from '../helpers/queue';
 const LONG_POLL_MS = '20000';
 
 /**
- * Черговий цикл і пробудження воркера (docs/architecture.md, «Черговий цикл і пробудження»): у
- * простої опитує один цикл на процес; нову готову роботу воркер бере за підказкою LISTEN, не
- * чекаючи інтервалу; цикли прокидаються ланцюгом, поки є робота; без LISTEN — опитування, як і
- * раніше.
+ * Пробудження воркера (docs/architecture.md, «Пробудження воркера»): кожен цикл опитує чергу зі
+ * своїм інтервалом, як і без підказок; нову готову задачу чи подію воркер бере за підказкою LISTEN,
+ * не чекаючи інтервалу, і підказка будить один цикл; без LISTEN — опитування.
  */
 describe('worker wake-ups', () => {
   let ds: DataSource;
@@ -125,39 +124,32 @@ describe('worker wake-ups', () => {
     );
   }
 
-  it('polls with one loop while idle and takes a new run at once on the LISTEN hint', async () => {
-    const { claims } = await startWorker(LONG_POLL_MS);
+  it('keeps the idle polling of every loop as without hints', async () => {
+    const pollMs = 400;
+    const loops = 4;
+    const { claims } = await startWorker(String(pollMs), loops);
     const before = claims.mock.calls.length;
-    await sleep(1_000);
-    // Чотири цикли без пробудження опитували б кожні 10–30 с кожен; черговий за секунду — ні разу.
-    expect(claims.mock.calls.length).toBe(before);
-
-    const id = await run(
-      await workflow([{ id: 'say', type: 'log', message: 'hi' }]),
-    );
-    const started = Date.now();
-    await succeeded(id, 3_000);
-    expect(Date.now() - started).toBeLessThan(3_000);
+    const windowMs = 4_000;
+    await sleep(windowMs);
+    // Кожен цикл спить інтервал із відхиленням ±50% (у середньому pollMs): ні частіше, ні рідше.
+    const expected = (loops * windowMs) / pollMs;
+    const polls = claims.mock.calls.length - before;
+    expect(polls).toBeGreaterThanOrEqual(expected * 0.6);
+    expect(polls).toBeLessThanOrEqual(expected * 1.4);
   });
 
-  it('wakes the loops in a chain while work lasts, so a burst runs at full concurrency', async () => {
-    await startWorker(LONG_POLL_MS);
-    let inFlight = 0;
-    let peak = 0;
-    receiver.respond = async (_req, res) => {
-      peak = Math.max(peak, ++inFlight);
-      await sleep(400);
-      inFlight--;
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end('{"ok":true}');
-    };
-    const wf = await workflow([
-      { id: 'call', type: 'http', method: 'POST', url: receiver.url('/slow') },
-    ]);
-    const ids = [];
-    for (let i = 0; i < 8; i++) ids.push(await run(wf));
-    for (const id of ids) await succeeded(id, 5_000);
-    expect(peak).toBe(4);
+  it('takes a new run at once on the LISTEN hint and wakes a single loop for it', async () => {
+    const { claims } = await startWorker(LONG_POLL_MS);
+    const wf = await workflow([{ id: 'say', type: 'log', message: 'hi' }]);
+    const before = claims.mock.calls.length;
+    const started = Date.now();
+    const id = await run(wf);
+    // Без підказки цикли спали б 10–30 с.
+    await succeeded(id, 3_000);
+    expect(Date.now() - started).toBeLessThan(3_000);
+    await sleep(300);
+    // Розбуджений цикл: захоплення задачі й порожнє після неї. Решта циклів не прокидались.
+    expect(claims.mock.calls.length - before).toBeLessThanOrEqual(2);
   });
 
   it('still picks work up by polling when the LISTEN connection is gone', async () => {
@@ -171,7 +163,6 @@ describe('worker wake-ups', () => {
 
   it('delivers a new notification at once on the LISTEN hint', async () => {
     await configureNotifications(apiApp, apiKey, receiver.url('/hook'));
-    process.env.OUTBOX_POLL_INTERVAL_MS = LONG_POLL_MS;
     const { signals, outbox } = await startWorker(LONG_POLL_MS, 1);
     outbox.start(2);
     await waitFor('LISTEN still up', () => signals.listening);
@@ -183,46 +174,7 @@ describe('worker wake-ups', () => {
     await waitFor(
       'notification delivered',
       () => receiver.hits('/hook').length === 1,
-      {
-        timeoutMs: 3_000,
-      },
-    );
-  });
-
-  it('wakes a delay step at its due time, not on the next poll', async () => {
-    await startWorker(LONG_POLL_MS);
-    const id = await run(
-      await workflow([
-        { id: 'wait', type: 'delay', ms: 1_500 },
-        { id: 'say', type: 'log', message: 'after' },
-      ]),
-    );
-    const started = Date.now();
-    // Без строку черговий спав би 10–30 с: пробудження задачі «delay» підказки не дає.
-    await succeeded(id, 6_000);
-    expect(Date.now() - started).toBeGreaterThanOrEqual(1_400);
-  });
-
-  it('retries a failed notification at its due time, not on the next poll', async () => {
-    await configureNotifications(apiApp, apiKey, receiver.url('/hook'));
-    let calls = 0;
-    receiver.respond = (_req, res) => {
-      res.writeHead(++calls === 1 ? 503 : 200).end();
-    };
-    const { outbox } = await startWorker(LONG_POLL_MS, 1);
-    outbox.start(2);
-    const id = await run(
-      await workflow([{ id: 'say', type: 'log', message: 'hi' }]),
-    );
-    await succeeded(id, 3_000);
-    // Повтор після 503 — через backoff (OUTBOX_BACKOFF_BASE_MS тестів — 100 мс), тобто строк
-    // настає під час сну чергового; без строку доставка чекала б 10–30 с.
-    await waitFor(
-      'notification retried',
-      () => receiver.hits('/hook').length === 2,
-      {
-        timeoutMs: 5_000,
-      },
+      { timeoutMs: 3_000 },
     );
   });
 });

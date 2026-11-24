@@ -4,7 +4,7 @@ import { waitFor } from './wait-for';
 /** Бар'єр для фонового запиту. Рядки й дані таблиці лишаються без змін. */
 export async function holdTestTable(
   ds: DataSource,
-  table: 'step_runs' | 'notification_settings',
+  table: 'step_runs' | 'notification_settings' | 'tenant_usage',
 ) {
   const gate = ds.createQueryRunner();
   const release = async () => {
@@ -23,17 +23,21 @@ export async function holdTestTable(
     );
     return {
       release,
-      async waitForQuery(prefix: string) {
-        await waitFor(`background query on ${table}`, async () => {
+      /**
+       * Чекає, поки сеанс застосунку з login-роллю `user` стане в чергу на це блокування. Сеанс
+       * визначається роллю й блокуванням, а не текстом запиту: переформатований SQL не ламає тест.
+       */
+      async waitForBlocked(user: string) {
+        await waitFor(`a ${user} query blocked on ${table}`, async () => {
           const [{ waiting }] = await ds.query<Array<{ waiting: boolean }>>(
             `SELECT EXISTS (
                SELECT FROM pg_stat_activity
                 WHERE datname = current_database()
+                  AND usename = $2
                   AND wait_event_type = 'Lock'
-                  AND starts_with(query, $2)
                   AND $1 = ANY(pg_blocking_pids(pid))
              ) AS waiting`,
-            [pid, prefix],
+            [pid, user],
           );
           return waiting;
         });

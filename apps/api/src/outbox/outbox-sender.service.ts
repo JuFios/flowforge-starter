@@ -75,7 +75,7 @@ export class OutboxSender implements BeforeApplicationShutdown {
   private stopping = new AbortController();
   /** Скасовується, коли пільговий час завершення вичерпано: обриває запити, що ще тривають. */
   private cancel = new AbortController();
-  /** Простій циклів: опитує один черговий, решта чекають на роботу (common/idle-loops.ts). */
+  /** Паузи опитування циклів, які перериває підказка LISTEN (common/idle-loops.ts). */
   private idleLoops = new IdleLoops(this.stopping.signal);
   /** Відписка від підказок LISTEN поточного запуску. */
   private detachSignals?: () => void;
@@ -170,23 +170,10 @@ export class OutboxSender implements BeforeApplicationShutdown {
           this.config.get('OUTBOX_POLL_INTERVAL_MS', { infer: true }) *
           (0.5 + Math.random());
         const backoff = this.claimRetryAt - Date.now();
-        // Відступ після збою захоплення — для всіх циклів; інакше опитує лише черговий.
+        // Відступ після збою захоплення не перериває підказка: БД ще може бути недоступна.
         if (this.claimFailures > 0 && backoff > 0)
           await this.pause(Math.max(poll, backoff));
-        else
-          await this.idleLoops.idle(poll, () =>
-            this.system.nextDueWork().then(
-              (due) => due.outboxMs,
-              (err: unknown) => {
-                // Без строку черговий чекає звичайний інтервал опитування.
-                this.logger.warn(
-                  { error: toSafeError(err) },
-                  'next due notification lookup failed',
-                );
-                return null;
-              },
-            ),
-          );
+        else await this.idleLoops.idle(poll);
       }
     }
   }
@@ -228,8 +215,6 @@ export class OutboxSender implements BeforeApplicationShutdown {
       return false;
     }
     if (!claimed) return false;
-    // Подію отримано: наступний цикл перевірить, чи є ще (ланцюгове пробудження).
-    this.idleLoops.worked();
     const run = this.deliver(claimed);
     this.active.add(run);
     try {

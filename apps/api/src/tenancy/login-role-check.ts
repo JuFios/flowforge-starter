@@ -63,7 +63,6 @@ export const GROUP_FUNCTIONS: Readonly<Record<string, readonly string[]>> = {
     'purge_finished_jobs(integer,integer)',
     'purge_workflow_versions(integer)',
     'queue_depth_by_tenant()',
-    'next_due_work()',
   ],
 };
 

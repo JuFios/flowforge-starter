@@ -2,6 +2,7 @@ import { DataSource } from 'typeorm';
 import type { RunningApp } from '../helpers/app';
 import { createTenant, openTestDataSource, truncateAll } from '../helpers/db';
 import { holdTestTable } from '../helpers/hold-test-table';
+import { TEST_WORKER_DB_USER } from '../helpers/test-env';
 // Лише тип: модуль хелперів імпортує застосунок, а його конфігурація читається під час імпорту.
 import type * as QueueHelpers from '../helpers/queue';
 
@@ -171,11 +172,12 @@ describe('Retry-After on 429 and 503', () => {
     expect(delayMs).toBeLessThanOrEqual(200);
   });
 
-  it('ends the worker fixture even if the next due work query is still in Postgres', async () => {
+  it('ends the worker fixture even if a claim is still waiting in Postgres', async () => {
     const pool = worker.app.get(DataSource);
-    const gate = await holdTestTable(ds, 'notification_settings');
+    const gate = await holdTestTable(ds, 'tenant_usage');
     try {
-      await gate.waitForQuery('SELECT * FROM next_due_work()');
+      // Цикл воркера опитує чергу: його захоплення стає в чергу на блокування обліку тенантів.
+      await gate.waitForBlocked(TEST_WORKER_DB_USER);
       shutdownProbe = { release: gate.release, pool };
     } finally {
       if (!shutdownProbe) await gate.release();

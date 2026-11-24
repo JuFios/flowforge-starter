@@ -10,9 +10,9 @@ export const JOBS_READY = 'ff_jobs_ready';
 export const OUTBOX_READY = 'ff_outbox_ready';
 
 /**
- * `LISTEN` воркера на підказки про нову готову роботу (docs/architecture.md, «Черговий цикл і
- * пробудження»). Одне з'єднання поза пулом на процес; підказки лише будять чергового циклу, а без
- * з'єднання цикли опитують чергу, як і раніше.
+ * `LISTEN` воркера на підказки про нову готову роботу (docs/architecture.md, «Пробудження
+ * воркера»). Одне з'єднання поза пулом на процес; підказка лише перериває паузу опитування одного
+ * циклу, а без з'єднання цикли опитують чергу, як і раніше.
  */
 @Injectable()
 export class WorkSignals extends PgListener implements OnApplicationShutdown {

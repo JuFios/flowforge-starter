@@ -3,6 +3,7 @@ import { DataSource } from 'typeorm';
 import type { RunningApp } from '../helpers/app';
 import type { ExecutionReader } from '../../src/executions/execution-reader.service';
 import { holdTestTable } from '../helpers/hold-test-table';
+import { TEST_API_DB_USER } from '../helpers/test-env';
 import { waitFor } from '../helpers/wait-for';
 import {
   createExecution,
@@ -223,7 +224,8 @@ describe('realtime gateway handshake and lifecycle', () => {
     const gate = await holdTestTable(ds, 'step_runs');
     try {
       expect((await connect(value)).opened).toBe(true);
-      await gate.waitForQuery('SELECT e.id,e."workflowId"');
+      // На step_runs під час підписки чекає лише читання знімка (підписка цієї таблиці не торкається).
+      await gate.waitForBlocked(TEST_API_DB_USER);
       shutdownProbe = { release: gate.release, pool };
     } finally {
       if (!shutdownProbe) await gate.release();

@@ -10,131 +10,50 @@ async function settled(promise: Promise<unknown>): Promise<boolean> {
   return done;
 }
 
-describe('idle loops: one polls, the rest wait for work', () => {
+describe('idle loops: polling pauses that a ready-work hint can cut short', () => {
   beforeEach(() => jest.useFakeTimers({ doNotFake: ['setImmediate'] }));
   afterEach(() => jest.useRealTimers());
 
-  it('lets exactly one idle loop poll and parks the others without a timer', async () => {
+  it('lets every loop sleep its own poll interval, as without hints', async () => {
     const loops = new IdleLoops(new AbortController().signal);
-    const waits = Array.from({ length: 4 }, () => loops.idle(1_000));
-    expect(loops.parkedCount).toBe(3);
-    jest.advanceTimersByTime(1_000);
-    expect(await settled(waits[0])).toBe(true);
-    for (const wait of waits.slice(1)) expect(await settled(wait)).toBe(false);
+    const short = loops.idle(300);
+    const long = loops.idle(700);
+    expect(loops.sleepingCount).toBe(2);
+    jest.advanceTimersByTime(300);
+    expect(await settled(short)).toBe(true);
+    expect(await settled(long)).toBe(false);
+    jest.advanceTimersByTime(400);
+    expect(await settled(long)).toBe(true);
+    expect(loops.sleepingCount).toBe(0);
   });
 
-  it('wakes one parked loop per unit of work, so loops wake in a chain while work lasts', async () => {
+  it('a hint wakes only the loop that fell asleep first, the others keep sleeping', async () => {
     const loops = new IdleLoops(new AbortController().signal);
-    const poller = loops.idle(60_000);
-    const parked = [loops.idle(60_000), loops.idle(60_000)];
-    loops.worked();
-    expect(await settled(parked[0])).toBe(true);
-    expect(await settled(parked[1])).toBe(false);
-    loops.worked();
-    expect(await settled(parked[1])).toBe(true);
-    // Кожен цикл, що паркувався, будив чергового перевірити чергу заново.
-    expect(await settled(poller)).toBe(true);
-    // Нікого не розбуджено зайвий раз: без запаркованих worked нічого не робить.
-    loops.worked();
-    expect(loops.parkedCount).toBe(0);
-  });
-
-  it('hands the polling role to the next loop that goes idle once the poller leaves', async () => {
-    const loops = new IdleLoops(new AbortController().signal);
-    const poller = loops.idle(1_000);
-    const parked = loops.idle(1_000);
-    jest.advanceTimersByTime(1_000);
-    await settled(poller);
-    // Колишній черговий отримав роботу й будить запаркований цикл; той, не знайшовши роботи,
-    // стає черговим, а не паркується без опитувача.
-    loops.worked();
-    expect(await settled(parked)).toBe(true);
-    const next = loops.idle(1_000);
-    expect(loops.parkedCount).toBe(0);
-    jest.advanceTimersByTime(1_000);
-    expect(await settled(next)).toBe(true);
-  });
-
-  it('a signal wakes the poller at once, and a signal with nobody polling is kept for the next idle', async () => {
-    const loops = new IdleLoops(new AbortController().signal);
-    const poller = loops.idle(60_000);
+    const first = loops.idle(60_000);
+    const second = loops.idle(60_000);
+    const third = loops.idle(60_000);
     loops.signal();
-    expect(await settled(poller)).toBe(true);
+    expect(await settled(first)).toBe(true);
+    expect(await settled(second)).toBe(false);
+    expect(await settled(third)).toBe(false);
+    expect(loops.sleepingCount).toBe(2);
+  });
 
+  it('keeps a hint that arrived while no loop slept for the next pause, once', async () => {
+    const loops = new IdleLoops(new AbortController().signal);
+    loops.signal();
     loops.signal();
     expect(await settled(loops.idle(60_000))).toBe(true);
-    // Сигнал спожито: наступний простій знову чекає.
     expect(await settled(loops.idle(60_000))).toBe(false);
   });
 
-  it('a signal while the poller is busy wakes a parked loop instead', async () => {
-    const loops = new IdleLoops(new AbortController().signal);
-    const poller = loops.idle(1_000);
-    const parked = loops.idle(1_000);
-    jest.advanceTimersByTime(1_000);
-    await settled(poller);
-    loops.signal();
-    expect(await settled(parked)).toBe(true);
-  });
-
-  it('stopping releases every waiting loop and later idles return at once', async () => {
+  it('stopping releases every sleeping loop and later pauses return at once', async () => {
     const stop = new AbortController();
     const loops = new IdleLoops(stop.signal);
     const waits = [loops.idle(60_000), loops.idle(60_000), loops.idle(60_000)];
     stop.abort();
     for (const wait of waits) expect(await settled(wait)).toBe(true);
-    expect(loops.parkedCount).toBe(0);
+    expect(loops.sleepingCount).toBe(0);
     expect(await settled(loops.idle(60_000))).toBe(true);
-  });
-
-  it('the poller sleeps only until the next delayed work is due, and polls as usual without one', async () => {
-    const loops = new IdleLoops(new AbortController().signal);
-    const soon = loops.idle(60_000, () => Promise.resolve(200));
-    await settled(soon);
-    jest.advanceTimersByTime(210);
-    expect(await settled(soon)).toBe(true);
-
-    for (const due of [
-      () => Promise.resolve(null),
-      () => Promise.reject(new Error('db down')),
-      () => {
-        throw new Error('not a promise');
-      },
-    ]) {
-      const usual = loops.idle(1_000, due as () => Promise<number | null>);
-      await settled(usual);
-      jest.advanceTimersByTime(500);
-      expect(await settled(usual)).toBe(false);
-      jest.advanceTimersByTime(500);
-      expect(await settled(usual)).toBe(true);
-    }
-  });
-
-  it('a signal that arrives while the poller looks the due time up wakes it at once', async () => {
-    const loops = new IdleLoops(new AbortController().signal);
-    let answer!: (ms: number | null) => void;
-    const poller = loops.idle(
-      60_000,
-      () => new Promise<number | null>((resolve) => (answer = resolve)),
-    );
-    await settled(poller);
-    loops.signal();
-    answer(30_000);
-    expect(await settled(poller)).toBe(true);
-  });
-
-  it('a loop going idle while another polls makes the poller look the queue and due time up again', async () => {
-    const loops = new IdleLoops(new AbortController().signal);
-    const lookups: number[] = [];
-    const poller = loops.idle(60_000, () => {
-      lookups.push(Date.now());
-      return Promise.resolve(null);
-    });
-    await settled(poller);
-    expect(lookups).toHaveLength(1);
-    // Цикл, що щойно відклав роботу на майбутнє, паркується й будить чергового.
-    const parked = loops.idle(60_000);
-    expect(await settled(poller)).toBe(true);
-    expect(await settled(parked)).toBe(false);
   });
 });

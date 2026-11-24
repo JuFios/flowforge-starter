@@ -205,11 +205,6 @@ export class JobQueueService {
     }
   }
 
-  /** Мілісекунди до найближчої відкладеної задачі, яку можна буде захопити, або null. */
-  async nextDueMs(): Promise<number | null> {
-    return (await this.system.nextDueWork()).jobsMs;
-  }
-
   /**
    * Продовжує lease. false — lease уже не наш (задачу повернув reaper або захопив інший воркер):
    * воркер мусить припинити роботу над нею без жодних записів.
