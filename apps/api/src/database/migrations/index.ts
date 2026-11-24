@@ -53,6 +53,7 @@ import { WorkflowVersionCleanup1797200000000 } from './1797200000000-WorkflowVer
 import { WorkflowVersionCleanupPace1797300000000 } from './1797300000000-WorkflowVersionCleanupPace';
 import { OutboxClaimExpiredLease1797400000000 } from './1797400000000-OutboxClaimExpiredLease';
 import { AuthWithLimits1797500000000 } from './1797500000000-AuthWithLimits';
+import { RealtimeWatches1797600000000 } from './1797600000000-RealtimeWatches';
 
 export const MIGRATIONS = [
   InitialSchema1794920217603,
@@ -94,4 +95,5 @@ export const MIGRATIONS = [
   WorkflowVersionCleanupPace1797300000000,
   OutboxClaimExpiredLease1797400000000,
   AuthWithLimits1797500000000,
+  RealtimeWatches1797600000000,
 ];

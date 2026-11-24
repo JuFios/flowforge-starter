@@ -27,6 +27,7 @@ export async function truncateAll(ds: DataSource): Promise<void> {
     'notification_settings',
     'outbox_events',
     'outbox_attempts',
+    'realtime_watches',
   ];
   const existing: Array<{ name: string }> = await ds.query(
     `SELECT table_name AS name FROM information_schema.tables

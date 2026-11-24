@@ -161,6 +161,23 @@ export class SystemDb {
     return row;
   }
 
+  /**
+   * Продовжує підписки інстансу API на виконання (`renew_realtime_watches`): відновлює відсутні,
+   * видаляє рядки інстансу поза переліком і порцію прострочених. Повертає кількість відновлених.
+   */
+  async renewRealtimeWatches(
+    instanceId: string,
+    executionIds: string[],
+    tenantIds: string[],
+    ttlMs: number,
+  ): Promise<number> {
+    const [row] = await this.ds.query<Array<{ restored: number }>>(
+      'SELECT renew_realtime_watches($1, $2::uuid[], $3::uuid[], $4) AS restored',
+      [instanceId, executionIds, tenantIds, ttlMs],
+    );
+    return row.restored;
+  }
+
   /** Одна пачка очищення відер частоти запитів, чиє вікно скінчилось; кількість видалених. */
   async purgeBrowserCredentials(batch: number): Promise<number> {
     const [row] = await this.ds.query<Array<{ deleted: number }>>(

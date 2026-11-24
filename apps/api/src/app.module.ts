@@ -27,6 +27,7 @@ import { StepExecutor } from './engine/step-executor';
 import { ExecutionsController } from './executions/executions.controller';
 import { ExecutionGateway } from './realtime/execution-gateway.service';
 import { ExecutionFeed } from './realtime/execution-feed.service';
+import { ExecutionWatches } from './realtime/execution-watches.service';
 import { ExecutionReader } from './executions/execution-reader.service';
 import { ExecutionsService } from './executions/executions.service';
 import { LimitsModule } from './limits/limits.module';
@@ -114,6 +115,7 @@ class ApiEnvironmentCheck implements OnModuleInit {
     ExecutionReader,
     ExecutionGateway,
     ExecutionFeed,
+    ExecutionWatches,
     WebhookKeysService,
     NotificationsService,
     SchedulerService,

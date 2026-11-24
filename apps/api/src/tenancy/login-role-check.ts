@@ -42,6 +42,7 @@ export const GROUP_FUNCTIONS: Readonly<Record<string, readonly string[]>> = {
     'auth_tenant(text)',
     'auth_session(bytea)',
     'redeem_realtime_ticket(bytea)',
+    'renew_realtime_watches(uuid,uuid[],uuid[],integer)',
     'purge_browser_credentials(integer)',
     'due_schedule_tenants(uuid,integer)',
     'lock_tenant_usage()',
@@ -82,6 +83,7 @@ export const UNSAFE_GROUP_SQL = `
   allowed(role_name, table_name, rights) AS (VALUES
      ('flowforge_api_role','browser_sessions',ARRAY['SELECT','INSERT','DELETE']),
      ('flowforge_api_role','realtime_tickets',ARRAY['SELECT','INSERT','DELETE']),
+     ('flowforge_api_role','realtime_watches',ARRAY['SELECT','INSERT','UPDATE','DELETE']),
      ('flowforge_api_role','tenants',ARRAY['SELECT','INSERT','UPDATE']),
      ('flowforge_api_role','webhook_deliveries',ARRAY['SELECT','INSERT']),
      ('flowforge_api_role','workflows',ARRAY['SELECT','INSERT','UPDATE','DELETE']),
