@@ -10,6 +10,7 @@
  */
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { checkpointWriteIsBlocked } from './chaos-checkpoint-lock';
 import {
   captureCheckpoints,
   captureGatedPrefix,
@@ -118,14 +119,7 @@ async function restartAtCheckpoint(
     const until = Date.now() + 3_000;
     while (Date.now() < until) {
       // pg_stat_activity кешує знімок у транзакції. У кожного спостереження окремий запит.
-      const [row]: Array<{ waiting: boolean }> = await db.query(
-        `SELECT EXISTS(SELECT FROM pg_stat_activity
-          WHERE $1=ANY(pg_blocking_pids(pid))
-            AND wait_event_type = 'Lock'
-            AND query LIKE 'UPDATE step_runs SET status = ''succeeded''%') AS waiting`,
-        [pid],
-      );
-      if (row.waiting) {
+      if (await checkpointWriteIsBlocked(db, pid)) {
         log(`stopping postgres during write to checkpoint ${checkpoint}`);
         const started = Date.now();
         // SIGKILL не звільняє блокування бар’єра до переривання запису.
