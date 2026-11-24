@@ -52,7 +52,7 @@ describe('realtime gateway handshake and lifecycle', () => {
     if (closeApp) throw new Error('the previous API fixture is still running');
     await truncateAll(ds);
     app = await startApp();
-    closeApp = app.close;
+    closeApp = () => app.close();
   });
 
   async function stopApp() {

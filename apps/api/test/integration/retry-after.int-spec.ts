@@ -11,6 +11,11 @@ import type * as QueueHelpers from '../helpers/queue';
  */
 const BACKOFF_MAX_MS = 5_000;
 
+interface RetryObservation {
+  runAt: Date;
+  delayMs: number;
+}
+
 describe('Retry-After on 429 and 503', () => {
   let ds: DataSource;
   let apiApp: RunningApp;
@@ -31,12 +36,12 @@ describe('Retry-After on 429 and 503', () => {
     ds = await openTestDataSource();
     // Затримка кожного повтору — за годинником БД у момент повернення задачі в чергу.
     await ds.query(`
-      CREATE TABLE IF NOT EXISTS test_retry_delays ("jobId" uuid, "delayMs" float8);
+      CREATE TABLE test_retry_delays ("jobId" uuid, "runAt" timestamptz, "delayMs" float8);
       CREATE OR REPLACE FUNCTION test_record_retry_delay() RETURNS trigger AS $$
       BEGIN
         IF OLD.status = 'running' AND NEW.status = 'queued' AND NEW."lastError" IS NOT NULL THEN
           INSERT INTO test_retry_delays
-            VALUES (NEW.id, EXTRACT(EPOCH FROM NEW."runAt" - now()) * 1000);
+            VALUES (NEW.id, NEW."runAt", EXTRACT(EPOCH FROM NEW."runAt" - now()) * 1000);
         END IF;
         RETURN NEW;
       END $$ LANGUAGE plpgsql
@@ -57,7 +62,7 @@ describe('Retry-After on 429 and 503', () => {
     await ds.query(`TRUNCATE test_retry_delays`);
     ({ apiKey } = await createTenant(ds));
     worker = await q.startWorker(2);
-    closeWorker = worker.close;
+    closeWorker = () => worker.close();
   });
 
   async function stopWorker() {
@@ -90,14 +95,17 @@ describe('Retry-After on 429 and 503', () => {
     }
   });
 
-  /** Перша спроба відповідає `status` з `Retry-After`, наступні — 200. Повертає затримку повтору. */
-  async function firstRetryDelay(
+  /** Перша спроба відповідає `status` з `Retry-After`, наступні — 200. */
+  async function firstRetry(
     status: number,
-    retryAfter: string,
-  ): Promise<number> {
+    retryAfter: string | (() => string),
+  ): Promise<RetryObservation> {
     receiver.respond = (req, res) => {
-      if (receiver.hits(req.path).length === 1)
-        return void res.writeHead(status, { 'retry-after': retryAfter }).end();
+      if (receiver.hits(req.path).length === 1) {
+        const header =
+          typeof retryAfter === 'string' ? retryAfter : retryAfter();
+        return void res.writeHead(status, { 'retry-after': header }).end();
+      }
       res.writeHead(200, { 'content-type': 'application/json' }).end('{}');
     };
     const wf = await q.api<{ id: string }>(
@@ -117,46 +125,50 @@ describe('Retry-After on 429 and 503', () => {
       `/workflows/${wf.body.id}/run`,
       {},
     );
-    let delay: number | undefined;
+    let retry: RetryObservation | undefined;
     await q.waitFor('the first retry to be scheduled', async () => {
-      const rows: Array<{ delayMs: number }> = await ds.query(
-        `SELECT "delayMs" FROM test_retry_delays`,
+      const rows = await ds.query<RetryObservation[]>(
+        `SELECT "runAt", "delayMs" FROM test_retry_delays`,
       );
-      delay = rows[0]?.delayMs;
-      return delay !== undefined;
+      retry = rows[0];
+      return retry !== undefined;
     });
-    return delay!;
+    return retry!;
   }
 
   it.each([429, 503])(
     'waits at least as long as HTTP %i asks in seconds',
     async (status) => {
-      const delay = await firstRetryDelay(status, '2');
-      expect(delay).toBeGreaterThanOrEqual(2_000);
-      expect(delay).toBeLessThanOrEqual(BACKOFF_MAX_MS);
+      const { delayMs } = await firstRetry(status, '2');
+      expect(delayMs).toBeGreaterThanOrEqual(2_000);
+      expect(delayMs).toBeLessThanOrEqual(BACKOFF_MAX_MS);
     },
   );
 
   it('accepts Retry-After as an HTTP date', async () => {
-    const at = new Date(Date.now() + 4_000).toUTCString();
+    let header = '';
     // Імітуємо затримку до першого HTTP-запиту.
     await q.sleep(1_250);
-    const delay = await firstRetryDelay(503, at);
-    // HTTP-date має точність до секунди: щонайменше ~3 с.
-    expect(delay).toBeGreaterThanOrEqual(2_900);
-    expect(delay).toBeLessThanOrEqual(BACKOFF_MAX_MS);
+    const { runAt, delayMs } = await firstRetry(503, () => {
+      header = new Date(Date.now() + 4_000).toUTCString();
+      return header;
+    });
+    // Порівнюємо абсолютні моменти з допуском для різниці годинників процесу й Postgres.
+    expect(runAt.getTime()).toBeGreaterThanOrEqual(Date.parse(header) - 100);
+    expect(delayMs).toBeGreaterThan(1_000);
+    expect(delayMs).toBeLessThanOrEqual(BACKOFF_MAX_MS);
   });
 
   it('never waits longer than the backoff cap, whatever the receiver asks', async () => {
-    const delay = await firstRetryDelay(429, '86400');
-    expect(delay).toBeLessThanOrEqual(BACKOFF_MAX_MS);
-    expect(delay).toBeGreaterThanOrEqual(BACKOFF_MAX_MS - 500);
+    const { delayMs } = await firstRetry(429, '86400');
+    expect(delayMs).toBeLessThanOrEqual(BACKOFF_MAX_MS);
+    expect(delayMs).toBeGreaterThanOrEqual(BACKOFF_MAX_MS - 500);
   });
 
   it('ignores Retry-After on other statuses', async () => {
     // 500 з Retry-After: звичайний backoff першої спроби — до base·2 = 100 мс.
-    const delay = await firstRetryDelay(500, '3');
-    expect(delay).toBeLessThanOrEqual(200);
+    const { delayMs } = await firstRetry(500, '3');
+    expect(delayMs).toBeLessThanOrEqual(200);
   });
 
   it('ends the worker fixture even if the next due work query is still in Postgres', async () => {
