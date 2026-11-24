@@ -7,10 +7,8 @@ import {
 import { createHash } from 'crypto';
 import { Tenant } from '../entities';
 import { AuthFailureLimiter } from '../limits/auth-failure.limiter';
-import { effectiveLimits } from '../limits/effective-limits';
 import { EffectiveLimits } from '../tenancy/limits';
 import { SystemDb } from '../tenancy/system-db';
-import { TenantDb } from '../tenancy/tenant-db';
 
 export interface TenantRequest {
   headers: Record<string, string | string[] | undefined>;
@@ -18,6 +16,20 @@ export interface TenantRequest {
   sessionId?: string;
   /** Ефективні ліміти тенанта (для ліміту частоти, що стоїть після автентифікації). */
   limits: EffectiveLimits;
+}
+
+/** Лише ефективні ліміти з рядка автентифікації (без ідентифікаторів і строку сесії). */
+function limitsOf(row: EffectiveLimits): EffectiveLimits {
+  return {
+    maxRunning: row.maxRunning,
+    maxQueueSize: row.maxQueueSize,
+    rateLimit: row.rateLimit,
+    rateWindowMs: row.rateWindowMs,
+    webhookRateLimit: row.webhookRateLimit,
+    webhookRateWindowMs: row.webhookRateWindowMs,
+    maxWorkflows: row.maxWorkflows,
+    maxOutboxEvents: row.maxOutboxEvents,
+  };
 }
 
 export function hashApiKey(key: string): string {
@@ -28,16 +40,15 @@ export function hashApiKey(key: string): string {
 export const MAX_API_KEY_LENGTH = 256;
 
 /**
- * Автентифікація тенанта за `x-api-key`. Пошук ключа — SECURITY DEFINER-функцією `auth_tenant`
- * (тенант ще невідомий, а RLS без контексту нічого не показує); сам тенант і його ефективні ліміти
- * читаються вже в його контексті. Невдача рахується лімітом невдалих автентифікацій з IP.
+ * Автентифікація тенанта за `x-api-key` або браузерною сесією. Пошук — SECURITY DEFINER-функціями
+ * `auth_tenant` / `auth_session` (тенант ще невідомий, а RLS без контексту нічого не показує); вони
+ * ж повертають ефективні ліміти тенанта тим самим виразом, що й `tenant_limits()`. Невдача рахується лімітом невдалих автентифікацій з IP.
  */
 @Injectable()
 export class ApiKeyGuard implements CanActivate {
   protected readonly credentials: 'api-key' | 'either' | 'session' = 'api-key';
   constructor(
     private readonly system: SystemDb,
-    private readonly db: TenantDb,
     private readonly authFailures: AuthFailureLimiter,
   ) {}
 
@@ -61,26 +72,21 @@ export class ApiKeyGuard implements CanActivate {
         ),
       );
     // Завелике значення не може бути виданим ключем: не рахуємо хеш і не шукаємо його.
+    // Тенант і його ефективні ліміти — одним викликом SECURITY DEFINER-функції, без окремої
+    // транзакції тенанта (docs/architecture.md, «Автентифікація запиту»).
     const session = bearer
       ? await this.system.authSession(
           createHash('sha256').update(bearer).digest(),
         )
       : undefined;
-    const tenantId =
-      session?.tenantId ??
-      (typeof key === 'string' && key.length <= MAX_API_KEY_LENGTH
+    const byKey =
+      !bearer && typeof key === 'string' && key.length <= MAX_API_KEY_LENGTH
         ? await this.system.authTenant(hashApiKey(key))
-        : null);
+        : null;
     req.sessionId = session?.id;
-    const found =
-      tenantId &&
-      (await this.db.run(tenantId, async (em) => {
-        const tenant = await em.findOne(Tenant, {
-          where: { id: tenantId },
-          select: { id: true },
-        });
-        return tenant && { tenant, limits: await effectiveLimits(em) };
-      }));
+    const found = session
+      ? { tenantId: session.tenantId, limits: limitsOf(session) }
+      : byKey && { tenantId: byKey.id, limits: limitsOf(byKey) };
     if (!found)
       return this.authFailures.reject(
         ctx,
@@ -88,7 +94,7 @@ export class ApiKeyGuard implements CanActivate {
           sessionOnly ? 'Невірна браузерна сесія' : 'Невірний API-ключ',
         ),
       );
-    req.tenant = found.tenant;
+    req.tenant = Object.assign(new Tenant(), { id: found.tenantId });
     req.limits = found.limits;
     return true;
   }
