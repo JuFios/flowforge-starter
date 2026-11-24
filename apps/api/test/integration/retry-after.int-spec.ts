@@ -139,6 +139,8 @@ describe('Retry-After on 429 and 503', () => {
 
   it('accepts Retry-After as an HTTP date', async () => {
     const at = new Date(Date.now() + 4_000).toUTCString();
+    // Імітуємо затримку до першого HTTP-запиту.
+    await q.sleep(1_250);
     const delay = await firstRetryDelay(503, at);
     // HTTP-date має точність до секунди: щонайменше ~3 с.
     expect(delay).toBeGreaterThanOrEqual(2_900);
