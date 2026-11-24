@@ -9,7 +9,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-it('passes only the secrets needed by each documented local command', () => {
+it('passes only the secrets needed by each documented local command, the frontend none', () => {
   const dir = mkdtempSync(join(tmpdir(), 'ff-local-'));
   const docs = readFileSync(
     join(__dirname, '../../../../docs/operations.md'),
@@ -31,6 +31,11 @@ it('passes only the secrets needed by each documented local command', () => {
       keys.map((k) => 'export ' + k + '=marker' + k).join('\n'),
     );
     writeFileSync(join(dir, 'apps/api/.env.example'), '');
+    mkdirSync(join(dir, 'apps/frontend'), { recursive: true });
+    writeFileSync(
+      join(dir, 'apps/frontend/.env.example'),
+      'API_URLS=http://api:3000,http://api-2:3000\nAPI_TIMEOUT_MS=15000\n',
+    );
     writeFileSync(join(dir, 'docker'), '#!/bin/sh\nexit 0\n', {
       mode: 0o700,
     });
@@ -41,10 +46,11 @@ it('passes only the secrets needed by each documented local command', () => {
         '; do if env | grep -q "=.*marker$k"; then printf "%s " "$k" >> "$HOME/seen"; fi; done\necho >> "$HOME/seen"\n',
       { mode: 0o700 },
     );
-    expect(blocks).toHaveLength(2);
+    // API з кореня, воркер з apps/api, фронтенд з кореня — як у тексті перед кожним блоком.
+    expect(blocks).toHaveLength(3);
     for (const [i, block] of blocks.entries())
       execFileSync('bash', ['-eu', '-c', block], {
-        cwd: i === 0 ? dir : join(dir, 'apps/api'),
+        cwd: i === 1 ? join(dir, 'apps/api') : dir,
         env: { PATH: dir + ':' + process.env.PATH, HOME: dir },
       });
     expect(
@@ -59,7 +65,13 @@ it('passes only the secrets needed by each documented local command', () => {
       'run db:provision POSTGRES_PASSWORD API_DB_PASSWORD WORKER_DB_PASSWORD',
       'run start API_DB_PASSWORD ADMIN_TOKEN',
       'run start:worker WORKER_DB_PASSWORD',
+      'ci',
+      'run dev -- -p 3001',
     ]);
+    // Локальний фронтенд ходить до єдиного локального API, а не до адрес мережі compose.
+    expect(readFileSync(join(dir, 'apps/frontend/.env.local'), 'utf8')).toBe(
+      'API_URLS=http://localhost:3000\nAPI_TIMEOUT_MS=15000\n',
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
