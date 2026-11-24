@@ -424,6 +424,32 @@ describe('choosing a claim candidate among 2000 tenants', () => {
       ).toBeLessThan(64);
     });
   });
+
+  it('finds the next due job of an idle queue through the maturing index with 25000 tenants scheduled in the future', async () => {
+    // Строк для сну чергового циклу (next_due_work): перший запис індексу дозрівання, а не
+    // перебір усіх тенантів.
+    const body = await functionBody(ds, 'next_due_work', {});
+    const select =
+      /SELECT LEAST[\s\S]*?FROM public\.tenant_usage u[\s\S]*?LIMIT 1/.exec(
+        body,
+      )![0];
+    await ds.transaction(async (em) => {
+      await em.query(`INSERT INTO tenants(name,"apiKeyHash","webhookSecret")
+        SELECT 'due-'||g, 'due-'||g, 'fixture' FROM generate_series(1,25000) g`);
+      await em.query(
+        `UPDATE tenant_usage SET ready=false,"nextRunAt"=now()+make_interval(secs => random()*86400)`,
+      );
+      await em.query('ANALYZE tenant_usage');
+      const [row]: Array<{ 'QUERY PLAN': Array<{ Plan: PlanNode }> }> =
+        await em.query('EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ' + select);
+      const root = row['QUERY PLAN'][0].Plan;
+      expect(indexesIn(root)).toContain('IDX_tenant_usage_maturing');
+      expect(hasSeqScan(root)).toBe(false);
+      expect(
+        (root['Shared Hit Blocks'] ?? 0) + (root['Shared Read Blocks'] ?? 0),
+      ).toBeLessThan(64);
+    });
+  });
 });
 
 /** Очищення відер частоти запитів — за індексом кінця вікна, без читання всієї таблиці. */

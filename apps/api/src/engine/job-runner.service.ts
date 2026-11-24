@@ -270,18 +270,32 @@ export class JobRunnerService implements BeforeApplicationShutdown {
 
   /**
    * Порожня черга: черговий цикл чекає інтервал опитування з відхиленням ±50% (воркери не стукають
-   * у БД синхронно) або підказку про нову задачу, решта — доки їх не розбудить цикл, що отримав
-   * задачу (docs/architecture.md, «Черговий цикл і пробудження»).
+   * у БД синхронно), але не довше, ніж до строку найближчої відкладеної задачі, або підказку про нову
+   * задачу; решта — доки їх не розбудить цикл, що отримав задачу (docs/architecture.md, «Черговий
+   * цикл і пробудження»).
    */
   private idle(): Promise<void> {
     const base = this.config.get('WORKER_POLL_INTERVAL_MS', { infer: true });
-    return this.idleLoops.idle(base * (0.5 + Math.random()));
+    return this.idleLoops.idle(base * (0.5 + Math.random()), () =>
+      this.queue.nextDueMs().catch((err: unknown) => {
+        // Без строку черговий чекає звичайний інтервал опитування.
+        this.logger.warn(
+          { error: toSafeError(err) },
+          'next due job lookup failed',
+        );
+        return null;
+      }),
+    );
   }
 
   /** Повертає в чергу задачі зниклих воркерів. Помилка не зупиняє воркер — наступний прохід повторить. */
   private async reap(): Promise<void> {
     try {
-      for (const job of await this.queue.reapExpired(this.stopping.signal)) {
+      const reaped = await this.queue.reapExpired(this.stopping.signal);
+      // Повернуті задачі (одразу чи з backoff) — нова робота, про яку черговий цикл не знає.
+      if (reaped.some((job) => job.outcome === 'retry'))
+        this.idleLoops.signal();
+      for (const job of reaped) {
         this.metrics.leasesExpired.inc();
         if (job.outcome !== 'done')
           this.metrics.observeFailure(job.outcome, 'lease_expired');

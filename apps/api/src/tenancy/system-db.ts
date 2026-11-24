@@ -133,6 +133,20 @@ export class SystemDb {
     });
   }
 
+  /**
+   * Мілісекунди до найближчої відкладеної задачі ненасиченого тенанта й до найближчої події з
+   * майбутнім строком (`next_due_work`); null — такої немає. Лише числа, за годинником БД.
+   */
+  async nextDueWork(): Promise<{
+    jobsMs: number | null;
+    outboxMs: number | null;
+  }> {
+    const [row] = await this.ds.query<
+      Array<{ jobsMs: number | null; outboxMs: number | null }>
+    >('SELECT * FROM next_due_work()');
+    return row;
+  }
+
   /** Тенанти з простроченими lease, крім `exclude` (уже оброблені в цьому проході). */
   async expiredLeaseTenants(
     exclude: string[],

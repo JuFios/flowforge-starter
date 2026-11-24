@@ -188,4 +188,41 @@ describe('worker wake-ups', () => {
       },
     );
   });
+
+  it('wakes a delay step at its due time, not on the next poll', async () => {
+    await startWorker(LONG_POLL_MS);
+    const id = await run(
+      await workflow([
+        { id: 'wait', type: 'delay', ms: 1_500 },
+        { id: 'say', type: 'log', message: 'after' },
+      ]),
+    );
+    const started = Date.now();
+    // Без строку черговий спав би 10–30 с: пробудження задачі «delay» підказки не дає.
+    await succeeded(id, 6_000);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(1_400);
+  });
+
+  it('retries a failed notification at its due time, not on the next poll', async () => {
+    await configureNotifications(apiApp, apiKey, receiver.url('/hook'));
+    let calls = 0;
+    receiver.respond = (_req, res) => {
+      res.writeHead(++calls === 1 ? 503 : 200).end();
+    };
+    const { outbox } = await startWorker(LONG_POLL_MS, 1);
+    outbox.start(2);
+    const id = await run(
+      await workflow([{ id: 'say', type: 'log', message: 'hi' }]),
+    );
+    await succeeded(id, 3_000);
+    // Повтор після 503 — через backoff (OUTBOX_BACKOFF_BASE_MS тестів — 100 мс), тобто строк
+    // настає під час сну чергового; без строку доставка чекала б 10–30 с.
+    await waitFor(
+      'notification retried',
+      () => receiver.hits('/hook').length === 2,
+      {
+        timeoutMs: 5_000,
+      },
+    );
+  });
 });

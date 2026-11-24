@@ -173,7 +173,20 @@ export class OutboxSender implements BeforeApplicationShutdown {
         // Відступ після збою захоплення — для всіх циклів; інакше опитує лише черговий.
         if (this.claimFailures > 0 && backoff > 0)
           await this.pause(Math.max(poll, backoff));
-        else await this.idleLoops.idle(poll);
+        else
+          await this.idleLoops.idle(poll, () =>
+            this.system.nextDueWork().then(
+              (due) => due.outboxMs,
+              (err: unknown) => {
+                // Без строку черговий чекає звичайний інтервал опитування.
+                this.logger.warn(
+                  { error: toSafeError(err) },
+                  'next due notification lookup failed',
+                );
+                return null;
+              },
+            ),
+          );
       }
     }
   }

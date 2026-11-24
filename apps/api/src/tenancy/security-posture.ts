@@ -199,6 +199,7 @@ export const POSTURE: {
       execute: [WORKER_ROLE],
     },
     'queue_depth_by_tenant()': { owner: SYSTEM_ROLE, execute: [WORKER_ROLE] },
+    'next_due_work()': { owner: SYSTEM_ROLE, execute: [WORKER_ROLE] },
     // Тригерні функції обліку: їх викликає лише тригер.
     'tenant_usage_on_job()': { owner: SYSTEM_ROLE, execute: [] },
     'close_cancelled_attempt()': { owner: SYSTEM_ROLE, execute: [] },
