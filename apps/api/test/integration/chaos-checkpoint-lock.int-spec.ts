@@ -87,6 +87,8 @@ describe('Postgres restart checkpoint barrier', () => {
       );
 
       const write = Promise.allSettled([writer.query(sql, args)]);
+      let observation: { onGate: boolean; onUnrelatedPid: boolean };
+      let result: PromiseSettledResult<unknown>;
       try {
         await waitFor(
           'actual blocking of the write',
@@ -101,15 +103,16 @@ describe('Postgres restart checkpoint barrier', () => {
           },
           { timeoutMs: 3_000 },
         );
-        return {
+        observation = {
           onGate: await checkpointWriteIsBlocked(owner, gatePid),
           onUnrelatedPid: await checkpointWriteIsBlocked(owner, unrelatedPid),
         };
       } finally {
         await gate.rollbackTransaction();
-        const [result] = await write;
-        if (result.status === 'rejected') throw result.reason as unknown;
+        [result] = await write;
       }
+      if (result.status === 'rejected') throw result.reason as unknown;
+      return observation;
     } finally {
       try {
         if (gate.isTransactionActive) await gate.rollbackTransaction();

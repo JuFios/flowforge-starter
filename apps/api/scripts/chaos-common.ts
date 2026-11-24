@@ -174,8 +174,20 @@ export async function releaseEffect(gate: string): Promise<boolean> {
   throw new Error(`release HTTP checkpoint gate: HTTP ${response.status}`);
 }
 
-export function openDatabase(): Promise<DataSource> {
-  return new DataSource({ type: 'postgres', url: databaseUrl() }).initialize();
+export function openDatabase(statementTimeoutMs?: number): Promise<DataSource> {
+  return new DataSource({
+    type: 'postgres',
+    url: databaseUrl(),
+    ...(statementTimeoutMs === undefined
+      ? {}
+      : {
+          connectTimeoutMS: 5_000,
+          extra: {
+            statement_timeout: statementTimeoutMs,
+            query_timeout: statementTimeoutMs + 1_000,
+          },
+        }),
+  }).initialize();
 }
 
 /** Чекає, поки всі виконання стануть succeeded/failed. */

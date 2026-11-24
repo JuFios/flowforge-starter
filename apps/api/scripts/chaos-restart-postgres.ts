@@ -16,7 +16,6 @@ import {
   captureGatedPrefix,
   CheckpointObservation,
   collectOutcome,
-  COMPOSE,
   containers,
   docker,
   enqueueRound,
@@ -54,9 +53,9 @@ function health(id: string): string {
 }
 
 async function waitHealthy(ids: string[], timeoutMs: number): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
+  const deadline = performance.now() + timeoutMs;
   while (ids.some((id) => health(id) !== 'healthy')) {
-    if (Date.now() > deadline)
+    if (performance.now() > deadline)
       throw new Error(
         `not healthy after ${timeoutMs} ms: ${ids
           .filter((id) => health(id) !== 'healthy')
@@ -72,7 +71,11 @@ function countLogLines(id: string, since: string, text: string): number {
   const out = spawnSync('docker', ['logs', '--since', since, id], {
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
+    timeout: 30_000,
   });
+  if (out.error) throw out.error;
+  if (out.status !== 0)
+    throw new Error(`could not read logs for worker ${id.slice(0, 12)}`);
   return `${out.stdout}\n${out.stderr}`
     .split('\n')
     .filter((l) => l.includes(text)).length;
@@ -82,19 +85,23 @@ function countLogLines(id: string, since: string, text: string): number {
  * блокує рядок конкретного чекпоінта. Після відповіді sink воркер мусить реально
  * чекати на запис, перш ніж PostgreSQL отримає SIGKILL. */
 async function restartAtCheckpoint(
+  postgres: string,
   executionId: string,
   token: string,
   observed: Map<string, CheckpointObservation>,
 ): Promise<{ checkpoint: string; started: number }> {
-  const db = await openDatabase();
+  const db = await openDatabase(3_000);
   const gate = db.createQueryRunner();
   let crashed = false;
-  try {
+
+  async function probeAndRestart(): Promise<{
+    checkpoint: string;
+    started: number;
+  }> {
     await gate.startTransaction();
-    await gate.query("SET LOCAL statement_timeout = '3s'");
-    const deadline = Date.now() + 30_000;
+    const deadline = performance.now() + 30_000;
     let checkpoint: string | undefined;
-    while (Date.now() < deadline) {
+    while (performance.now() < deadline) {
       const rows = (await gate.query(
         `SELECT s.id FROM step_runs s WHERE s."executionId"=$1
           AND s."stepId"='charge' AND s.status='running'
@@ -112,27 +119,45 @@ async function restartAtCheckpoint(
     )) as Array<{ pid: number }>;
     await captureGatedPrefix(db, executionId, observed);
     while (!(await releaseEffect(token))) {
-      if (Date.now() >= deadline)
+      if (performance.now() >= deadline)
         throw new Error('the receiver did not hold the gated HTTP response');
       await sleep(25);
     }
-    const until = Date.now() + 3_000;
-    while (Date.now() < until) {
+    const until = performance.now() + 3_000;
+    while (performance.now() < until) {
       // pg_stat_activity кешує знімок у транзакції. У кожного спостереження окремий запит.
-      if (await checkpointWriteIsBlocked(db, pid)) {
+      const waiting = await checkpointWriteIsBlocked(db, pid);
+      if (waiting && performance.now() < until) {
         log(`stopping postgres during write to checkpoint ${checkpoint}`);
-        const started = Date.now();
-        // SIGKILL не звільняє блокування бар’єра до переривання запису.
-        docker([...COMPOSE, 'kill', '--signal', 'SIGKILL', 'postgres']);
-        crashed = true;
-        docker([...COMPOSE, 'start', 'postgres']);
+        const started = performance.now();
+        try {
+          // SIGKILL не звільняє блокування бар’єра до переривання запису.
+          docker(['kill', '--signal', 'SIGKILL', postgres]);
+          crashed = true;
+          docker(['start', postgres]);
+        } catch (error) {
+          // Команда могла зупинити контейнер, навіть якщо її клієнт завершився за таймаутом.
+          try {
+            docker(['start', postgres]);
+            await waitHealthy([postgres], 60_000);
+          } catch (recoveryError) {
+            throw new AggregateError(
+              [error, recoveryError],
+              'failed to restart and recover the test Postgres container',
+            );
+          }
+          throw error;
+        }
         return { checkpoint, started };
       }
       await sleep(25);
     }
-    throw new Error('the worker did not block on the gated HTTP checkpoint');
-  } finally {
-    // Після SIGKILL сесія вже відключена; на звичайній відмові відкат звільняє рядок.
+    throw new Error(`no worker waited on gated HTTP checkpoint ${checkpoint}`);
+  }
+
+  const [outcome] = await Promise.allSettled([probeAndRestart()]);
+  // Після SIGKILL сесія вже відключена; на звичайній відмові відкат звільняє рядок.
+  try {
     try {
       if (!crashed && gate.isTransactionActive)
         await gate.rollbackTransaction();
@@ -143,7 +168,15 @@ async function restartAtCheckpoint(
         await db.destroy();
       }
     }
+  } catch (cleanupError) {
+    if (outcome.status === 'fulfilled') throw cleanupError;
+    throw new AggregateError(
+      [outcome.reason, cleanupError],
+      'checkpoint probe and cleanup both failed',
+    );
   }
+  if (outcome.status === 'rejected') throw outcome.reason as unknown;
+  return outcome.value;
 }
 
 async function main(): Promise<void> {
@@ -152,6 +185,8 @@ async function main(): Promise<void> {
   if (workers.length < 2)
     throw new Error(`need at least 2 running workers, found ${workers.length}`);
   const [postgres] = containers('postgres');
+  if (!postgres)
+    throw new Error('no running Postgres container in the test stack');
   const services = [...workers, ...containers('api')];
   const processes = new Map(services.map((id) => [id, processState(id)]));
   const since = new Date().toISOString();
@@ -170,13 +205,15 @@ async function main(): Promise<void> {
     });
     ids.push(...batch);
     const { checkpoint, started: t0 } = await restartAtCheckpoint(
+      postgres,
       batch[batch.length - 1],
       token,
       observed,
     );
     await waitHealthy([postgres], 60_000);
-    downtimeMs += Date.now() - t0;
-    log(`postgres is healthy again after ${Date.now() - t0} ms`);
+    const outageMs = Math.round(performance.now() - t0);
+    downtimeMs += outageMs;
+    log(`postgres is healthy again after ${outageMs} ms`);
     interrupted.push(await finishRound(batch, TIMEOUT_MS));
     const verification = await openDatabase();
     try {
