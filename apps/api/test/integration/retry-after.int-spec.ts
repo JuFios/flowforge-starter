@@ -15,6 +15,7 @@ describe('Retry-After on 429 and 503', () => {
   let ds: DataSource;
   let apiApp: RunningApp;
   let worker: RunningApp;
+  let closeWorker: RunningApp['close'] | undefined;
   let q: typeof QueueHelpers;
   let receiver: QueueHelpers.Receiver;
   let apiKey: string;
@@ -46,37 +47,47 @@ describe('Retry-After on 429 and 503', () => {
       CREATE TRIGGER test_record_retry_delay AFTER UPDATE ON jobs
         FOR EACH ROW EXECUTE FUNCTION test_record_retry_delay();`);
     apiApp = await startApp();
-    worker = await q.startWorker(2);
     await receiver.start();
   });
 
   beforeEach(async () => {
+    if (closeWorker)
+      throw new Error('the previous worker fixture is still running');
     await truncateAll(ds);
     await ds.query(`TRUNCATE test_retry_delays`);
     ({ apiKey } = await createTenant(ds));
+    worker = await q.startWorker(2);
+    closeWorker = worker.close;
   });
 
+  async function stopWorker() {
+    await closeWorker?.();
+    closeWorker = undefined;
+  }
+
   afterEach(async () => {
-    receiver.requests.length = 0;
     const probe = shutdownProbe;
     shutdownProbe = undefined;
-    if (probe) {
-      await probe.release();
-      expect(probe.pool.isInitialized).toBe(false);
-    }
+    await Promise.all([stopWorker(), probe?.release()]);
+    if (probe) expect(probe.pool.isInitialized).toBe(false);
+    receiver.requests.length = 0;
   });
 
   afterAll(async () => {
-    await worker.close();
-    await apiApp.close();
-    await receiver.stop();
-    await ds.query(`
-      DROP TRIGGER IF EXISTS test_record_retry_delay ON jobs;
-      DROP FUNCTION IF EXISTS test_record_retry_delay();
-      DROP TABLE IF EXISTS test_retry_delays;`);
-    await ds.destroy();
-    if (saved === undefined) delete process.env.JOB_BACKOFF_MAX_MS;
-    else process.env.JOB_BACKOFF_MAX_MS = saved;
+    try {
+      await stopWorker();
+      await ds.query(`
+        DROP TRIGGER IF EXISTS test_record_retry_delay ON jobs;
+        DROP FUNCTION IF EXISTS test_record_retry_delay();
+        DROP TABLE IF EXISTS test_retry_delays;`);
+    } finally {
+      try {
+        await Promise.all([apiApp?.close(), receiver?.stop(), ds?.destroy()]);
+      } finally {
+        if (saved === undefined) delete process.env.JOB_BACKOFF_MAX_MS;
+        else process.env.JOB_BACKOFF_MAX_MS = saved;
+      }
+    }
   });
 
   /** Перша спроба відповідає `status` з `Retry-After`, наступні — 200. Повертає затримку повтору. */

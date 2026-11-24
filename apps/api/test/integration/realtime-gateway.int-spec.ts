@@ -21,6 +21,8 @@ describe('realtime gateway handshake and lifecycle', () => {
   const PER_TENANT = 2;
   let ds: DataSource;
   let app: RunningApp;
+  let startApp: typeof import('../helpers/app').startApp;
+  let closeApp: RunningApp['close'] | undefined;
   let readerToken: typeof ExecutionReader;
   let databaseToken: typeof DataSource;
   let shutdownProbe: { release(): Promise<void>; pool: DataSource } | undefined;
@@ -33,8 +35,7 @@ describe('realtime gateway handshake and lifecycle', () => {
     process.env.REALTIME_MAX_CONNECTIONS_PER_TENANT = String(PER_TENANT);
     try {
       await jest.isolateModulesAsync(async () => {
-        const { startApp } = await import('../helpers/app');
-        app = await startApp();
+        ({ startApp } = await import('../helpers/app'));
         readerToken = (
           await import('../../src/executions/execution-reader.service')
         ).ExecutionReader;
@@ -47,21 +48,33 @@ describe('realtime gateway handshake and lifecycle', () => {
     }
   });
 
-  beforeEach(() => truncateAll(ds));
+  beforeEach(async () => {
+    if (closeApp) throw new Error('the previous API fixture is still running');
+    await truncateAll(ds);
+    app = await startApp();
+    closeApp = app.close;
+  });
+
+  async function stopApp() {
+    await closeApp?.();
+    closeApp = undefined;
+  }
 
   afterEach(async () => {
     for (const socket of sockets.splice(0)) socket.terminate();
     const probe = shutdownProbe;
     shutdownProbe = undefined;
-    if (probe) {
-      await probe.release();
-      expect(probe.pool.isInitialized).toBe(false);
-    }
+    // Бар'єр регресійного тесту звільняється під час завершення, поки пул чекає активний запит.
+    await Promise.all([stopApp(), probe?.release()]);
+    if (probe) expect(probe.pool.isInitialized).toBe(false);
   });
 
   afterAll(async () => {
-    await app.close();
-    await ds.destroy();
+    try {
+      await stopApp();
+    } finally {
+      await ds.destroy();
+    }
   });
 
   async function login(apiKey: string): Promise<string> {
