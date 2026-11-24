@@ -1,5 +1,6 @@
 import { Client } from 'pg';
 import { DataSource } from 'typeorm';
+import { MAX_WATCHES_PER_RENEWAL } from '../../src/database/migrations/1797600000000-RealtimeWatches';
 import { ExecutionWatches } from '../../src/realtime/execution-watches.service';
 import { SystemDb } from '../../src/tenancy/system-db';
 import { TenantDb } from '../../src/tenancy/tenant-db';
@@ -143,6 +144,31 @@ describe('realtime watches', () => {
     });
   });
 
+  it('a page reopened right after the last one closed keeps its watch row', async () => {
+    for (let i = 0; i < 20; i++) {
+      await watches.watch(tenantId, executionId);
+      watches.unwatch(tenantId, executionId);
+      // Нова підписка одразу після закриття: її вставка стає в чергу після видалення.
+      await watches.watch(tenantId, executionId);
+      await sleep(30);
+      expect(await watchRows()).toEqual([
+        { executionId, instanceId: watches.instanceId },
+      ]);
+      watches.unwatch(tenantId, executionId);
+      await waitFor(
+        'row removed',
+        async () => (await watchRows()).length === 0,
+      );
+    }
+  });
+
+  it('release waits for a watch still being inserted, so no row outlives the instance', async () => {
+    const inserting = watches.watch(tenantId, executionId);
+    await watches.release();
+    await inserting;
+    expect(await watchRows()).toEqual([]);
+  });
+
   it('commits the watch only after a transaction already changing the execution: its change is read, later ones notify', async () => {
     const runner = owner.createQueryRunner();
     await runner.connect();
@@ -244,8 +270,8 @@ describe('realtime watches', () => {
       [[], [], 999],
       [[], [], 600_001],
       [
-        Array.from({ length: 4097 }, () => executionId),
-        Array.from({ length: 4097 }, () => tenantId),
+        Array.from({ length: MAX_WATCHES_PER_RENEWAL + 1 }, () => executionId),
+        Array.from({ length: MAX_WATCHES_PER_RENEWAL + 1 }, () => tenantId),
         45_000,
       ],
     ] as const)
@@ -257,6 +283,15 @@ describe('realtime watches', () => {
           ttl,
         ),
       ).rejects.toThrow(/invalid watch renewal arguments/);
+    // Межа включна: стільки підписок, скільки сокетів допускає найбільше REALTIME_MAX_CONNECTIONS.
+    expect(
+      await system.renewRealtimeWatches(
+        instance,
+        Array.from({ length: MAX_WATCHES_PER_RENEWAL }, () => executionId),
+        Array.from({ length: MAX_WATCHES_PER_RENEWAL }, () => tenantId),
+        45_000,
+      ),
+    ).toBe(1);
   });
 
   it('a watch row of tenant A is invisible to tenant B and the worker role cannot read it', async () => {

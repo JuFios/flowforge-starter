@@ -1,8 +1,12 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
 import { API_ROLE, SYSTEM_ROLE } from '../../tenancy/roles';
 
-/** Найбільше виконань, які один інстанс API продовжує за виклик (≥ REALTIME_MAX_CONNECTIONS). */
-export const MAX_WATCHES_PER_RENEWAL = 4096;
+/**
+ * Найбільше виконань, які один інстанс API продовжує за виклик: не менше за найбільше допустиме
+ * REALTIME_MAX_CONNECTIONS (підписок не більше, ніж сокетів), інакше продовження відмовляло б і всі
+ * підписки інстансу спливали б (тест `realtime-renewal-bound.spec.ts`).
+ */
+export const MAX_WATCHES_PER_RENEWAL = 10_000;
 /** Скільки прострочених рядків прибирає один виклик продовження. */
 const PURGE_BATCH = 1000;
 

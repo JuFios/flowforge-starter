@@ -29,6 +29,8 @@ export class PgListener {
   private probe?: NodeJS.Timeout;
   private delay = 250;
   private stopped = false;
+  /** `LISTEN` виконано на поточному з'єднанні (між `available` true і false). */
+  private established = false;
 
   constructor(
     private readonly options: () => PgListenerOptions,
@@ -37,9 +39,9 @@ export class PgListener {
     this.logger = new Logger(loggerName);
   }
 
-  /** Чи з'єднання `LISTEN` зараз встановлене. */
+  /** Чи `LISTEN` зараз діє: з'єднання встановлено й підписку на канали виконано. */
   get listening(): boolean {
-    return this.client !== undefined && this.retry === undefined;
+    return this.established;
   }
 
   start(): void {
@@ -56,6 +58,7 @@ export class PgListener {
     const lost = () => {
       if (client !== this.client) return;
       this.client = undefined;
+      this.established = false;
       clearInterval(this.probe);
       this.probe = undefined;
       this.events.emit('available', false);
@@ -83,6 +86,7 @@ export class PgListener {
       );
       if (client !== this.client) return;
       this.delay = 250;
+      this.established = true;
       // Напіввідкрите з'єднання (NAT чи firewall мовчки відкинули його) не дає ні error, ні end:
       // запит із таймаутом виявляє його, і після перепідключення підписки перечитуються.
       this.probe = setInterval(() => {
@@ -94,6 +98,7 @@ export class PgListener {
 
   async stop(): Promise<void> {
     this.stopped = true;
+    this.established = false;
     clearTimeout(this.retry);
     clearInterval(this.probe);
     const client = this.client;
