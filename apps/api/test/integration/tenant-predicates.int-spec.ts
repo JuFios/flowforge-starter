@@ -122,8 +122,9 @@ describe('tenant predicates in the services (row-level security bypassed)', () =
 
   it('the steps of an execution are read only within its tenant', async () => {
     const asB = { ...jobA, tenantId: b };
-    const steps = await db.run(b, (em) => checkpoints.load(em, asB));
-    expect(steps).toEqual([]);
+    await expect(
+      db.run(b, (em) => checkpoints.resume(em, asB)),
+    ).rejects.toThrow(/not visible/);
   });
 
   it('finishes the execution and fenced job in one statement after entering the tenant transaction', async () => {

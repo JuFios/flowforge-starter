@@ -55,7 +55,8 @@ export class LeaseLostError extends Error {
   }
 }
 
-const HELD_JOB = `WHERE id = $1 AND "tenantId" = $2 AND "lockToken" = $3 AND status = 'running'`;
+/** Рядок задачі, lease якої тримає цей воркер: $1 — id, $2 — тенант, $3 — fencing-токен. */
+export const HELD_JOB = `WHERE id = $1 AND "tenantId" = $2 AND "lockToken" = $3 AND status = 'running'`;
 const MARK_JOB_DONE = `UPDATE jobs SET status = 'done', attempts = GREATEST(attempts, 1),
     "lockedBy" = NULL, "lockedUntil" = NULL, "lockToken" = NULL, "finishedAt" = now()`;
 

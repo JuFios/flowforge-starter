@@ -4,7 +4,7 @@ import { randomUUID } from 'crypto';
 import { setMaxListeners } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
 import { EnvironmentVariables, MAX_TIMER_MS } from '../config/env.validation';
-import { Execution, Job, StepRun, WorkflowVersion } from '../entities';
+import { Job, StepRun } from '../entities';
 import {
   newCorrelationId,
   runWithCorrelationId,
@@ -442,37 +442,20 @@ export class JobRunnerService implements BeforeApplicationShutdown {
     try {
       // Виконання, його знімок і чекпоінти — одним читанням у контексті тенанта задачі, з явним
       // предикатом tenantId (композитні FK гарантують, що вони належать тому самому тенанту).
-      const { execution, snapshot, history } = await this.db.run(
-        job.tenantId,
-        async (em) => {
-          const execution = await em.findOneOrFail(Execution, {
-            where: { id: job.executionId, tenantId: job.tenantId },
-          });
-          const snapshot = execution.workflowVersionId
-            ? await em.findOneOrFail(WorkflowVersion, {
-                where: {
-                  id: execution.workflowVersionId,
-                  tenantId: job.tenantId,
-                },
-              })
-            : null;
-          const history = await this.checkpoints.load(em, job);
-          return { execution, snapshot, history };
-        },
+      const { input, steps, history } = await this.db.run(job.tenantId, (em) =>
+        this.checkpoints.resume(em, job),
       );
-      const ctx: StepContext = { input: execution.input, steps: {} };
+      const ctx: StepContext = { input, steps: {} };
       // Знімок версії, зафіксований під час створення виконання, а не поточний стан workflow.
       // Без знімку виконання запускати не можна: `{ id: undefined }` TypeORM виконав би без умови
       // й повернув першу-ліпшу версію. CHECK у БД такого стану не допускає — це остання лінія
       // захисту, і провал записується одразу, без повторів.
-      if (!snapshot)
+      if (!steps)
         throw new StepError(
           'execution has no workflow version snapshot',
           false,
         );
-      if (
-        history.some((run) => snapshot.steps[run.stepIndex]?.id !== run.stepId)
-      )
+      if (history.some((run) => steps[run.stepIndex]?.id !== run.stepId))
         throw new StepError(
           'checkpoint does not match the workflow version',
           false,
@@ -486,10 +469,10 @@ export class JobRunnerService implements BeforeApplicationShutdown {
         ctx.steps[id] = value;
       };
       const runs = new Map(history.map((run) => [run.stepIndex, run]));
-      for (let i = 0; i < snapshot.steps.length; i++) {
+      for (let i = 0; i < steps.length; i++) {
         if (contextBytes > CONTEXT_BYTES)
           throw new StepError('step context exceeds the byte limit', false);
-        const step = snapshot.steps[i];
+        const step = steps[i];
         const previous = runs.get(i);
         if (previous?.status === 'succeeded') {
           // Крок уже завершено в попередній спробі: беремо збережений результат, не виконуємо знову.
@@ -551,7 +534,7 @@ export class JobRunnerService implements BeforeApplicationShutdown {
         remember(step.id, saved.output);
         current = undefined;
       }
-      const last = snapshot.steps[snapshot.steps.length - 1];
+      const last = steps[steps.length - 1];
       finalOutput = ctx.steps[last.id];
     } catch (err) {
       if (err instanceof LeaseLostError || signal.aborted) throw err;
