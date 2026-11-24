@@ -5,7 +5,7 @@ import { RunningApp, startApp } from '../helpers/app';
 import { createWorkflow, openTestDataSource, truncateAll } from '../helpers/db';
 import { TEST_ADMIN_TOKEN } from '../helpers/test-env';
 
-/** Керування ключами підпису (README 3.3.7, «Ротація без простою»). */
+/** Керування ключами підпису (docs/architecture.md, 3.3.7, «Ротація без простою»). */
 describe('webhook key management', () => {
   let ds: DataSource;
   let running: RunningApp;

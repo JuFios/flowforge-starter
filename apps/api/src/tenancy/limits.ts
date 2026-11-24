@@ -63,7 +63,7 @@ export const OUTBOX_QUOTA_CHECK = {
 
 /**
  * Детальних записів спроб на подію: перша й останні; старші видаляються під час нової спроби, а
- * `attempts` події лишається повним лічильником (docs/operations.md, «Сповіщення»).
+ * `attempts` події лишається повним лічильником (docs/operations.md, «Для оператора: недоставлені події»).
  */
 export const OUTBOX_ATTEMPT_HISTORY = 20;
 
