@@ -52,7 +52,12 @@ describe('Postgres restart checkpoint barrier', () => {
   });
 
   afterAll(async () => {
-    await Promise.all([worker?.destroy(), owner?.destroy()]);
+    try {
+      // Набір не лишає своїх рядків іншим наборам спільної тестової БД.
+      if (owner?.isInitialized) await truncateAll(owner);
+    } finally {
+      await Promise.all([worker?.destroy(), owner?.destroy()]);
+    }
   });
 
   async function observeBlockedWrite(
