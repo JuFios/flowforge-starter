@@ -2,6 +2,8 @@ import WebSocket = require('ws');
 import { DataSource } from 'typeorm';
 import type { RunningApp } from '../helpers/app';
 import type { ExecutionReader } from '../../src/executions/execution-reader.service';
+import { holdTestTable } from '../helpers/hold-test-table';
+import { TEST_API_DB_USER } from '../helpers/test-env';
 import { waitFor } from '../helpers/wait-for';
 import {
   createExecution,
@@ -20,7 +22,11 @@ describe('realtime gateway handshake and lifecycle', () => {
   const PER_TENANT = 2;
   let ds: DataSource;
   let app: RunningApp;
+  let startApp: typeof import('../helpers/app').startApp;
+  let closeApp: RunningApp['close'] | undefined;
   let readerToken: typeof ExecutionReader;
+  let databaseToken: typeof DataSource;
+  let shutdownProbe: { release(): Promise<void>; pool: DataSource } | undefined;
   const sockets: WebSocket[] = [];
 
   beforeAll(async () => {
@@ -30,11 +36,11 @@ describe('realtime gateway handshake and lifecycle', () => {
     process.env.REALTIME_MAX_CONNECTIONS_PER_TENANT = String(PER_TENANT);
     try {
       await jest.isolateModulesAsync(async () => {
-        const { startApp } = await import('../helpers/app');
-        app = await startApp();
+        ({ startApp } = await import('../helpers/app'));
         readerToken = (
           await import('../../src/executions/execution-reader.service')
         ).ExecutionReader;
+        databaseToken = (await import('typeorm')).DataSource;
       });
     } finally {
       if (saved === undefined)
@@ -43,15 +49,33 @@ describe('realtime gateway handshake and lifecycle', () => {
     }
   });
 
-  beforeEach(() => truncateAll(ds));
+  beforeEach(async () => {
+    if (closeApp) throw new Error('the previous API fixture is still running');
+    await truncateAll(ds);
+    app = await startApp();
+    closeApp = () => app.close();
+  });
 
-  afterEach(() => {
+  async function stopApp() {
+    await closeApp?.();
+    closeApp = undefined;
+  }
+
+  afterEach(async () => {
     for (const socket of sockets.splice(0)) socket.terminate();
+    const probe = shutdownProbe;
+    shutdownProbe = undefined;
+    // Бар'єр регресійного тесту звільняється під час завершення, поки пул чекає активний запит.
+    await Promise.all([stopApp(), probe?.release()]);
+    if (probe) expect(probe.pool.isInitialized).toBe(false);
   });
 
   afterAll(async () => {
-    await app.close();
-    await ds.destroy();
+    try {
+      await stopApp();
+    } finally {
+      await ds.destroy();
+    }
   });
 
   async function login(apiKey: string): Promise<string> {
@@ -191,5 +215,20 @@ describe('realtime gateway handshake and lifecycle', () => {
     );
     expect(reads).toHaveBeenCalledTimes(1);
     reads.mockRestore();
+  });
+
+  it('ends the API fixture even if a socket snapshot is still reading from Postgres', async () => {
+    const { execution, token } = await setup();
+    const value = await ticket(token, execution.id);
+    const pool = app.app.get(databaseToken);
+    const gate = await holdTestTable(ds, 'step_runs');
+    try {
+      expect((await connect(value)).opened).toBe(true);
+      // На step_runs під час підписки чекає лише читання знімка (підписка цієї таблиці не торкається).
+      await gate.waitForBlocked(TEST_API_DB_USER);
+      shutdownProbe = { release: gate.release, pool };
+    } finally {
+      if (!shutdownProbe) await gate.release();
+    }
   });
 });

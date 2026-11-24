@@ -122,8 +122,15 @@ describe('tenant predicates in the services (row-level security bypassed)', () =
 
   it('the steps of an execution are read only within its tenant', async () => {
     const asB = { ...jobA, tenantId: b };
-    const steps = await db.run(b, (em) => checkpoints.load(em, asB));
-    expect(steps).toEqual([]);
+    // Окремо читання для відновлення й саме читання чекпоінтів: прибраний предикат будь-якого з
+    // них робить тест червоним (з'єднання власника обходить RLS).
+    await expect(
+      db.run(b, (em) => checkpoints.resume(em, asB)),
+    ).rejects.toThrow(/not visible/);
+    expect(await db.run(b, (em) => checkpoints.history(em, asB))).toEqual([]);
+    expect(await db.run(a, (em) => checkpoints.history(em, jobA))).toHaveLength(
+      1,
+    );
   });
 
   it('finishes the execution and fenced job in one statement after entering the tenant transaction', async () => {

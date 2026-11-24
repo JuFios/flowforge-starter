@@ -1,10 +1,16 @@
-import { BeforeApplicationShutdown, Injectable, Logger } from '@nestjs/common';
+import {
+  BeforeApplicationShutdown,
+  Injectable,
+  Logger,
+  Optional,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { randomUUID } from 'crypto';
 import { setMaxListeners } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
+import { IdleLoops } from '../common/idle-loops';
 import { EnvironmentVariables, MAX_TIMER_MS } from '../config/env.validation';
-import { Execution, Job, StepRun, WorkflowVersion } from '../entities';
+import { Job, StepRun } from '../entities';
 import {
   newCorrelationId,
   runWithCorrelationId,
@@ -23,6 +29,7 @@ import { LeaseKeeper } from './lease-keeper';
 import { QueueMetrics } from './queue.metrics';
 import { StepError, StepExecutor } from './step-executor';
 import { StepContext } from './template';
+import { JOBS_READY, WorkSignals } from './work-signals.service';
 
 /** Причина скасування кроку, коли воркер завершується і пільговий час вичерпано. */
 class ShutdownAbort extends Error {
@@ -56,6 +63,10 @@ export class JobRunnerService implements BeforeApplicationShutdown {
   readonly workerId = `worker-${randomUUID().slice(0, 8)}`;
   /** Скасовується на початку завершення: цикли перестають брати задачі й виходять із пауз. */
   private stopping = new AbortController();
+  /** Паузи опитування циклів, які перериває підказка LISTEN (common/idle-loops.ts). */
+  private idleLoops = new IdleLoops(this.stopping.signal);
+  /** Відписка від підказок LISTEN поточного запуску. */
+  private detachSignals?: () => void;
   private loops: Promise<void>[] = [];
   private readonly inFlight = new Set<{
     keeper: LeaseKeeper;
@@ -77,14 +88,33 @@ export class JobRunnerService implements BeforeApplicationShutdown {
     private readonly checkpoints: CheckpointService,
     private readonly config: ConfigService<EnvironmentVariables, true>,
     private readonly metrics: QueueMetrics,
+    @Optional() private readonly signals?: WorkSignals,
   ) {}
 
   start(
     concurrency = this.config.get('WORKER_CONCURRENCY', { infer: true }),
   ): void {
     this.stopping = new AbortController();
+    this.idleLoops = new IdleLoops(this.stopping.signal);
     // Кожен цикл може одночасно чекати зі своїм слухачем abort.
-    if (concurrency > 0) setMaxListeners(concurrency, this.stopping.signal);
+    if (concurrency > 0) setMaxListeners(concurrency + 1, this.stopping.signal);
+    if (this.signals && concurrency > 0) {
+      // Нова готова задача або відновлений LISTEN (сповіщення за час розриву загублено) — один цикл
+      // перевіряє чергу одразу, не чекаючи кінця своєї паузи.
+      const idle = this.idleLoops;
+      const ready = () => idle.signal();
+      const available = (up: boolean) => {
+        if (up) idle.signal();
+      };
+      const events = this.signals.events;
+      events.on(JOBS_READY, ready);
+      events.on('available', available);
+      this.detachSignals = () => {
+        events.off(JOBS_READY, ready);
+        events.off('available', available);
+      };
+      this.signals.start();
+    }
     this.logger.log(`${this.workerId} started, concurrency=${concurrency}`);
     for (let i = 0; i < concurrency; i++) this.loops.push(this.loop());
     const leaseMs = this.config.get('JOB_LEASE_MS', { infer: true });
@@ -198,6 +228,7 @@ export class JobRunnerService implements BeforeApplicationShutdown {
   async beforeApplicationShutdown(): Promise<void> {
     if (this.stopping.signal.aborted) return;
     this.stopping.abort();
+    this.detachSignals?.();
     for (const timer of this.maintenanceTimers) clearTimeout(timer);
     this.maintenanceTimers.clear();
     const grace = this.config.get('WORKER_SHUTDOWN_GRACE_MS', { infer: true });
@@ -237,10 +268,13 @@ export class JobRunnerService implements BeforeApplicationShutdown {
     }
   }
 
-  /** Пауза опитування з відхиленням ±50%: воркери не стукають у БД синхронно. */
+  /**
+   * Пауза опитування з відхиленням ±50%: воркери не стукають у БД синхронно. Підказка LISTEN про нову
+   * готову задачу перериває паузу одного циклу (docs/architecture.md, «Пробудження воркера»).
+   */
   private idle(): Promise<void> {
     const base = this.config.get('WORKER_POLL_INTERVAL_MS', { infer: true });
-    return this.pause(base * (0.5 + Math.random()));
+    return this.idleLoops.idle(base * (0.5 + Math.random()));
   }
 
   /** Повертає в чергу задачі зниклих воркерів. Помилка не зупиняє воркер — наступний прохід повторить. */
@@ -442,37 +476,20 @@ export class JobRunnerService implements BeforeApplicationShutdown {
     try {
       // Виконання, його знімок і чекпоінти — одним читанням у контексті тенанта задачі, з явним
       // предикатом tenantId (композитні FK гарантують, що вони належать тому самому тенанту).
-      const { execution, snapshot, history } = await this.db.run(
-        job.tenantId,
-        async (em) => {
-          const execution = await em.findOneOrFail(Execution, {
-            where: { id: job.executionId, tenantId: job.tenantId },
-          });
-          const snapshot = execution.workflowVersionId
-            ? await em.findOneOrFail(WorkflowVersion, {
-                where: {
-                  id: execution.workflowVersionId,
-                  tenantId: job.tenantId,
-                },
-              })
-            : null;
-          const history = await this.checkpoints.load(em, job);
-          return { execution, snapshot, history };
-        },
+      const { input, steps, history } = await this.db.run(job.tenantId, (em) =>
+        this.checkpoints.resume(em, job),
       );
-      const ctx: StepContext = { input: execution.input, steps: {} };
+      const ctx: StepContext = { input, steps: {} };
       // Знімок версії, зафіксований під час створення виконання, а не поточний стан workflow.
       // Без знімку виконання запускати не можна: `{ id: undefined }` TypeORM виконав би без умови
       // й повернув першу-ліпшу версію. CHECK у БД такого стану не допускає — це остання лінія
       // захисту, і провал записується одразу, без повторів.
-      if (!snapshot)
+      if (!steps)
         throw new StepError(
           'execution has no workflow version snapshot',
           false,
         );
-      if (
-        history.some((run) => snapshot.steps[run.stepIndex]?.id !== run.stepId)
-      )
+      if (history.some((run) => steps[run.stepIndex]?.id !== run.stepId))
         throw new StepError(
           'checkpoint does not match the workflow version',
           false,
@@ -486,10 +503,10 @@ export class JobRunnerService implements BeforeApplicationShutdown {
         ctx.steps[id] = value;
       };
       const runs = new Map(history.map((run) => [run.stepIndex, run]));
-      for (let i = 0; i < snapshot.steps.length; i++) {
+      for (let i = 0; i < steps.length; i++) {
         if (contextBytes > CONTEXT_BYTES)
           throw new StepError('step context exceeds the byte limit', false);
-        const step = snapshot.steps[i];
+        const step = steps[i];
         const previous = runs.get(i);
         if (previous?.status === 'succeeded') {
           // Крок уже завершено в попередній спробі: беремо збережений результат, не виконуємо знову.
@@ -551,7 +568,7 @@ export class JobRunnerService implements BeforeApplicationShutdown {
         remember(step.id, saved.output);
         current = undefined;
       }
-      const last = snapshot.steps[snapshot.steps.length - 1];
+      const last = steps[steps.length - 1];
       finalOutput = ctx.steps[last.id];
     } catch (err) {
       if (err instanceof LeaseLostError || signal.aborted) throw err;

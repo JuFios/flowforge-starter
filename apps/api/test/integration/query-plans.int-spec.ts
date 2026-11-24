@@ -162,6 +162,31 @@ describe('query plans of the queue use their indexes', () => {
     expect(hasSeqScan(root)).toBe(false);
   });
 
+  it('finds the watch of a changed execution through the primary key of realtime_watches', async () => {
+    // Тригер notify_execution перевіряє підписку на кожну зміну виконання: пошук за ключем, а не
+    // читання всіх підписок (по одній на кожне з 20 тис. виконань, як за найбільшого навантаження).
+    await ds.query(`
+      INSERT INTO realtime_watches ("executionId", "tenantId", "instanceId", "expiresAt")
+      SELECT id, "tenantId", gen_random_uuid(), now() + interval '45 seconds' FROM executions`);
+    await ds.query('ANALYZE realtime_watches');
+    try {
+      const body = await functionBody(ds, 'notify_execution', {});
+      const id = "'00000000-0000-4000-8000-000000000000'::uuid";
+      const select =
+        /SELECT 1 FROM public\.realtime_watches[\s\S]*?clock_timestamp\(\)/
+          .exec(body)![0]
+          .replace(/= row_id\b/, `= ${id}`)
+          .replace(/= tenant\b/, `= ${id}`);
+      const [row]: Array<{ 'QUERY PLAN': Array<{ Plan: PlanNode }> }> =
+        await ds.query(`EXPLAIN (FORMAT JSON) ${select}`);
+      const root = row['QUERY PLAN'][0].Plan;
+      expect(indexesIn(root)).toContain('realtime_watches_pkey');
+      expect(hasSeqScan(root)).toBe(false);
+    } finally {
+      await ds.query('TRUNCATE realtime_watches');
+    }
+  });
+
   it('finishes by execution ID under the worker role without reading tenant history', async () => {
     const [job]: Array<{ id: string; tenantId: string; executionId: string }> =
       await ds.query('SELECT id, "tenantId", "executionId" FROM jobs LIMIT 1');

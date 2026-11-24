@@ -1,13 +1,20 @@
-import { BeforeApplicationShutdown, Injectable, Logger } from '@nestjs/common';
+import {
+  BeforeApplicationShutdown,
+  Injectable,
+  Logger,
+  Optional,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { randomUUID } from 'node:crypto';
 import { setMaxListeners } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
+import { IdleLoops } from '../common/idle-loops';
 import { EnvironmentVariables, MAX_TIMER_MS } from '../config/env.validation';
 import { backoffMs, retryDelayMs } from '../engine/job-queue.service';
 import { outboundHttp } from '../engine/outbound-http';
 import { parseRetryAfter } from '../engine/retry-after';
 import { StepError } from '../engine/step-error';
+import { OUTBOX_READY, WorkSignals } from '../engine/work-signals.service';
 import {
   newCorrelationId,
   runWithCorrelationId,
@@ -68,6 +75,10 @@ export class OutboxSender implements BeforeApplicationShutdown {
   private stopping = new AbortController();
   /** Скасовується, коли пільговий час завершення вичерпано: обриває запити, що ще тривають. */
   private cancel = new AbortController();
+  /** Паузи опитування циклів, які перериває підказка LISTEN (common/idle-loops.ts). */
+  private idleLoops = new IdleLoops(this.stopping.signal);
+  /** Відписка від підказок LISTEN поточного запуску. */
+  private detachSignals?: () => void;
   private loops: Promise<void>[] = [];
   private readonly active = new Set<Promise<void>>();
   private purgeTimer?: NodeJS.Timeout;
@@ -80,6 +91,7 @@ export class OutboxSender implements BeforeApplicationShutdown {
     private readonly db: TenantDb,
     private readonly config: ConfigService<EnvironmentVariables, true>,
     private readonly metrics: OutboxMetrics,
+    @Optional() private readonly signals?: WorkSignals,
   ) {}
 
   private get leaseMs(): number {
@@ -94,9 +106,25 @@ export class OutboxSender implements BeforeApplicationShutdown {
   ): void {
     this.stopping = new AbortController();
     this.cancel = new AbortController();
+    this.idleLoops = new IdleLoops(this.stopping.signal);
     if (concurrency > 0) {
-      setMaxListeners(concurrency + 1, this.stopping.signal);
+      setMaxListeners(concurrency + 2, this.stopping.signal);
       setMaxListeners(concurrency + 1, this.cancel.signal);
+    }
+    if (this.signals && concurrency > 0) {
+      const idle = this.idleLoops;
+      const ready = () => idle.signal();
+      const available = (up: boolean) => {
+        if (up) idle.signal();
+      };
+      const events = this.signals.events;
+      events.on(OUTBOX_READY, ready);
+      events.on('available', available);
+      this.detachSignals = () => {
+        events.off(OUTBOX_READY, ready);
+        events.off('available', available);
+      };
+      this.signals.start();
     }
     this.logger.log(`${this.senderId} started, concurrency=${concurrency}`);
     for (let i = 0; i < concurrency; i++) this.loops.push(this.loop());
@@ -111,6 +139,7 @@ export class OutboxSender implements BeforeApplicationShutdown {
   async beforeApplicationShutdown(): Promise<void> {
     if (this.stopping.signal.aborted) return;
     this.stopping.abort();
+    this.detachSignals?.();
     if (this.purgeTimer) clearTimeout(this.purgeTimer);
     const grace = this.config.get('WORKER_SHUTDOWN_GRACE_MS', { infer: true });
     const finished = await Promise.race([
@@ -137,15 +166,14 @@ export class OutboxSender implements BeforeApplicationShutdown {
     while (!this.stopping.signal.aborted) {
       const claimed = await this.deliverNext();
       if (!claimed) {
-        const poll = this.config.get('OUTBOX_POLL_INTERVAL_MS', {
-          infer: true,
-        });
-        await this.pause(
-          Math.max(
-            poll * (0.5 + Math.random()),
-            this.claimRetryAt - Date.now(),
-          ),
-        );
+        const poll =
+          this.config.get('OUTBOX_POLL_INTERVAL_MS', { infer: true }) *
+          (0.5 + Math.random());
+        const backoff = this.claimRetryAt - Date.now();
+        // Відступ після збою захоплення не перериває підказка: БД ще може бути недоступна.
+        if (this.claimFailures > 0 && backoff > 0)
+          await this.pause(Math.max(poll, backoff));
+        else await this.idleLoops.idle(poll);
       }
     }
   }

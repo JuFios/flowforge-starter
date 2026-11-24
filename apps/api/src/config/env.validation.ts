@@ -37,6 +37,11 @@ export type LogLevel = (typeof LOG_LEVELS)[number];
 export const MAX_TIMER_MS = 2_147_483_647;
 /** Найдовший тік планувальника: запізнення вчасного спрацювання не більше хвилини (3.3.8). */
 export const MAX_SCHEDULER_TICK_MS = 60_000;
+/**
+ * Найбільше значення REALTIME_MAX_CONNECTIONS. Продовження підписок інстансу одним викликом
+ * (`renew_realtime_watches`, міграція RealtimeWatches) приймає щонайменше стільки виконань.
+ */
+export const MAX_REALTIME_CONNECTIONS = 10_000;
 
 /** Межі HTTP_BODY_LIMIT, байт: 68 КіБ (визначення 64 КіБ + решта полів) .. 1 МіБ. */
 export const MIN_HTTP_BODY_LIMIT = 68 * 1024;
@@ -280,7 +285,7 @@ export class EnvironmentVariables extends DatabaseEnvironment {
   @Type(() => Number)
   @IsInt()
   @Min(2)
-  @Max(10000)
+  @Max(MAX_REALTIME_CONNECTIONS)
   @IsAtLeastTimes('REALTIME_MAX_CONNECTIONS_PER_TENANT', 2)
   REALTIME_MAX_CONNECTIONS = 256;
   @Type(() => Number)

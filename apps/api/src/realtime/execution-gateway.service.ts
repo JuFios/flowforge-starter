@@ -19,6 +19,8 @@ import { SystemDb } from '../tenancy/system-db';
 import { tokenHash } from '../sessions/sessions.service';
 import { ExecutionReader } from '../executions/execution-reader.service';
 import { ExecutionFeed } from './execution-feed.service';
+import { ExecutionWatches } from './execution-watches.service';
+import { toSafeError } from '../observability/safe-error';
 
 type Grant = NonNullable<Awaited<ReturnType<SystemDb['redeemTicket']>>>;
 type Verify = (
@@ -65,6 +67,7 @@ export class ExecutionGateway
     private readonly reader: ExecutionReader,
     private readonly system: SystemDb,
     private readonly feed: ExecutionFeed,
+    private readonly watches: ExecutionWatches,
     metrics: MetricsService,
   ) {
     const registers = [metrics.registry];
@@ -132,6 +135,7 @@ export class ExecutionGateway
         this.send(ws, '{"type":"heartbeat"}');
       }
       this.refreshAll();
+      this.renewWatches();
     }, 15_000);
   }
   private verify(req: IncomingMessage, done: Verify) {
@@ -208,10 +212,12 @@ export class ExecutionGateway
     const grant = this.pending.get(req);
     this.pending.delete(req);
     if (!grant || this.closed) return socket.terminate();
+    // Перше читання — лише після коміту підписки в БД (ExecutionWatches.watch): інакше зміна,
+    // закомічена між читанням і підпискою, не дала б ні знімка, ні сповіщення.
     const sub: Subscription = {
       grant,
       reading: false,
-      dirty: true,
+      dirty: false,
       alive: true,
     };
     this.subscriptions.set(socket, sub);
@@ -223,9 +229,39 @@ export class ExecutionGateway
     socket.once('close', () => {
       this.subscriptions.delete(socket);
       this.connections.dec();
+      this.watches.unwatch(grant.tenantId, grant.executionId);
     });
     this.feed.start();
-    this.drain();
+    this.watches.watch(grant.tenantId, grant.executionId).then(
+      () => {
+        sub.dirty = true;
+        this.drain();
+      },
+      (err: unknown) => {
+        this.logger.warn(
+          { error: toSafeError(err) },
+          'realtime watch could not be registered',
+        );
+        socket.close(1013, 'retry later');
+      },
+    );
+  }
+
+  /**
+   * Продовжує підписки інстансу в БД. Відновлені рядки означають, що якийсь час сповіщень для цих
+   * виконань не було (рядок сплив, поки БД була недоступна), тож знімки перечитуються одразу.
+   */
+  private renewWatches() {
+    this.watches.renew().then(
+      (restored) => {
+        if (restored > 0) this.refreshAll();
+      },
+      (err: unknown) =>
+        this.logger.warn(
+          { error: toSafeError(err) },
+          'realtime watch renewal failed',
+        ),
+    );
   }
   private send(socket: WebSocket, message: string) {
     if (socket.readyState !== WebSocket.OPEN) return;
@@ -319,6 +355,15 @@ export class ExecutionGateway
     this.closed = true;
     clearInterval(this.timer);
     this.feed.events.removeAllListeners();
+    // Рядки підписок цього інстансу інакше спливли б лише за WATCH_TTL_MS.
+    await this.watches
+      .release()
+      .catch((err: unknown) =>
+        this.logger.warn(
+          { error: toSafeError(err) },
+          'realtime watches release failed',
+        ),
+      );
     if (this.server && this.adapter)
       await this.adapter
         .close(this.server)

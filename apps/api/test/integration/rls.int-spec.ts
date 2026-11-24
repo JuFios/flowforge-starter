@@ -360,12 +360,12 @@ describe('SECURITY DEFINER functions', () => {
       );
       const lookup = async (hash: string) =>
         (
-          (await runner.query(`SELECT auth_tenant($1) AS id`, [
+          (await runner.query(`SELECT id FROM auth_tenant($1)`, [
             hash,
           ])) as Array<{
-            id: string | null;
+            id: string;
           }>
-        )[0].id;
+        )[0]?.id ?? null;
       const fake = await lookup(planted);
       const real = await lookup(hashApiKey(apiKey));
       expect(fake).toBeNull();
@@ -425,10 +425,19 @@ describe('SECURITY DEFINER functions', () => {
     }
   });
 
-  it('return only identifiers: the API key lookup never returns secrets', async () => {
-    const [def]: Array<{ result: string }> = await owner.query(
-      `SELECT pg_get_function_result('public.auth_tenant(text)'::regprocedure) AS result`,
+  it('return only identifiers, expiry and limits: the authentication lookups never return secrets', async () => {
+    // Кожен стовпчик результату — ідентифікатор, строк сесії або число межі. Текст чи байти
+    // (хеш ключа, секрет webhook-а, хеш токена) з'явитися тут не можуть.
+    const columns: Array<{ fn: string; type: string }> = await owner.query(
+      `SELECT p.proname AS fn, format_type(t, NULL) AS type
+         FROM pg_proc p, unnest(p.proallargtypes[2:]) AS t
+        WHERE p.oid IN ('public.auth_tenant(text)'::regprocedure,
+                        'public.auth_session(bytea)'::regprocedure)`,
     );
-    expect(def.result).toBe('uuid');
+    expect(new Set(columns.map((c) => c.fn))).toEqual(
+      new Set(['auth_tenant', 'auth_session']),
+    );
+    for (const { type } of columns)
+      expect(['uuid', 'integer', 'timestamp with time zone']).toContain(type);
   });
 });

@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { Job } from '../entities';
+import { EffectiveLimits } from './limits';
 
 /** Найдовше читання глибини черги для метрик, мс (або менше — за statement_timeout сесії). */
 const QUEUE_DEPTH_TIMEOUT_MS = 2_000;
@@ -18,9 +19,18 @@ export const SCHEDULE_PAGE = 500;
 export class SystemDb {
   constructor(@InjectDataSource() private readonly ds: DataSource) {}
 
-  async authSession(hash: Buffer) {
+  /**
+   * Чинна браузерна сесія за sha256-хешем токена разом з ефективними лімітами її тенанта
+   * (`auth_session`) або undefined.
+   */
+  async authSession(
+    hash: Buffer,
+  ): Promise<
+    | ({ id: string; tenantId: string; expiresAt: Date } & EffectiveLimits)
+    | undefined
+  > {
     const [row] = await this.ds.query<
-      Array<{ id: string; tenantId: string; expiresAt: Date }>
+      Array<{ id: string; tenantId: string; expiresAt: Date } & EffectiveLimits>
     >('SELECT * FROM auth_session($1)', [hash]);
     return row;
   }
@@ -37,13 +47,17 @@ export class SystemDb {
     return row;
   }
 
-  /** Тенант за sha256-хешем API-ключа або null. */
-  async authTenant(apiKeyHash: string): Promise<string | null> {
-    const [row]: Array<{ id: string | null }> = await this.ds.query(
-      'SELECT auth_tenant($1) AS id',
+  /**
+   * Тенант за sha256-хешем API-ключа разом з його ефективними лімітами (`auth_tenant`) або null.
+   */
+  async authTenant(
+    apiKeyHash: string,
+  ): Promise<({ id: string } & EffectiveLimits) | null> {
+    const [row]: Array<{ id: string } & EffectiveLimits> = await this.ds.query(
+      'SELECT * FROM auth_tenant($1)',
       [apiKeyHash],
     );
-    return row?.id ?? null;
+    return row ?? null;
   }
 
   /**
@@ -145,6 +159,23 @@ export class SystemDb {
       [key, windowMs, cost],
     );
     return row;
+  }
+
+  /**
+   * Продовжує підписки інстансу API на виконання (`renew_realtime_watches`): відновлює відсутні,
+   * видаляє рядки інстансу поза переліком і порцію прострочених. Повертає кількість відновлених.
+   */
+  async renewRealtimeWatches(
+    instanceId: string,
+    executionIds: string[],
+    tenantIds: string[],
+    ttlMs: number,
+  ): Promise<number> {
+    const [row] = await this.ds.query<Array<{ restored: number }>>(
+      'SELECT renew_realtime_watches($1, $2::uuid[], $3::uuid[], $4) AS restored',
+      [instanceId, executionIds, tenantIds, ttlMs],
+    );
+    return row.restored;
   }
 
   /** Одна пачка очищення відер частоти запитів, чиє вікно скінчилось; кількість видалених. */

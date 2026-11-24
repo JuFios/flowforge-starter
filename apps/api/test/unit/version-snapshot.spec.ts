@@ -9,12 +9,12 @@ import {
 import { JobRunnerService } from '../../src/engine/job-runner.service';
 import { QueueMetrics } from '../../src/engine/queue.metrics';
 import { StepExecutor } from '../../src/engine/step-executor';
-import { Execution } from '../../src/entities';
 import { fakeTenantDb } from '../helpers/fake-tenant-db';
 
 /**
- * Воркер виконує лише знімок версії, зафіксований у виконанні. Пошук `{ id: undefined }` TypeORM
- * виконує без умови й повертає першу-ліпшу версію — тож без знімку виконання не можна запускати.
+ * Воркер виконує лише знімок версії, зафіксований у виконанні. Кроки він читає за
+ * `executions."workflowVersionId"` (CheckpointService.resume); без знімку `steps` — null, і виконання
+ * не можна запускати жодною іншою версією.
  */
 describe('worker without a workflow version snapshot', () => {
   beforeEach(() => {
@@ -25,11 +25,8 @@ describe('worker without a workflow version snapshot', () => {
   afterEach(() => jest.restoreAllMocks());
 
   it('fails the execution for good instead of running some other version', async () => {
-    const anyVersion = jest.fn().mockResolvedValue({
-      id: 'v-other',
-      steps: [{ id: 'say', type: 'log', message: 'wrong workflow' }],
-    });
     const fail = jest.fn().mockResolvedValue('failed');
+    const execute = jest.fn();
     const config = {
       get: (key: keyof EnvironmentVariables) =>
         ({ JOB_LEASE_MS: 60_000 })[key as string],
@@ -38,16 +35,12 @@ describe('worker without a workflow version snapshot', () => {
       {
         heartbeat: jest.fn().mockResolvedValue(true),
       } as unknown as JobQueueService,
-      { execute: jest.fn() } as unknown as StepExecutor,
-      fakeTenantDb({
-        findOneOrFail: jest.fn((entity: unknown) =>
-          entity === Execution
-            ? Promise.resolve({ id: 'e-1', input: {}, workflowVersionId: null })
-            : (anyVersion() as Promise<unknown>),
-        ) as never,
-      }),
+      { execute } as unknown as StepExecutor,
+      fakeTenantDb({}),
       {
-        load: jest.fn().mockResolvedValue([]),
+        resume: jest
+          .fn()
+          .mockResolvedValue({ input: {}, steps: null, history: [] }),
         startStep: jest.fn().mockRejectedValue(new Error('must not start')),
         fail,
       } as unknown as CheckpointService,
@@ -66,7 +59,7 @@ describe('worker without a workflow version snapshot', () => {
       leaseStartedAt: performance.now(),
     } as ClaimedJob);
 
-    expect(anyVersion).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
     expect(fail).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'j-1' }),
       undefined,

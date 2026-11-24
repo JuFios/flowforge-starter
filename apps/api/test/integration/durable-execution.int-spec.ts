@@ -82,7 +82,7 @@ describe('durable execution', () => {
     const queue = worker.app.get(JobQueueService);
     const job = await queue.claimNext('test');
     jest
-      .spyOn(worker.app.get(CheckpointService), 'load')
+      .spyOn(worker.app.get(CheckpointService), 'resume')
       .mockRejectedValueOnce(new Error('read timeout'));
     await worker.app.get(JobRunnerService).process(job!);
     expect(

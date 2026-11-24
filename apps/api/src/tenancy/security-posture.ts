@@ -56,6 +56,10 @@ export const POSTURE: {
         [SYSTEM_ROLE]: ['SELECT', 'UPDATE', 'DELETE'],
       },
     },
+    realtime_watches: {
+      tenantColumn: 'tenantId',
+      grants: { [API_ROLE]: ALL_TABLE, [SYSTEM_ROLE]: ALL_TABLE },
+    },
     tenants: {
       tenantColumn: 'id',
       grants: {
@@ -155,9 +159,15 @@ export const POSTURE: {
       execute: [API_ROLE],
     },
     'bump_execution_revision()': { owner: MIGRATION_OWNER, execute: [] },
-    'notify_execution()': { owner: MIGRATION_OWNER, execute: [] },
+    'notify_execution()': { owner: SYSTEM_ROLE, execute: [] },
+    'renew_realtime_watches(uuid,uuid[],uuid[],integer)': {
+      owner: SYSTEM_ROLE,
+      execute: [API_ROLE],
+    },
     'touch_step_execution()': { owner: MIGRATION_OWNER, execute: [] },
     'notify_session_revoked()': { owner: MIGRATION_OWNER, execute: [] },
+    'notify_jobs_ready()': { owner: MIGRATION_OWNER, execute: [] },
+    'notify_outbox_ready()': { owner: MIGRATION_OWNER, execute: [] },
     'auth_tenant(text)': { owner: SYSTEM_ROLE, execute: [API_ROLE] },
     'webhook_tenant(uuid)': { owner: SYSTEM_ROLE, execute: [API_ROLE] },
     'due_schedule_tenants(uuid,integer)': {
